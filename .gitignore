@@ -1,0 +1,76 @@
+# ============ 敏感配置 ============
+# 真实 API key 所在文件，绝不上传
+.env
+.env.local
+.env.*.local
+backend/.env
+
+# ============ Python ============
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+# 虚拟环境
+.venv/
+venv/
+env/
+ENV/
+backend/.venv/
+backend/.lock
+backend/CACHEDIR.TAG
+
+# 构建与分发
+build/
+dist/
+*.egg-info/
+*.egg
+.eggs/
+
+# 测试与覆盖率
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.mypy_cache/
+.ruff_cache/
+
+# ============ Node / 前端 ============
+node_modules/
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+*.tsbuildinfo
+
+# ============ 业务数据与上传文件（含真实单据，不上传） ============
+uploads/
+backend/uploads/
+_extracted_imgs/
+20260710资料样本/
+
+# ============ 数据库与运行时数据 ============
+*.sqlite
+*.sqlite3
+*.db
+neo4j_data/
+postgres_data/
+
+# ============ 日志与临时文件 ============
+*.log
+logs/
+*.tmp
+*.swp
+*.bak
+tmp/
+
+# ============ IDE / 编辑器 ============
+.idea/
+.vscode/
+*.code-workspace
+.DS_Store
+Thumbs.db
+
+# ============ Docker ============
+# docker-compose 本身要上传，但卷数据不上传
+docker-volumes/

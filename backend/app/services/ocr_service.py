@@ -1,0 +1,213 @@
+"""OCR 与文本提取服务。
+
+策略：
+- 文本型 PDF：pdfplumber 直接提取文本（不调 OCR）
+- 扫描型 PDF：用 PyMuPDF 把每页渲染成图片，逐页调通义千问 VL
+- 图片（PNG/JPG）：直接调通义千问 VL
+- DOCX：python-docx 提取段落文本
+- 提取结果统一为 {text, has_stamp, fields, confidence, success}
+"""
+
+from __future__ import annotations
+
+import io
+import logging
+from pathlib import Path
+from typing import Optional
+
+from ..config import settings
+from ..constants import FIELD_TEMPLATES, STAMP_REQUIREMENTS
+from ..llm_client import LLMError, get_llm_client
+from ..models import Document
+from ..ocr_client import get_ocr_client
+
+logger = logging.getLogger(__name__)
+
+
+def _extract_text_pdf(pdf_path: str) -> str:
+    """文本型 PDF 直接提取文本。"""
+    import pdfplumber
+
+    parts: list[str] = []
+    with pdfplumber.open(pdf_path) as pdf:
+        for page in pdf.pages:
+            t = page.extract_text() or ""
+            if t.strip():
+                parts.append(t)
+    return "\n".join(parts)
+
+
+def _is_scanned_pdf(pdf_path: str, min_chars: int = 50) -> bool:
+    """判断 PDF 是否为扫描件（文本提取几乎为空）。"""
+    try:
+        text = _extract_text_pdf(pdf_path)
+        return len(text.strip()) < min_chars
+    except Exception:
+        return True  # 提取失败按扫描件处理
+
+
+def _pdf_pages_to_images(pdf_path: str, dpi: int = 200) -> list[bytes]:
+    """把 PDF 每页渲染成 PNG 字节流。"""
+    import fitz  # PyMuPDF
+
+    images: list[bytes] = []
+    doc = fitz.open(pdf_path)
+    try:
+        for page in doc:
+            mat = fitz.Matrix(dpi / 72, dpi / 72)
+            pix = page.get_pixmap(matrix=mat)
+            images.append(pix.tobytes("png"))
+    finally:
+        doc.close()
+    return images
+
+
+def _extract_docx(docx_path: str) -> str:
+    """从 DOCX 提取文本。"""
+    from docx import Document as DocxDocument
+
+    doc = DocxDocument(docx_path)
+    return "\n".join(p.text for p in doc.paragraphs if p.text.strip())
+
+
+def _llm_extract_fields_from_text(
+    text: str, doc_type: str, field_template: list[str]
+) -> dict:
+    """对文本型 PDF/DOCX，调用 LLM 提取结构化字段。
+
+    返回 {fields: {...}, has_stamp: bool|null, confidence: float}
+    """
+    if not text.strip() or not field_template:
+        return {"fields": {}, "has_stamp": None, "confidence": 0.0}
+
+    llm = get_llm_client()
+    system_prompt = (
+        "你是贸易单证字段提取助手。从给定文本中按字段列表提取结构化信息。\n"
+        "严格输出 JSON: {\"fields\": {字段名: 值}, \"has_stamp\": true|false|null, "
+        "\"confidence\": 0-1}\n"
+        "has_stamp: 文本中是否提及印章/盖章/用印；无法判断时填 null。\n"
+        "confidence: 整体提取置信度。"
+    )
+    user_prompt = (
+        f"文件类型: {doc_type}\n"
+        f"需提取字段: {', '.join(field_template)}\n"
+        f"文本内容:\n{text[:4000]}"
+    )
+    try:
+        resp = llm.chat_json(
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            temperature=0.1,
+            max_tokens=2048,
+        )
+        return {
+            "fields": resp.get("fields", {}) or {},
+            "has_stamp": resp.get("has_stamp"),
+            "confidence": float(resp.get("confidence", 0.0)),
+        }
+    except LLMError as e:
+        logger.warning("LLM 字段提取失败 [%s]: %s", doc_type, e)
+        return {"fields": {}, "has_stamp": None, "confidence": 0.0}
+
+
+def process_document(doc: Document) -> dict:
+    """处理单个文档：根据类型选择 OCR 或文本提取，回写 doc 记录。
+
+    Returns:
+        {
+            "success": bool,
+            "text": str,
+            "has_stamp": bool | None,
+            "fields": dict,
+            "confidence": float,
+            "error": str (仅失败时)
+        }
+    """
+    path = Path(doc.file_path)
+    if not path.exists():
+        return {"success": False, "error": f"文件不存在: {doc.file_path}"}
+
+    field_template = FIELD_TEMPLATES.get(doc.doc_type, [])
+    stamp_required = STAMP_REQUIREMENTS.get(doc.doc_type)
+
+    try:
+        if doc.file_type == "pdf":
+            if _is_scanned_pdf(str(path)):
+                # 扫描型 PDF：逐页 OCR
+                return _ocr_scanned_pdf(str(path), doc.doc_type, field_template)
+            else:
+                # 文本型 PDF：直接提取 + LLM 字段提取
+                text = _extract_text_pdf(str(path))
+                ext = _llm_extract_fields_from_text(text, doc.doc_type, field_template)
+                return {
+                    "success": True,
+                    "text": text,
+                    "has_stamp": ext["has_stamp"],
+                    "fields": ext["fields"],
+                    "confidence": ext["confidence"],
+                }
+        elif doc.file_type in ("png", "jpg"):
+            return _ocr_image(str(path), doc.doc_type, field_template)
+        elif doc.file_type == "docx":
+            text = _extract_docx(str(path))
+            ext = _llm_extract_fields_from_text(text, doc.doc_type, field_template)
+            return {
+                "success": True,
+                "text": text,
+                "has_stamp": ext["has_stamp"],
+                "fields": ext["fields"],
+                "confidence": ext["confidence"],
+            }
+        else:
+            return {"success": False, "error": f"不支持的文件类型: {doc.file_type}"}
+    except Exception as e:
+        logger.error("处理文档 %s 失败: %s", doc.file_name, e, exc_info=True)
+        return {"success": False, "error": f"处理失败: {e}"}
+
+
+def _ocr_image(image_path: str, doc_type: str, field_template: list[str]) -> dict:
+    """对单张图片调用通义千问 VL OCR。"""
+    ocr = get_ocr_client()
+    return ocr.recognize(image_path, doc_type_hint=doc_type, field_template=field_template)
+
+
+def _ocr_scanned_pdf(
+    pdf_path: str, doc_type: str, field_template: list[str]
+) -> dict:
+    """扫描型 PDF：逐页转图片 OCR，合并结果。"""
+    import tempfile
+
+    ocr = get_ocr_client()
+    pages = _pdf_pages_to_images(pdf_path)
+    if not pages:
+        return {"success": False, "error": "PDF 无页面"}
+
+    all_text: list[str] = []
+    merged_fields: dict = {}
+    has_stamp_any: Optional[bool] = None
+    confidences: list[float] = []
+
+    with tempfile.TemporaryDirectory() as tmp:
+        for i, page_bytes in enumerate(pages):
+            tmp_img = Path(tmp) / f"page_{i}.png"
+            tmp_img.write_bytes(page_bytes)
+            r = ocr.recognize(str(tmp_img), doc_type_hint=doc_type, field_template=field_template)
+            if r.get("success"):
+                all_text.append(r.get("text", ""))
+                merged_fields.update(r.get("fields", {}) or {})
+                if r.get("has_stamp") is True:
+                    has_stamp_any = True
+                elif r.get("has_stamp") is False and has_stamp_any is not True:
+                    has_stamp_any = False
+                confidences.append(float(r.get("confidence", 0.0)))
+
+    avg_conf = sum(confidences) / len(confidences) if confidences else 0.0
+    return {
+        "success": True,
+        "text": "\n".join(all_text),
+        "has_stamp": has_stamp_any,
+        "fields": merged_fields,
+        "confidence": avg_conf,
+    }
