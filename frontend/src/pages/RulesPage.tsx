@@ -1,15 +1,19 @@
 import { useState, useEffect, useMemo } from 'react'
+import type { UploadProps, UploadFile } from 'antd'
 import {
   Card, Row, Col, Table, Tag, Button, Modal, Form, Input, InputNumber, Switch,
   Select, Space, message, Typography, Tooltip, Popconfirm, Tabs, List, Spin, Alert,
+  Upload,
 } from 'antd'
-import { PlusOutlined, EditOutlined, DeleteOutlined, ThunderboltOutlined, HistoryOutlined, ImportOutlined } from '@ant-design/icons'
+import { PlusOutlined, EditOutlined, DeleteOutlined, ThunderboltOutlined, HistoryOutlined, ImportOutlined, InboxOutlined, FileTextOutlined } from '@ant-design/icons'
 import { rulesApi, graphApi, constantsApi } from '../api/client'
-import type { Rule, RuleSnapshot, DocTypeMeta, ConstantsResponse, RuleImportResponse } from '../types'
+import type { Rule, RuleSnapshot, DocTypeMeta, ConstantsResponse, RuleImportResponse, RuleDocumentImportResponse } from '../types'
 import dayjs from 'dayjs'
 
 const { Title, Text } = Typography
+const { Dragger } = Upload
 const CHECK_CATEGORIES = ['齐套性', '基础判断', '信息准确性', '时间逻辑']
+const FILE_ACCEPT = '.pdf,.xlsx,.xls,.docx,.md,.txt'
 
 export default function RulesPage() {
   const [rules, setRules] = useState<Rule[]>([])
@@ -21,9 +25,13 @@ export default function RulesPage() {
   const [editing, setEditing] = useState<Rule | null>(null)
   const [form] = Form.useForm()
   const [importOpen, setImportOpen] = useState(false)
+  const [importMode, setImportMode] = useState<'text' | 'file'>('text')
   const [importText, setImportText] = useState('')
   const [importing, setImporting] = useState(false)
   const [importResult, setImportResult] = useState<RuleImportResponse | null>(null)
+  // 文件导入
+  const [importFile, setImportFile] = useState<File | null>(null)
+  const [fileImportResult, setFileImportResult] = useState<RuleDocumentImportResponse | null>(null)
 
   const load = async () => {
     setLoading(true)
@@ -134,6 +142,9 @@ export default function RulesPage() {
   const openImport = () => {
     setImportText('')
     setImportResult(null)
+    setImportFile(null)
+    setFileImportResult(null)
+    setImportMode('text')
     setImportOpen(true)
   }
 
@@ -158,6 +169,59 @@ export default function RulesPage() {
     } finally {
       setImporting(false)
     }
+  }
+
+  /** 文件导入：支持 PDF/Excel/Word/MD/TXT，后端解析为文本后调用 LLM 转规则 */
+  const handleImportFile = async () => {
+    if (!importFile) {
+      message.warning('请先选择要导入的规则文档')
+      return
+    }
+    setImporting(true)
+    setFileImportResult(null)
+    try {
+      const resp = await rulesApi.importDocument(importFile)
+      setFileImportResult(resp)
+      if (resp.imported > 0) {
+        message.success(`导入完成：成功 ${resp.imported} 条，跳过 ${resp.skipped} 条`)
+        await load()
+      } else {
+        message.warning(`未导入任何规则，跳过 ${resp.skipped} 条`)
+      }
+    } catch (e: any) {
+      message.error('文件导入失败: ' + (e?.response?.data?.detail || e?.message || e))
+    } finally {
+      setImporting(false)
+    }
+  }
+
+  // 文件上传组件 props：单文件，手动触发上传
+  const fileUploadProps: UploadProps = {
+    accept: FILE_ACCEPT,
+    multiple: false,
+    maxCount: 1,
+    showUploadList: true,
+    fileList: importFile
+      ? [
+          {
+            uid: '-1',
+            name: importFile.name,
+            size: importFile.size,
+            type: importFile.type,
+            status: 'done',
+            originFileObj: importFile as any,
+          } as UploadFile,
+        ]
+      : [],
+    beforeUpload: (file) => {
+      setImportFile(file as File)
+      setFileImportResult(null)
+      return false // 阻止自动上传
+    },
+    onRemove: () => {
+      setImportFile(null)
+      setFileImportResult(null)
+    },
   }
 
   // 二维表格渲染
@@ -388,55 +452,158 @@ export default function RulesPage() {
         title="批量导入规则"
         open={importOpen}
         onCancel={() => setImportOpen(false)}
-        width={720}
-        footer={[
-          <Button key="cancel" onClick={() => setImportOpen(false)}>关闭</Button>,
-          <Button key="submit" type="primary" loading={importing} onClick={handleImport}>
-            开始解析并导入
-          </Button>,
-        ]}
+        width={760}
+        footer={null}
+        destroyOnClose
       >
-        <Alert
-          type="info"
-          showIcon
-          style={{ marginBottom: 12 }}
-          message="粘贴自然语言规则清单，系统会调用大模型解析为结构化规则并自动入库"
-          description={
-            <span style={{ fontSize: 12 }}>
-              可用文件类型：{docTypes.map((d) => d.name).join('、')}<br />
-              可用检查项：{CHECK_CATEGORIES.join('、')}
-            </span>
-          }
+        <Tabs
+          activeKey={importMode}
+          onChange={(k) => setImportMode(k as 'text' | 'file')}
+          items={[
+            {
+              key: 'text',
+              label: <span><ImportOutlined /> 文本导入</span>,
+              children: (
+                <>
+                  <Alert
+                    type="info"
+                    showIcon
+                    style={{ marginBottom: 12 }}
+                    message="粘贴自然语言规则清单，系统会调用大模型解析为结构化规则并自动入库"
+                    description={
+                      <span style={{ fontSize: 12 }}>
+                        可用文件类型：{docTypes.map((d) => d.name).join('、')}<br />
+                        可用检查项：{CHECK_CATEGORIES.join('、')}
+                      </span>
+                    }
+                  />
+                  <Input.TextArea
+                    rows={10}
+                    value={importText}
+                    onChange={(e) => setImportText(e.target.value)}
+                    placeholder={`请粘贴规则清单，例如：\n1. 代理协议的协议方应与委托出口确认单的委托方一致\n2. 出口报关单数量应不大于委托出口确认单数量（金额容差5%）\n3. 代理协议必须双方回签用印\n4. 委托出口确认单签订日期应在代理协议有效期内`}
+                    disabled={importing}
+                  />
+                  <div style={{ marginTop: 12, textAlign: 'right' }}>
+                    <Space>
+                      <Button onClick={() => setImportOpen(false)}>关闭</Button>
+                      <Button type="primary" loading={importing} onClick={handleImport}>
+                        开始解析并导入
+                      </Button>
+                    </Space>
+                  </div>
+                  {importResult && (
+                    <div style={{ marginTop: 12 }}>
+                      <Space>
+                        <Tag color="blue">解析 {importResult.total} 条</Tag>
+                        <Tag color="green">成功 {importResult.imported} 条</Tag>
+                        {importResult.skipped > 0 && <Tag color="orange">跳过 {importResult.skipped} 条</Tag>}
+                      </Space>
+                      {importResult.errors.length > 0 && (
+                        <Alert
+                          type="warning"
+                          showIcon
+                          style={{ marginTop: 8 }}
+                          message="跳过的规则及原因"
+                          description={
+                            <ul style={{ margin: 0, paddingLeft: 20, fontSize: 12 }}>
+                              {importResult.errors.map((err, i) => <li key={i}>{err}</li>)}
+                            </ul>
+                          }
+                        />
+                      )}
+                    </div>
+                  )}
+                </>
+              ),
+            },
+            {
+              key: 'file',
+              label: <span><FileTextOutlined /> 文件导入</span>,
+              children: (
+                <>
+                  <Alert
+                    type="info"
+                    showIcon
+                    style={{ marginBottom: 12 }}
+                    message="上传规则描述文档，后端会先解析为文本，再调用大模型解析为结构化规则"
+                    description={
+                      <span style={{ fontSize: 12 }}>
+                        支持格式：PDF、Excel(.xlsx/.xls)、Word(.docx)、Markdown(.md)、文本(.txt)<br />
+                        可用文件类型：{docTypes.map((d) => d.name).join('、')} · 可用检查项：{CHECK_CATEGORIES.join('、')}
+                      </span>
+                    }
+                  />
+                  <Dragger {...fileUploadProps} disabled={importing}>
+                    <p className="ant-upload-drag-icon"><InboxOutlined /></p>
+                    <p className="ant-upload-text">{importing ? '解析中...' : '点击或拖拽文件到此区域'}</p>
+                    <p className="ant-upload-hint">单文件上传，解析后可查看提取的文本预览</p>
+                  </Dragger>
+                  <div style={{ marginTop: 12, textAlign: 'right' }}>
+                    <Space>
+                      <Button onClick={() => setImportOpen(false)}>关闭</Button>
+                      <Button
+                        type="primary"
+                        loading={importing}
+                        onClick={handleImportFile}
+                        disabled={!importFile}
+                      >
+                        开始解析并导入
+                      </Button>
+                    </Space>
+                  </div>
+                  {fileImportResult && (
+                    <div style={{ marginTop: 12 }}>
+                      <Space wrap>
+                        <Tag color="blue">解析 {fileImportResult.total} 条</Tag>
+                        <Tag color="green">成功 {fileImportResult.imported} 条</Tag>
+                        {fileImportResult.skipped > 0 && <Tag color="orange">跳过 {fileImportResult.skipped} 条</Tag>}
+                        <Tag color="purple">提取文本长度 {fileImportResult.extracted_text_length} 字符</Tag>
+                        <Tag>来源: {fileImportResult.source_filename}</Tag>
+                      </Space>
+                      {fileImportResult.extracted_text_preview && (
+                        <Card
+                          size="small"
+                          type="inner"
+                          title={<Text type="secondary" style={{ fontSize: 12 }}>提取文本预览（前 500 字符）</Text>}
+                          style={{ marginTop: 8 }}
+                        >
+                          <pre style={{
+                            maxHeight: 160,
+                            overflow: 'auto',
+                            margin: 0,
+                            padding: 8,
+                            background: '#f6f8fa',
+                            borderRadius: 4,
+                            fontSize: 12,
+                            fontFamily: 'monospace',
+                            whiteSpace: 'pre-wrap',
+                            wordBreak: 'break-word',
+                          }}>
+                            {fileImportResult.extracted_text_preview}
+                          </pre>
+                        </Card>
+                      )}
+                      {fileImportResult.errors.length > 0 && (
+                        <Alert
+                          type="warning"
+                          showIcon
+                          style={{ marginTop: 8 }}
+                          message="跳过的规则及原因"
+                          description={
+                            <ul style={{ margin: 0, paddingLeft: 20, fontSize: 12 }}>
+                              {fileImportResult.errors.map((err, i) => <li key={i}>{err}</li>)}
+                            </ul>
+                          }
+                        />
+                      )}
+                    </div>
+                  )}
+                </>
+              ),
+            },
+          ]}
         />
-        <Input.TextArea
-          rows={10}
-          value={importText}
-          onChange={(e) => setImportText(e.target.value)}
-          placeholder={`请粘贴规则清单，例如：\n1. 代理协议的协议方应与委托出口确认单的委托方一致\n2. 出口报关单数量应不大于委托出口确认单数量（金额容差5%）\n3. 代理协议必须双方回签用印\n4. 委托出口确认单签订日期应在代理协议有效期内`}
-          disabled={importing}
-        />
-        {importResult && (
-          <div style={{ marginTop: 12 }}>
-            <Space>
-              <Tag color="blue">解析 {importResult.total} 条</Tag>
-              <Tag color="green">成功 {importResult.imported} 条</Tag>
-              {importResult.skipped > 0 && <Tag color="orange">跳过 {importResult.skipped} 条</Tag>}
-            </Space>
-            {importResult.errors.length > 0 && (
-              <Alert
-                type="warning"
-                showIcon
-                style={{ marginTop: 8 }}
-                message="跳过的规则及原因"
-                description={
-                  <ul style={{ margin: 0, paddingLeft: 20, fontSize: 12 }}>
-                    {importResult.errors.map((err, i) => <li key={i}>{err}</li>)}
-                  </ul>
-                }
-              />
-            )}
-          </div>
-        )}
       </Modal>
     </div>
   )

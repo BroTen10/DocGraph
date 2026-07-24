@@ -214,7 +214,19 @@ export default function ResultsPage() {
                       </Space>
                       <div style={{ fontSize: 12, color: '#888', marginTop: 4 }}>
                         {dayjs(t.start_time).format('YYYY-MM-DD HH:mm:ss')}
-                        {t.end_time && ` - ${dayjs(t.end_time).format('HH:mm:ss')}`}
+                        {t.end_time && (() => {
+                          const durMs = dayjs(t.end_time).diff(dayjs(t.start_time))
+                          if (durMs < 0) return null
+                          let durText: string
+                          if (durMs < 1000) durText = `${durMs}ms`
+                          else if (durMs < 60000) durText = `${(durMs / 1000).toFixed(1)}s`
+                          else {
+                            const m = Math.floor(durMs / 60000)
+                            const s = Math.floor((durMs % 60000) / 1000)
+                            durText = `${m}分${s}秒`
+                          }
+                          return <Text type="secondary" style={{ marginLeft: 6 }}>耗时 {durText}</Text>
+                        })()}
                       </div>
                       {t.status === 'completed' && t.summary && (
                         <div style={{ fontSize: 12, marginTop: 4 }}>

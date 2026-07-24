@@ -26,6 +26,10 @@ class DocumentBrief(BaseModel):
     ocr_confidence: float | None = None
     has_stamp: bool | None = None
     extracted_fields: dict[str, Any] = Field(default_factory=dict)
+    # OCR 识别的原始文本（用于前端对照查看）
+    ocr_text: str | None = None
+    # 字段提取时间
+    extracted_at: datetime | None = None
 
 
 class ContractBrief(BaseModel):

@@ -1,107 +1,90 @@
-import { useState, useEffect, useMemo, useRef } from 'react'
+/**
+ * 图谱确认页面（重构版）
+ *
+ * 布局参考 MiroFish-Explorer：
+ * - 左侧（~65%）：ECharts 力导向图谱
+ * - 右侧（~35%）：任务进度 / 工作区 / 规则文档导入
+ *
+ * 功能：
+ * 1. 从规则文档（PDF/EXCEL/WORD/MD）导入规则
+ * 2. 异步构建图谱 + 实时进度追踪
+ * 3. 图谱可视化（节点按类型着色、按度数缩放、曲线边）
+ * 4. 节点/边选中、编辑、删除（保留原有功能）
+ */
+
+import { useState, useEffect, useRef, useCallback } from 'react'
 import {
   Card, Row, Col, Button, Space, message, Typography, Empty, Spin, Tag,
-  Modal, Form, Input, Statistic, Drawer, Descriptions, Popconfirm, Alert,
+  Modal, Form, Input, Statistic, Descriptions, Popconfirm, Alert,
+  Upload, Progress, Timeline, List, Tabs, Badge, Divider, Tooltip,
 } from 'antd'
-import { ReloadOutlined, CheckCircleOutlined, DeleteOutlined, EditOutlined } from '@ant-design/icons'
-import { graphApi } from '../api/client'
-import type { GraphData, GraphNode, GraphEdge } from '../types'
+import {
+  ReloadOutlined, CheckCircleOutlined, DeleteOutlined, EditOutlined,
+  ThunderboltOutlined, UploadOutlined, FileTextOutlined, ClockCircleOutlined,
+  BulbOutlined, NodeIndexOutlined, ApartmentOutlined,
+} from '@ant-design/icons'
+import type { UploadProps } from 'antd'
+import { graphApi, rulesApi } from '../api/client'
+import type { GraphData, GraphEdge, GraphBuildTaskStatus, RuleDocumentImportResponse, Rule, RuleSnapshot } from '../types'
+import GraphView from '../components/GraphView'
+import dayjs from 'dayjs'
 
-const { Title, Text } = Typography
+const { Title, Text, Paragraph } = Typography
 
-// 简单的力导向布局：圆形分布 + 轻量迭代
-interface PositionedNode {
-  id: string | number
-  name: string
-  type: string
-  properties: Record<string, unknown>
-  x: number
-  y: number
-  lowConfidence?: boolean
+/** 构建任务状态颜色 */
+const BUILD_STATUS_COLOR: Record<string, string> = {
+  running: 'processing',
+  completed: 'success',
+  failed: 'error',
 }
 
-const WIDTH = 760
-const HEIGHT = 560
-const ITERATIONS = 200
-
-function layoutGraph(nodes: GraphNode[], edges: GraphEdge[]): PositionedNode[] {
-  if (nodes.length === 0) return []
-  const positioned: PositionedNode[] = nodes.map((n, i) => {
-    const angle = (i / nodes.length) * 2 * Math.PI
-    return {
-      id: n.id ?? n.name,
-      name: n.name,
-      type: n.type,
-      properties: n.properties || {},
-      x: WIDTH / 2 + Math.cos(angle) * 180,
-      y: HEIGHT / 2 + Math.sin(angle) * 180,
-      lowConfidence: Boolean((n.properties as any)?.low_confidence),
-    }
-  })
-  const nameToNode = new Map(positioned.map((n) => [n.name, n]))
-
-  // 简单力导向迭代
-  const k = 80 // 理想距离
-  for (let iter = 0; iter < ITERATIONS; iter++) {
-    const disp: Record<string, { x: number; y: number }> = {}
-    positioned.forEach((n) => (disp[n.name] = { x: 0, y: 0 }))
-
-    // 斥力
-    for (let i = 0; i < positioned.length; i++) {
-      for (let j = i + 1; j < positioned.length; j++) {
-        const a = positioned[i], b = positioned[j]
-        let dx = a.x - b.x, dy = a.y - b.y
-        let dist = Math.sqrt(dx * dx + dy * dy) || 0.01
-        const force = (k * k) / dist
-        dx = (dx / dist) * force
-        dy = (dy / dist) * force
-        disp[a.name].x += dx
-        disp[a.name].y += dy
-        disp[b.name].x -= dx
-        disp[b.name].y -= dy
-      }
-    }
-    // 引力（边）
-    edges.forEach((e) => {
-      const a = nameToNode.get(e.source)
-      const b = nameToNode.get(e.target)
-      if (!a || !b) return
-      let dx = a.x - b.x, dy = a.y - b.y
-      let dist = Math.sqrt(dx * dx + dy * dy) || 0.01
-      const force = (dist * dist) / k
-      dx = (dx / dist) * force
-      dy = (dy / dist) * force
-      disp[a.name].x -= dx
-      disp[a.name].y -= dy
-      disp[b.name].x += dx
-      disp[b.name].y += dy
-    })
-
-    // 应用位移（带温度衰减）
-    const temperature = Math.max(0.5, 30 * (1 - iter / ITERATIONS))
-    positioned.forEach((n) => {
-      const d = disp[n.name]
-      const dist = Math.sqrt(d.x * d.x + d.y * d.y) || 0.01
-      n.x += (d.x / dist) * Math.min(dist, temperature)
-      n.y += (d.y / dist) * Math.min(dist, temperature)
-      // 边界
-      n.x = Math.max(40, Math.min(WIDTH - 40, n.x))
-      n.y = Math.max(40, Math.min(HEIGHT - 40, n.y))
-    })
-  }
-  return positioned
+/** 消息级别颜色 */
+const MSG_LEVEL_COLOR: Record<string, string> = {
+  info: 'blue',
+  success: 'green',
+  warning: 'orange',
+  error: 'red',
 }
 
 export default function GraphPage() {
+  // 图谱数据
   const [graph, setGraph] = useState<GraphData | null>(null)
   const [loading, setLoading] = useState(false)
-  const [selectedNode, setSelectedNode] = useState<PositionedNode | null>(null)
+
+  // 选中状态
+  const [selectedNodeName, setSelectedNodeName] = useState<string | null>(null)
   const [selectedEdge, setSelectedEdge] = useState<GraphEdge | null>(null)
+
+  // 编辑
   const [editOpen, setEditOpen] = useState(false)
   const [editForm] = Form.useForm()
-  const [editTarget, setEditTarget] = useState<{ kind: 'node' | 'edge'; name?: string; source?: string; target?: string } | null>(null)
+  const [editTarget, setEditTarget] = useState<{
+    kind: 'node' | 'edge'
+    name?: string
+    source?: string
+    target?: string
+  } | null>(null)
 
-  const load = async () => {
+  // 异步构建
+  const [buildTask, setBuildTask] = useState<GraphBuildTaskStatus | null>(null)
+  const [buildTasks, setBuildTasks] = useState<GraphBuildTaskStatus[]>([])
+  const [building, setBuilding] = useState(false)
+  const pollTimerRef = useRef<ReturnType<typeof setInterval> | null>(null)
+
+  // 规则文档导入
+  const [importing, setImporting] = useState(false)
+  const [importResult, setImportResult] = useState<RuleDocumentImportResponse | null>(null)
+
+  // 工作区
+  const [rules, setRules] = useState<Rule[]>([])
+  const [snapshots, setSnapshots] = useState<RuleSnapshot[]>([])
+  const [activeTab, setActiveTab] = useState('progress')
+
+  // 选中的节点详情
+  const selectedNode = graph?.nodes.find((n) => n.name === selectedNodeName) || null
+
+  // ============ 数据加载 ============
+  const loadGraph = useCallback(async () => {
     setLoading(true)
     try {
       const g = await graphApi.getLatest()
@@ -109,36 +92,167 @@ export default function GraphPage() {
     } catch (e: any) {
       if (e?.response?.status === 404) {
         setGraph(null)
-        message.info('暂无图谱，请先到"规则管理"页面构建图谱')
       } else {
         message.error('加载图谱失败: ' + (e?.message || e))
       }
     } finally {
       setLoading(false)
     }
+  }, [])
+
+  const loadWorkspace = useCallback(async () => {
+    try {
+      const [rulesData, snapsData] = await Promise.all([
+        rulesApi.list({ enabled_only: true }),
+        rulesApi.listSnapshots(),
+      ])
+      setRules(rulesData)
+      setSnapshots(snapsData)
+    } catch {
+      // 静默
+    }
+  }, [])
+
+  const loadBuildTasks = useCallback(async () => {
+    try {
+      const tasks = await graphApi.listBuildTasks(10)
+      setBuildTasks(tasks)
+      // 如果有正在运行的任务，自动选中它
+      const running = tasks.find((t) => t.status === 'running')
+      if (running) {
+        setBuildTask(running)
+        setBuilding(true)
+      }
+    } catch {
+      // 静默
+    }
+  }, [])
+
+  useEffect(() => {
+    loadGraph()
+    loadWorkspace()
+    loadBuildTasks()
+  }, [loadGraph, loadWorkspace, loadBuildTasks])
+
+  // ============ 异步构建轮询 ============
+  const startPolling = useCallback((taskId: string) => {
+    if (pollTimerRef.current) clearInterval(pollTimerRef.current)
+
+    const poll = async () => {
+      try {
+        const status = await graphApi.getBuildStatus(taskId)
+        setBuildTask(status)
+
+        if (status.status === 'completed') {
+          setBuilding(false)
+          if (pollTimerRef.current) {
+            clearInterval(pollTimerRef.current)
+            pollTimerRef.current = null
+          }
+          message.success(`图谱构建完成：${status.node_count} 节点 / ${status.edge_count} 关系`)
+          // 刷新图谱和工作区
+          await loadGraph()
+          await loadWorkspace()
+          await loadBuildTasks()
+        } else if (status.status === 'failed') {
+          setBuilding(false)
+          if (pollTimerRef.current) {
+            clearInterval(pollTimerRef.current)
+            pollTimerRef.current = null
+          }
+          message.error('图谱构建失败: ' + (status.error || '未知错误'))
+        }
+      } catch {
+        // 忽略轮询错误
+      }
+    }
+
+    // 立即执行一次
+    poll()
+    // 每 1.5 秒轮询
+    pollTimerRef.current = setInterval(poll, 1500)
+  }, [loadGraph, loadWorkspace, loadBuildTasks])
+
+  // 清理轮询
+  useEffect(() => {
+    return () => {
+      if (pollTimerRef.current) clearInterval(pollTimerRef.current)
+    }
+  }, [])
+
+  // ============ 异步构建图谱 ============
+  const handleBuildAsync = async (autoConfirmAll = false) => {
+    if (building) {
+      message.warning('已有构建任务正在运行')
+      return
+    }
+    setBuilding(true)
+    setBuildTask(null)
+    setActiveTab('progress')
+    try {
+      const resp = await graphApi.buildAsync(autoConfirmAll)
+      message.info('图谱构建已启动，进度请看右侧面板')
+      startPolling(resp.task_id)
+    } catch (e: any) {
+      setBuilding(false)
+      message.error('启动构建失败: ' + (e?.response?.data?.detail || e?.message || e))
+    }
   }
 
-  useEffect(() => { load() }, [])
+  // ============ 规则文档导入 ============
+  const importUploadProps: UploadProps = {
+    name: 'file',
+    multiple: false,
+    showUploadList: false,
+    accept: '.pdf,.xlsx,.xls,.docx,.md,.txt',
+    beforeUpload: (file) => {
+      // 校验文件大小（10MB 限制）
+      const isUnderLimit = (file.size || 0) < 10 * 1024 * 1024
+      if (!isUnderLimit) {
+        message.error('文件大小不能超过 10MB')
+        return false
+      }
 
-  const positionedNodes = useMemo(() => {
-    if (!graph) return []
-    return layoutGraph(graph.nodes, graph.edges)
-  }, [graph])
+      setImporting(true)
+      setImportResult(null)
+      rulesApi
+        .importDocument(file)
+        .then((result) => {
+          setImportResult(result)
+          message.success(
+            `导入完成：共 ${result.total} 条，成功 ${result.imported} 条，跳过 ${result.skipped} 条`,
+          )
+          loadWorkspace()
+        })
+        .catch((e: any) => {
+          message.error('导入失败: ' + (e?.response?.data?.detail || e?.message || e))
+        })
+        .finally(() => {
+          setImporting(false)
+        })
 
-  const nodeByName = useMemo(() => new Map(positionedNodes.map((n) => [n.name, n])), [positionedNodes])
+      return false // 阻止自动上传
+    },
+  }
 
-  const openEditNode = (n: PositionedNode) => {
-    setEditTarget({ kind: 'node', name: n.name })
+  // ============ 图谱编辑（保留原有功能） ============
+  const openEditNode = (nodeName: string) => {
+    const node = graph?.nodes.find((n) => n.name === nodeName)
+    if (!node) return
+    setEditTarget({ kind: 'node', name: nodeName })
     editForm.setFieldsValue({
-      properties_json: JSON.stringify(n.properties, null, 2),
+      properties_json: JSON.stringify(node.properties || {}, null, 2),
     })
     setEditOpen(true)
   }
 
-  const openEditEdge = (e: GraphEdge) => {
-    setEditTarget({ kind: 'edge', source: e.source, target: e.target })
+  const openEditEdge = (source: string, target: string) => {
+    const edge = graph?.edges.find((e) => e.source === source && e.target === target)
+    if (!edge) return
+    setSelectedEdge(edge)
+    setEditTarget({ kind: 'edge', source, target })
     editForm.setFieldsValue({
-      properties_json: JSON.stringify(e.properties || {}, null, 2),
+      properties_json: JSON.stringify(edge.properties || {}, null, 2),
     })
     setEditOpen(true)
   }
@@ -166,12 +280,12 @@ export default function GraphPage() {
     if (!graph) return
     try {
       const edits: any[] = []
-      if (selectedNode) edits.push({ op: 'delete_node', node_name: selectedNode.name })
+      if (selectedNodeName) edits.push({ op: 'delete_node', node_name: selectedNodeName })
       if (selectedEdge) edits.push({ op: 'delete_edge', source: selectedEdge.source, target: selectedEdge.target })
       if (edits.length === 0) return
       const updated = await graphApi.confirm(graph.graph_id, edits)
       setGraph(updated)
-      setSelectedNode(null)
+      setSelectedNodeName(null)
       setSelectedEdge(null)
       message.success('已删除')
     } catch (e: any) {
@@ -179,134 +293,232 @@ export default function GraphPage() {
     }
   }
 
+  const confirmGraph = async () => {
+    if (!graph) return
+    try {
+      await graphApi.confirm(graph.graph_id, [])
+      message.success('已确认生效')
+    } catch (e: any) {
+      message.error('确认失败: ' + (e?.message || e))
+    }
+  }
+
+  // ============ 渲染 ============
   return (
     <div>
-      <Row justify="space-between" align="middle">
-        <Col><Title level={4}>图谱确认</Title></Col>
+      {/* 顶部工具栏 */}
+      <Row justify="space-between" align="middle" style={{ marginBottom: 16 }}>
+        <Col>
+          <Title level={4} style={{ marginBottom: 0 }}>
+            <ApartmentOutlined /> 知识图谱
+          </Title>
+        </Col>
         <Col>
           <Space>
-            <Button icon={<ReloadOutlined />} onClick={load} loading={loading}>刷新</Button>
-            <Popconfirm title="确认将当前图谱（含人工编辑）写入 Neo4j 生效？" onConfirm={async () => {
-              if (!graph) return
-              try {
-                await graphApi.confirm(graph.graph_id, [])
-                message.success('已确认生效')
-              } catch (e: any) {
-                message.error('确认失败: ' + (e?.message || e))
-              }
-            }}>
-              <Button type="primary" icon={<CheckCircleOutlined />}>确认生效</Button>
+            <Upload {...importUploadProps}>
+              <Button icon={<UploadOutlined />} loading={importing}>
+                导入规则文档
+              </Button>
+            </Upload>
+            <Button
+              type="primary"
+              icon={<ThunderboltOutlined />}
+              loading={building}
+              onClick={() => handleBuildAsync(false)}
+            >
+              构建图谱
+            </Button>
+            <Popconfirm
+              title="一键自动确认全部（忽略置信度）？"
+              onConfirm={() => handleBuildAsync(true)}
+              disabled={building}
+            >
+              <Button disabled={building}>自动确认构建</Button>
+            </Popconfirm>
+            <Button icon={<ReloadOutlined />} onClick={loadGraph} loading={loading}>
+              刷新图谱
+            </Button>
+            <Popconfirm title="确认将当前图谱写入 Neo4j 生效？" onConfirm={confirmGraph}>
+              <Button icon={<CheckCircleOutlined />}>确认生效</Button>
             </Popconfirm>
           </Space>
         </Col>
       </Row>
 
-      {loading ? (
-        <div style={{ textAlign: 'center', padding: 80 }}><Spin size="large" /></div>
-      ) : !graph ? (
-        <Empty description="暂无图谱" />
-      ) : (
-        <>
-          <Alert
-            type="info"
-            showIcon
-            style={{ marginBottom: 16 }}
-            message={`当前图谱：${graph.graph_id}（节点 ${graph.node_count} / 关系 ${graph.edge_count}）`}
-            description={'点击节点或边查看详情。黄色节点为低置信度（需人工确认）。编辑后点击"确认生效"写入 Neo4j。'}
-          />
-          <Row gutter={16}>
-            <Col span={16}>
-              <Card title="规则图谱可视化" bodyStyle={{ padding: 0 }}>
-                <svg width={WIDTH} height={HEIGHT} style={{ background: '#fafafa', display: 'block' }}>
-                  {/* 边 */}
-                  {graph.edges.map((e, i) => {
-                    const a = nodeByName.get(e.source)
-                    const b = nodeByName.get(e.target)
-                    if (!a || !b) return null
-                    const isSel = selectedEdge === e
-                    return (
-                      <g key={i} onClick={() => { setSelectedEdge(e); setSelectedNode(null) }} style={{ cursor: 'pointer' }}>
-                        <line
-                          x1={a.x} y1={a.y} x2={b.x} y2={b.y}
-                          stroke={isSel ? '#ff7a45' : '#bbb'} strokeWidth={isSel ? 2 : 1}
-                        />
-                        <text
-                          x={(a.x + b.x) / 2} y={(a.y + b.y) / 2}
-                          fontSize={9} fill="#888" textAnchor="middle"
-                          style={{ pointerEvents: 'none' }}
-                        >
-                          {(e.properties as any)?.operator || e.type}
-                        </text>
-                      </g>
-                    )
-                  })}
-                  {/* 节点 */}
-                  {positionedNodes.map((n) => {
-                    const isSel = selectedNode?.name === n.name
-                    const fill = n.lowConfidence ? '#faad14' : '#1890ff'
-                    return (
-                      <g key={n.name} onClick={() => { setSelectedNode(n); setSelectedEdge(null) }} style={{ cursor: 'pointer' }}>
-                        <circle
-                          cx={n.x} cy={n.y} r={isSel ? 14 : 10}
-                          fill={fill} stroke={isSel ? '#000' : '#fff'} strokeWidth={isSel ? 2 : 1}
-                        />
-                        <text x={n.x} y={n.y + 24} fontSize={10} fill="#333" textAnchor="middle" style={{ pointerEvents: 'none' }}>
-                          {n.name.length > 16 ? n.name.slice(0, 16) + '...' : n.name}
-                        </text>
-                      </g>
-                    )
-                  })}
-                </svg>
-              </Card>
-            </Col>
-            <Col span={8}>
-              <Card title="详情">
-                <Row gutter={16}>
-                  <Col span={12}><Statistic title="节点数" value={graph.node_count} /></Col>
-                  <Col span={12}><Statistic title="关系数" value={graph.edge_count} /></Col>
-                </Row>
-                {selectedNode ? (
-                  <div style={{ marginTop: 16 }}>
-                    <Descriptions title="节点属性" column={1} size="small" bordered>
-                      <Descriptions.Item label="名称">{selectedNode.name}</Descriptions.Item>
-                      <Descriptions.Item label="类型">{selectedNode.type}</Descriptions.Item>
-                      {Object.entries(selectedNode.properties).map(([k, v]) => (
-                        <Descriptions.Item key={k} label={k}>{String(v)}</Descriptions.Item>
-                      ))}
-                    </Descriptions>
-                    <Space style={{ marginTop: 12 }}>
-                      <Button size="small" icon={<EditOutlined />} onClick={() => openEditNode(selectedNode)}>编辑</Button>
-                      <Popconfirm title="删除该节点及其所有边？" onConfirm={deleteSelected}>
-                        <Button size="small" danger icon={<DeleteOutlined />}>删除</Button>
-                      </Popconfirm>
-                    </Space>
-                  </div>
-                ) : selectedEdge ? (
-                  <div style={{ marginTop: 16 }}>
-                    <Descriptions title="关系属性" column={1} size="small" bordered>
-                      <Descriptions.Item label="起点">{selectedEdge.source}</Descriptions.Item>
-                      <Descriptions.Item label="终点">{selectedEdge.target}</Descriptions.Item>
-                      <Descriptions.Item label="类型">{selectedEdge.type}</Descriptions.Item>
-                      {Object.entries(selectedEdge.properties || {}).map(([k, v]) => (
-                        <Descriptions.Item key={k} label={k}>{String(v)}</Descriptions.Item>
-                      ))}
-                    </Descriptions>
-                    <Space style={{ marginTop: 12 }}>
-                      <Button size="small" icon={<EditOutlined />} onClick={() => openEditEdge(selectedEdge)}>编辑</Button>
-                      <Popconfirm title="删除该关系？" onConfirm={deleteSelected}>
-                        <Button size="small" danger icon={<DeleteOutlined />}>删除</Button>
-                      </Popconfirm>
-                    </Space>
-                  </div>
-                ) : (
-                  <Text type="secondary" style={{ display: 'block', marginTop: 16 }}>点击图谱中的节点或边查看详情</Text>
+      <Row gutter={16}>
+        {/* 左侧：图谱可视化 */}
+        <Col span={16}>
+          <Card
+            title={
+              <Space>
+                <NodeIndexOutlined />
+                <span>规则图谱可视化</span>
+                {graph && (
+                  <Tag color="blue">
+                    {graph.node_count} 节点 / {graph.edge_count} 关系
+                  </Tag>
                 )}
-              </Card>
-            </Col>
-          </Row>
-        </>
-      )}
+              </Space>
+            }
+            bodyStyle={{ padding: 0 }}
+            style={{ minHeight: 600 }}
+          >
+            {loading ? (
+              <div style={{ textAlign: 'center', padding: 120 }}>
+                <Spin size="large" tip="加载图谱中..." />
+              </div>
+            ) : !graph ? (
+              <div style={{ textAlign: 'center', padding: 120 }}>
+                <Empty description="暂无图谱">
+                  <Paragraph type="secondary">
+                    请先导入规则文档或直接构建图谱
+                  </Paragraph>
+                  <Space>
+                    <Upload {...importUploadProps}>
+                      <Button icon={<UploadOutlined />} type="primary">
+                        导入规则文档
+                      </Button>
+                    </Upload>
+                    <Button
+                      icon={<ThunderboltOutlined />}
+                      loading={building}
+                      onClick={() => handleBuildAsync(false)}
+                    >
+                      构建图谱
+                    </Button>
+                  </Space>
+                </Empty>
+              </div>
+            ) : (
+              <>
+                <Alert
+                  type="info"
+                  showIcon
+                  style={{ borderRadius: 0, marginBottom: 0 }}
+                  message="点击节点或边查看详情。黄色边框节点为低置信度（需人工确认）。"
+                />
+                <GraphView
+                  graph={graph}
+                  selectedNodeName={selectedNodeName}
+                  selectedEdgeKey={selectedEdge ? `${selectedEdge.source}->${selectedEdge.target}` : null}
+                  onNodeClick={(name) => {
+                    setSelectedNodeName(name)
+                    setSelectedEdge(null)
+                  }}
+                  onEdgeClick={(source, target) => {
+                    const e = graph.edges.find((e) => e.source === source && e.target === target)
+                    if (e) {
+                      setSelectedEdge(e)
+                      setSelectedNodeName(null)
+                    }
+                  }}
+                  onBackgroundClick={() => {
+                    setSelectedNodeName(null)
+                    setSelectedEdge(null)
+                  }}
+                  onRefresh={() => loadGraph()}
+                  height={560}
+                />
+              </>
+            )}
+          </Card>
+        </Col>
 
+        {/* 右侧：任务进度 / 工作区 / 规则导入 */}
+        <Col span={8}>
+          <Card bodyStyle={{ padding: 0 }}>
+            <Tabs
+              activeKey={activeTab}
+              onChange={setActiveTab}
+              type="card"
+              size="small"
+              items={[
+                // ============ 构建进度 ============
+                {
+                  key: 'progress',
+                  label: (
+                    <span>
+                      <ThunderboltOutlined /> 构建进度
+                      {buildTask?.status === 'running' && (
+                        <Badge status="processing" style={{ marginLeft: 4 }} />
+                      )}
+                    </span>
+                  ),
+                  children: (
+                    <BuildProgressPanel
+                      buildTask={buildTask}
+                      building={building}
+                      buildTasks={buildTasks}
+                      onSelectTask={(t) => {
+                        setBuildTask(t)
+                        if (t.status === 'running') {
+                          startPolling(t.task_id)
+                        }
+                      }}
+                    />
+                  ),
+                },
+                // ============ 规则文档导入 ============
+                {
+                  key: 'import',
+                  label: (
+                    <span>
+                      <UploadOutlined /> 规则导入
+                    </span>
+                  ),
+                  children: (
+                    <RuleImportPanel
+                      importResult={importResult}
+                      importing={importing}
+                      uploadProps={importUploadProps}
+                    />
+                  ),
+                },
+                // ============ 工作区 ============
+                {
+                  key: 'workspace',
+                  label: (
+                    <span>
+                      <FileTextOutlined /> 工作区
+                      <Badge count={rules.length} style={{ marginLeft: 4 }} size="small" />
+                    </span>
+                  ),
+                  children: (
+                    <WorkspacePanel
+                      rules={rules}
+                      snapshots={snapshots}
+                      onRefresh={loadWorkspace}
+                    />
+                  ),
+                },
+                // ============ 节点/边详情 ============
+                {
+                  key: 'detail',
+                  label: (
+                    <span>
+                      <BulbOutlined /> 详情
+                      {(selectedNode || selectedEdge) && (
+                        <Badge status="success" style={{ marginLeft: 4 }} />
+                      )}
+                    </span>
+                  ),
+                  children: (
+                    <DetailPanel
+                      selectedNode={selectedNode}
+                      selectedEdge={selectedEdge}
+                      onEditNode={() => selectedNodeName && openEditNode(selectedNodeName)}
+                      onEditEdge={() => selectedEdge && openEditEdge(selectedEdge.source, selectedEdge.target)}
+                      onDelete={deleteSelected}
+                    />
+                  ),
+                },
+              ]}
+            />
+          </Card>
+        </Col>
+      </Row>
+
+      {/* 编辑弹窗 */}
       <Modal
         title={editTarget?.kind === 'node' ? '编辑节点属性' : '编辑关系属性'}
         open={editOpen}
@@ -320,6 +532,415 @@ export default function GraphPage() {
           </Form.Item>
         </Form>
       </Modal>
+    </div>
+  )
+}
+
+// ============ 子组件：构建进度面板 ============
+function BuildProgressPanel({
+  buildTask,
+  building,
+  buildTasks,
+  onSelectTask,
+}: {
+  buildTask: GraphBuildTaskStatus | null
+  building: boolean
+  buildTasks: GraphBuildTaskStatus[]
+  onSelectTask: (t: GraphBuildTaskStatus) => void
+}) {
+  if (!buildTask && !building && buildTasks.length === 0) {
+    return (
+      <div style={{ padding: 24, textAlign: 'center' }}>
+        <Empty description="暂无构建任务" image={Empty.PRESENTED_IMAGE_SIMPLE} />
+        <Paragraph type="secondary" style={{ marginTop: 8 }}>
+          点击顶部"构建图谱"按钮启动异步构建
+        </Paragraph>
+      </div>
+    )
+  }
+
+  return (
+    <div style={{ padding: 12 }}>
+      {/* 当前任务进度 */}
+      {buildTask && (
+        <div style={{ marginBottom: 16 }}>
+          <Row gutter={8} style={{ marginBottom: 8 }}>
+            <Col span={12}>
+              <Statistic
+                title="进度"
+                value={buildTask.progress}
+                suffix="%"
+                valueStyle={{ fontSize: 20 }}
+              />
+            </Col>
+            <Col span={12}>
+              <div style={{ fontSize: 12, color: '#999', marginBottom: 4 }}>状态</div>
+              <Badge status={BUILD_STATUS_COLOR[buildTask.status] as any} text={buildTask.stage} />
+            </Col>
+          </Row>
+
+          <Progress
+            percent={buildTask.progress}
+            status={
+              buildTask.status === 'failed'
+                ? 'exception'
+                : buildTask.status === 'completed'
+                ? 'success'
+                : 'active'
+            }
+            size="small"
+          />
+
+          {/* 构建结果统计 */}
+          {buildTask.status === 'completed' && (
+            <Row gutter={8} style={{ marginTop: 12 }}>
+              <Col span={8}>
+                <Statistic title="节点" value={buildTask.node_count} valueStyle={{ fontSize: 16 }} />
+              </Col>
+              <Col span={8}>
+                <Statistic title="关系" value={buildTask.edge_count} valueStyle={{ fontSize: 16 }} />
+              </Col>
+              <Col span={8}>
+                <Statistic title="规则" value={buildTask.rule_count} valueStyle={{ fontSize: 16 }} />
+              </Col>
+            </Row>
+          )}
+
+          {buildTask.error && (
+            <Alert
+              type="error"
+              message={buildTask.error}
+              style={{ marginTop: 8, fontSize: 12 }}
+            />
+          )}
+        </div>
+      )}
+
+      {/* 进度日志 */}
+      {buildTask && buildTask.messages.length > 0 && (
+        <div style={{ marginBottom: 16 }}>
+          <div style={{ fontSize: 12, color: '#999', marginBottom: 8 }}>
+            <ClockCircleOutlined /> 构建日志
+          </div>
+          <div
+            style={{
+              maxHeight: 240,
+              overflowY: 'auto',
+              background: '#0f172a',
+              padding: 8,
+              borderRadius: 4,
+            }}
+          >
+            <Timeline
+              items={buildTask.messages.slice(-30).reverse().map((m) => ({
+                color: MSG_LEVEL_COLOR[m.level] === 'green' ? 'green' : MSG_LEVEL_COLOR[m.level] === 'red' ? 'red' : 'blue',
+                children: (
+                  <div style={{ fontSize: 11 }}>
+                    <div style={{ color: '#cbd5e1' }}>{m.message}</div>
+                    <div style={{ color: '#64748b', fontSize: 10 }}>
+                      [{m.stage}] {dayjs(m.time).format('HH:mm:ss')}
+                    </div>
+                  </div>
+                ),
+              }))}
+            />
+          </div>
+        </div>
+      )}
+
+      {/* 历史任务 */}
+      {buildTasks.length > 0 && (
+        <div>
+          <Divider style={{ margin: '8px 0' }} />
+          <div style={{ fontSize: 12, color: '#999', marginBottom: 8 }}>历史构建任务</div>
+          <List
+            size="small"
+            dataSource={buildTasks.slice(0, 10)}
+            renderItem={(task) => (
+              <List.Item
+                style={{ padding: '6px 0', cursor: 'pointer' }}
+                onClick={() => onSelectTask(task)}
+              >
+                <div style={{ width: '100%' }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                    <Badge
+                      status={BUILD_STATUS_COLOR[task.status] as any}
+                      text={
+                        <Text style={{ fontSize: 12 }}>
+                          {task.stage}
+                        </Text>
+                      }
+                    />
+                    <Text type="secondary" style={{ fontSize: 10 }}>
+                      {dayjs(task.started_at).format('MM-DD HH:mm')}
+                    </Text>
+                  </div>
+                  {task.status === 'completed' && (
+                    <Text type="secondary" style={{ fontSize: 11 }}>
+                      {task.node_count} 节点 / {task.edge_count} 关系
+                    </Text>
+                  )}
+                </div>
+              </List.Item>
+            )}
+          />
+        </div>
+      )}
+    </div>
+  )
+}
+
+// ============ 子组件：规则导入面板 ============
+function RuleImportPanel({
+  importResult,
+  importing,
+  uploadProps,
+}: {
+  importResult: RuleDocumentImportResponse | null
+  importing: boolean
+  uploadProps: UploadProps
+}) {
+  return (
+    <div style={{ padding: 12 }}>
+      <Alert
+        type="info"
+        showIcon
+        message="支持上传规则描述文档"
+        description="支持 PDF、Excel、Word、Markdown 格式。系统会自动提取文本并通过 LLM 解析为结构化规则。"
+        style={{ marginBottom: 12 }}
+      />
+
+      <Upload.Dragger {...uploadProps} disabled={importing}>
+        <p className="ant-upload-drag-icon">
+          {importing ? <Spin /> : <UploadOutlined style={{ fontSize: 36, color: '#1890ff' }} />}
+        </p>
+        <p className="ant-upload-text">
+          {importing ? '正在导入...' : '点击或拖拽文件到此区域'}
+        </p>
+        <p className="ant-upload-hint">支持 PDF / Excel / Word / Markdown（10MB 以内）</p>
+      </Upload.Dragger>
+
+      {importResult && (
+        <div style={{ marginTop: 12 }}>
+          <Card size="small" title="导入结果">
+            <Row gutter={8}>
+              <Col span={8}>
+                <Statistic title="总规则" value={importResult.total} valueStyle={{ fontSize: 18 }} />
+              </Col>
+              <Col span={8}>
+                <Statistic
+                  title="成功"
+                  value={importResult.imported}
+                  valueStyle={{ fontSize: 18, color: '#52c41a' }}
+                />
+              </Col>
+              <Col span={8}>
+                <Statistic
+                  title="跳过"
+                  value={importResult.skipped}
+                  valueStyle={{ fontSize: 18, color: '#faad14' }}
+                />
+              </Col>
+            </Row>
+
+            {importResult.source_filename && (
+              <div style={{ marginTop: 8, fontSize: 12, color: '#999' }}>
+                来源文件: {importResult.source_filename}
+                {importResult.extracted_text_length > 0 && (
+                  <span>（提取 {importResult.extracted_text_length} 字符）</span>
+                )}
+              </div>
+            )}
+
+            {importResult.extracted_text_preview && (
+              <div style={{ marginTop: 8 }}>
+                <Text type="secondary" style={{ fontSize: 11 }}>
+                  提取文本预览:
+                </Text>
+                <Paragraph
+                  style={{
+                    fontSize: 11,
+                    background: '#f6f8fa',
+                    padding: 6,
+                    borderRadius: 4,
+                    maxHeight: 100,
+                    overflow: 'auto',
+                    margin: 0,
+                  }}
+                >
+                  {importResult.extracted_text_preview}
+                  {importResult.extracted_text_length > 500 ? '...' : ''}
+                </Paragraph>
+              </div>
+            )}
+
+            {importResult.errors.length > 0 && (
+              <div style={{ marginTop: 8 }}>
+                <Text type="secondary" style={{ fontSize: 11 }}>
+                  跳过原因:
+                </Text>
+                <div style={{ fontSize: 11, color: '#fa541c' }}>
+                  {importResult.errors.slice(0, 5).map((e, i) => (
+                    <div key={i}>· {e}</div>
+                  ))}
+                  {importResult.errors.length > 5 && (
+                    <div>... 还有 {importResult.errors.length - 5} 条</div>
+                  )}
+                </div>
+              </div>
+            )}
+          </Card>
+        </div>
+      )}
+    </div>
+  )
+}
+
+// ============ 子组件：工作区面板 ============
+function WorkspacePanel({
+  rules,
+  snapshots,
+  onRefresh,
+}: {
+  rules: Rule[]
+  snapshots: RuleSnapshot[]
+  onRefresh: () => void
+}) {
+  return (
+    <div style={{ padding: 12 }}>
+      <Tabs
+        size="small"
+        items={[
+          {
+            key: 'rules',
+            label: `启用规则 (${rules.length})`,
+            children: (
+              <List
+                size="small"
+                dataSource={rules.slice(0, 50)}
+                renderItem={(rule) => (
+                  <List.Item style={{ padding: '4px 0' }}>
+                    <div style={{ width: '100%' }}>
+                      <div style={{ display: 'flex', gap: 4, marginBottom: 2 }}>
+                        <Tag color="blue" style={{ fontSize: 10 }}>{rule.doc_type}</Tag>
+                        <Tag style={{ fontSize: 10 }}>{rule.check_category}</Tag>
+                      </div>
+                      <Text style={{ fontSize: 12 }}>{rule.rule_text}</Text>
+                    </div>
+                  </List.Item>
+                )}
+                locale={{ emptyText: '暂无启用规则' }}
+                style={{ maxHeight: 400, overflow: 'auto' }}
+              />
+            ),
+          },
+          {
+            key: 'snapshots',
+            label: `快照 (${snapshots.length})`,
+            children: (
+              <List
+                size="small"
+                dataSource={snapshots.slice(0, 20)}
+                renderItem={(snap) => (
+                  <List.Item style={{ padding: '4px 0' }}>
+                    <div style={{ width: '100%' }}>
+                      <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                        <Text style={{ fontSize: 12 }}>
+                          {dayjs(snap.snapshot_time).format('MM-DD HH:mm')}
+                        </Text>
+                        {snap.graph_id && <Tag color="green" style={{ fontSize: 10 }}>有图谱</Tag>}
+                      </div>
+                      <Text type="secondary" style={{ fontSize: 11 }}>
+                        规则 {snap.rule_count} 条
+                        {snap.node_count != null && ` / 节点 ${snap.node_count}`}
+                        {snap.edge_count != null && ` / 关系 ${snap.edge_count}`}
+                      </Text>
+                    </div>
+                  </List.Item>
+                )}
+                locale={{ emptyText: '暂无快照' }}
+                style={{ maxHeight: 400, overflow: 'auto' }}
+              />
+            ),
+          },
+        ]}
+      />
+    </div>
+  )
+}
+
+// ============ 子组件：详情面板 ============
+function DetailPanel({
+  selectedNode,
+  selectedEdge,
+  onEditNode,
+  onEditEdge,
+  onDelete,
+}: {
+  selectedNode: GraphData['nodes'][0] | null
+  selectedEdge: GraphEdge | null
+  onEditNode: () => void
+  onEditEdge: () => void
+  onDelete: () => void
+}) {
+  if (!selectedNode && !selectedEdge) {
+    return (
+      <div style={{ padding: 24, textAlign: 'center' }}>
+        <Empty description="点击图谱中的节点或边查看详情" image={Empty.PRESENTED_IMAGE_SIMPLE} />
+      </div>
+    )
+  }
+
+  return (
+    <div style={{ padding: 12 }}>
+      {selectedNode && (
+        <div>
+          <Statistic title="名称" value={selectedNode.name} valueStyle={{ fontSize: 14 }} />
+          <Descriptions column={1} size="small" bordered style={{ marginTop: 8 }}>
+            <Descriptions.Item label="类型">{selectedNode.type}</Descriptions.Item>
+            {Object.entries(selectedNode.properties || {}).map(([k, v]) => (
+              <Descriptions.Item key={k} label={k}>
+                {String(v).slice(0, 100)}
+              </Descriptions.Item>
+            ))}
+          </Descriptions>
+          <Space style={{ marginTop: 12 }}>
+            <Button size="small" icon={<EditOutlined />} onClick={onEditNode}>
+              编辑
+            </Button>
+            <Popconfirm title="删除该节点及其所有边？" onConfirm={onDelete}>
+              <Button size="small" danger icon={<DeleteOutlined />}>
+                删除
+              </Button>
+            </Popconfirm>
+          </Space>
+        </div>
+      )}
+
+      {selectedEdge && !selectedNode && (
+        <div>
+          <Descriptions column={1} size="small" bordered>
+            <Descriptions.Item label="起点">{selectedEdge.source}</Descriptions.Item>
+            <Descriptions.Item label="终点">{selectedEdge.target}</Descriptions.Item>
+            <Descriptions.Item label="类型">{selectedEdge.type}</Descriptions.Item>
+            {Object.entries(selectedEdge.properties || {}).map(([k, v]) => (
+              <Descriptions.Item key={k} label={k}>
+                {String(v).slice(0, 100)}
+              </Descriptions.Item>
+            ))}
+          </Descriptions>
+          <Space style={{ marginTop: 12 }}>
+            <Button size="small" icon={<EditOutlined />} onClick={onEditEdge}>
+              编辑
+            </Button>
+            <Popconfirm title="删除该关系？" onConfirm={onDelete}>
+              <Button size="small" danger icon={<DeleteOutlined />}>
+                删除
+              </Button>
+            </Popconfirm>
+          </Space>
+        </div>
+      )}
     </div>
   )
 }

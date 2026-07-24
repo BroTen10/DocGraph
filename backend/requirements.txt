@@ -20,6 +20,9 @@ PyMuPDF==1.25.1
 Pillow==11.0.0
 python-docx==1.1.2
 
+# Excel 解析（规则文档导入）
+openpyxl==3.1.5
+
 # 配置与工具
 pydantic==2.10.4
 pydantic-settings==2.7.0

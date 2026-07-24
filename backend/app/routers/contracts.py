@@ -2,18 +2,23 @@
 
 from __future__ import annotations
 
+import mimetypes
 import uuid
+from pathlib import Path
 
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
+from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 
 from ..database import get_db
+from ..models import Document
 from ..schemas.contract import (
     ContractAliasUpdate,
     ContractBrief,
     ContractDetail,
     ContractUploadResponse,
     DocTypeUpdate,
+    DocumentBrief,
 )
 from ..services import contract_service
 
@@ -88,3 +93,40 @@ def update_doc_type(
         "doc_type": doc.doc_type,
         "is_required": doc.is_required,
     }
+
+
+@router.get("/documents/{doc_id}/file")
+def get_document_file(doc_id: uuid.UUID, db: Session = Depends(get_db)):
+    """获取原始文件（用于前端预览：PDF/图片直接展示，DOCX 下载）。
+
+    返回文件流，浏览器根据 Content-Type 自动渲染。
+    """
+    doc = db.get(Document, doc_id)
+    if doc is None:
+        raise HTTPException(status_code=404, detail="文件不存在")
+
+    path = Path(doc.file_path)
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="文件不存在于磁盘")
+
+    # 根据文件扩展名推断 Content-Type
+    mime_type, _ = mimetypes.guess_type(doc.file_name)
+    if mime_type is None:
+        mime_type = "application/octet-stream"
+
+    return FileResponse(
+        path=str(path),
+        media_type=mime_type,
+        filename=doc.file_name,
+    )
+
+
+@router.get("/documents/{doc_id}/ocr", response_model=DocumentBrief)
+def get_document_ocr(
+    doc_id: uuid.UUID, db: Session = Depends(get_db)
+) -> DocumentBrief:
+    """获取单个文档的 OCR 识别详情（文本 + 字段 + 置信度）。"""
+    doc = db.get(Document, doc_id)
+    if doc is None:
+        raise HTTPException(status_code=404, detail="文件不存在")
+    return DocumentBrief.model_validate(doc)
