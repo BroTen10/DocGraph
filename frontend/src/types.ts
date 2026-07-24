@@ -19,6 +19,10 @@ export interface DocumentBrief {
   ocr_confidence: number | null
   has_stamp: boolean | null
   extracted_fields: Record<string, unknown>
+  /** OCR 识别的原始文本 */
+  ocr_text: string | null
+  /** 字段提取时间 */
+  extracted_at: string | null
 }
 
 export interface ContractDetail extends ContractBrief {
@@ -103,6 +107,44 @@ export interface GraphBuildResponse {
   auto_confirmed_count: number
   manual_pending_count: number
   message: string
+}
+
+/** 异步图谱构建任务状态 */
+export interface GraphBuildTaskStatus {
+  task_id: string
+  status: 'running' | 'completed' | 'failed'
+  progress: number
+  stage: string
+  operator: string
+  auto_confirm_all: boolean
+  started_at: string
+  completed_at: string | null
+  error: string | null
+  messages: Array<{
+    time: string
+    level: 'info' | 'success' | 'warning' | 'error'
+    stage: string
+    message: string
+  }>
+  snapshot_id: string | null
+  graph_id: string | null
+  node_count: number
+  edge_count: number
+  rule_count: number
+  auto_confirmed_count: number
+  manual_pending_count: number
+}
+
+/** 规则文档导入响应 */
+export interface RuleDocumentImportResponse {
+  total: number
+  imported: number
+  skipped: number
+  rules: Array<Record<string, unknown>>
+  errors: string[]
+  extracted_text_preview: string
+  extracted_text_length: number
+  source_filename: string
 }
 
 export interface ReviewTaskSummary {

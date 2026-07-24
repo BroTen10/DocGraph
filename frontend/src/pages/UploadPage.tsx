@@ -1,12 +1,13 @@
 import { useState, useEffect, useRef } from 'react'
 import {
   Card, Row, Col, Upload, Button, Table, Tag, message, Modal, Input,
-  Select, Space, Typography, Empty, Popconfirm, Divider,
+  Select, Space, Typography, Empty, Popconfirm, Divider, Drawer, Spin,
 } from 'antd'
-import { InboxOutlined, DeleteOutlined, ReloadOutlined, EditOutlined } from '@ant-design/icons'
+import { InboxOutlined, DeleteOutlined, ReloadOutlined, EditOutlined, FileSearchOutlined } from '@ant-design/icons'
 import type { UploadProps } from 'antd'
 import { contractsApi, constantsApi } from '../api/client'
-import type { ContractBrief, ContractDetail, ContractUploadResponse, DocTypeMeta } from '../types'
+import type { ContractBrief, ContractDetail, ContractUploadResponse, DocTypeMeta, DocumentBrief } from '../types'
+import DocumentCompare from '../components/DocumentCompare'
 import dayjs from 'dayjs'
 
 const { Dragger } = Upload
@@ -22,6 +23,10 @@ export default function UploadPage() {
   const [aliasModal, setAliasModal] = useState<{ open: boolean; contract?: ContractBrief; contractNo: string; aliases: string }>({ open: false, contractNo: '', aliases: '' })
   const pendingFilesRef = useRef<File[]>([])
   const [pendingFileNames, setPendingFileNames] = useState<string[]>([])
+  // OCR 对照查看
+  const [compareOpen, setCompareOpen] = useState(false)
+  const [compareDoc, setCompareDoc] = useState<DocumentBrief | null>(null)
+  const [compareLoading, setCompareLoading] = useState(false)
 
   const load = async () => {
     setLoading(true)
@@ -147,6 +152,30 @@ export default function UploadPage() {
     }
   }
 
+  /** 打开 OCR 对照查看抽屉 */
+  const openCompare = async (doc: DocumentBrief) => {
+    setCompareDoc(doc)
+    setCompareOpen(true)
+    // 若文档已有 OCR 文本则直接展示；否则请求后端获取最新 OCR
+    if (!doc.ocr_text && doc.ocr_status === 'done') {
+      setCompareLoading(true)
+      try {
+        const fresh = await contractsApi.getOcr(doc.id)
+        setCompareDoc(fresh)
+      } catch (e: any) {
+        message.error('加载 OCR 详情失败: ' + (e?.message || e))
+      } finally {
+        setCompareLoading(false)
+      }
+    }
+  }
+
+  const closeCompare = () => {
+    setCompareOpen(false)
+    // 延迟清空避免动画期间空白
+    setTimeout(() => setCompareDoc(null), 300)
+  }
+
   const columns = [
     { title: '合同号', dataIndex: 'contract_no', key: 'contract_no', render: (v: string) => <Text strong>{v}</Text> },
     {
@@ -175,7 +204,7 @@ export default function UploadPage() {
   const docColumns = [
     { title: '文件名', dataIndex: 'file_name', key: 'file_name', ellipsis: true },
     {
-      title: '业务类型', dataIndex: 'doc_type', key: 'doc_type', width: 180,
+      title: '业务类型', dataIndex: 'doc_type', key: 'doc_type', width: 160,
       render: (v: string, row: any) => (
         <Select
           size="small"
@@ -198,6 +227,24 @@ export default function UploadPage() {
     {
       title: '印章', dataIndex: 'has_stamp', key: 'has_stamp', width: 80, align: 'center' as const,
       render: (v: boolean | null) => v === true ? <Tag color="green">有</Tag> : v === false ? <Tag color="red">无</Tag> : <Tag color="gold">未验</Tag>,
+    },
+    {
+      title: '操作', key: 'action', width: 110, align: 'center' as const,
+      render: (_: unknown, row: DocumentBrief) =>
+        row.ocr_status === 'done' ? (
+          <Button
+            size="small"
+            type="link"
+            icon={<FileSearchOutlined />}
+            onClick={() => openCompare(row)}
+          >
+            OCR对照
+          </Button>
+        ) : (
+          <Text type="secondary" style={{ fontSize: 12 }}>
+            -
+          </Text>
+        ),
     },
   ]
 
@@ -291,6 +338,40 @@ export default function UploadPage() {
           <Input.TextArea rows={3} value={aliasModal.aliases} onChange={(e) => setAliasModal({ ...aliasModal, aliases: e.target.value })} />
         </Space>
       </Modal>
+
+      <Drawer
+        title={
+          <Space>
+            <FileSearchOutlined />
+            <span>OCR 对照查看</span>
+            {compareDoc && (
+              <Tag color="blue" style={{ marginLeft: 8 }}>
+                {compareDoc.file_name}
+              </Tag>
+            )}
+          </Space>
+        }
+        placement="right"
+        open={compareOpen}
+        onClose={closeCompare}
+        width="86%"
+        destroyOnClose
+        styles={{ body: { padding: 12, background: '#f5f5f5' } }}
+      >
+        {compareLoading ? (
+          <div style={{ textAlign: 'center', padding: 80 }}>
+            <Spin size="large" tip="加载 OCR 识别结果中..." />
+          </div>
+        ) : compareDoc ? (
+          <DocumentCompare
+            doc={compareDoc}
+            fileUrl={contractsApi.fileUrl(compareDoc.id)}
+            height="calc(100vh - 120px)"
+          />
+        ) : (
+          <Empty description="未选择文档" />
+        )}
+      </Drawer>
     </div>
   )
 }

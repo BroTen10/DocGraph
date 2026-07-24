@@ -29,6 +29,7 @@ from typing import Optional
 from sqlalchemy.orm import Session
 
 from ..config import settings
+from ..constants import CHECK_COMPLETENESS, CHECK_STAMP
 from ..llm_client import LLMError, get_llm_client
 from ..models import Rule, RuleSnapshot
 from ..neo4j_client import Neo4jClient, get_neo4j_client
@@ -131,11 +132,107 @@ def _convert_one_rule(
     )
 
 
+# ============ 程序化转换（齐套性 / 印章，不调 LLM） ============
+# 这两类规则结构固定，程序化生成更可靠，且能产出 REQUIRED / MUST_STAMP 关系。
+
+# 虚拟节点：表示"齐套性检查"这一动作，作为 REQUIRED 关系的 source
+_COMPLETENESS_ROOT = "齐套性检查"
+# 虚拟节点：表示"印章要求"这一动作，作为 MUST_STAMP 关系的 target
+_STAMP_ROOT = "印章要求"
+
+
+def _convert_completeness_rule(rule: Rule, rule_index: int) -> RuleGraphConvertResult:
+    """齐套性规则程序化转换：生成 RequiredDoc 节点 + REQUIRED 关系。
+
+    节点: {name: doc_type, type: "RequiredDoc"}
+    关系: {source: "齐套性检查", target: doc_type, type: "REQUIRED"}
+    """
+    rule_id_str = f"R{rule_index:03d}"
+    doc_type = rule.doc_type
+    # 根节点
+    root_ent = EntityData(
+        name=_COMPLETENESS_ROOT,
+        type="CheckRoot",
+        attributes={"description": "齐套性检查入口", "rule_id": rule_id_str},
+    )
+    # 文件节点
+    doc_ent = EntityData(
+        name=doc_type,
+        type="RequiredDoc",
+        attributes={
+            "doc_type": doc_type,
+            "rule_id": rule_id_str,
+            "rule_text": rule.rule_text,
+            "check_category": rule.check_category,
+        },
+    )
+    rel = EdgeData(
+        source=_COMPLETENESS_ROOT,
+        target=doc_type,
+        type="REQUIRED",
+        attributes={
+            "rule_id": rule_id_str,
+            "rule_text": rule.rule_text,
+            "doc_type": doc_type,
+            "check_category": rule.check_category,
+        },
+    )
+    return RuleGraphConvertResult(
+        entities=[root_ent, doc_ent],
+        relationships=[rel],
+        confidence=1.0,  # 程序化生成，置信度满分
+        auto_confirmed=False,
+    )
+
+
+def _convert_stamp_rule(rule: Rule, rule_index: int) -> RuleGraphConvertResult:
+    """印章规则程序化转换：生成 StampRequirement 节点 + MUST_STAMP 关系。
+
+    节点: {name: doc_type, type: "StampRequirement"}
+    关系: {source: doc_type, target: "印章要求", type: "MUST_STAMP"}
+    """
+    rule_id_str = f"R{rule_index:03d}"
+    doc_type = rule.doc_type
+    doc_ent = EntityData(
+        name=doc_type,
+        type="StampRequirement",
+        attributes={
+            "doc_type": doc_type,
+            "rule_id": rule_id_str,
+            "rule_text": rule.rule_text,
+            "check_category": rule.check_category,
+        },
+    )
+    root_ent = EntityData(
+        name=_STAMP_ROOT,
+        type="CheckRoot",
+        attributes={"description": "印章要求检查入口", "rule_id": rule_id_str},
+    )
+    rel = EdgeData(
+        source=doc_type,
+        target=_STAMP_ROOT,
+        type="MUST_STAMP",
+        attributes={
+            "rule_id": rule_id_str,
+            "rule_text": rule.rule_text,
+            "doc_type": doc_type,
+            "check_category": rule.check_category,
+        },
+    )
+    return RuleGraphConvertResult(
+        entities=[doc_ent, root_ent],
+        relationships=[rel],
+        confidence=1.0,
+        auto_confirmed=False,
+    )
+
+
 def build_graph(
     db: Session,
     neo4j: Optional[Neo4jClient] = None,
     auto_confirm_all: bool = False,
     operator: str = "system",
+    progress_callback: Optional[callable] = None,
 ) -> GraphBuildResponse:
     """一键重建图谱：全量替换。
 
@@ -144,24 +241,46 @@ def build_graph(
         neo4j: Neo4j 客户端（不传则用全局单例）
         auto_confirm_all: 是否一键自动确认全部（忽略置信度）
         operator: 操作人
+        progress_callback: 可选的进度回调函数 (stage: str, progress: int, message: str) -> None
     """
     neo4j = neo4j or get_neo4j_client()
 
+    def _report(stage: str, progress: int, message: str) -> None:
+        if progress_callback:
+            try:
+                progress_callback(stage, progress, message)
+            except Exception:
+                pass  # 进度回调不应影响主流程
+
     # 1. 读取启用规则
+    _report("读取启用规则", 5, "正在读取启用的规则")
     rules = get_enabled_rules_for_snapshot(db)
     if not rules:
         raise ValueError("无启用的规则，请先添加规则")
 
     threshold = settings.llm_confidence_threshold
+    _report("读取启用规则", 10, f"共 {len(rules)} 条启用规则")
 
     # 2. 逐条转换
     all_entities: list[EntityData] = []
     all_relationships: list[EdgeData] = []
     auto_confirmed_count = 0
     manual_pending_count = 0
+    total = len(rules)
 
     for idx, rule in enumerate(rules, start=1):
-        result = _convert_one_rule(rule, idx)
+        # 按 check_category 分派：齐套性/印章程序化，其余走 LLM
+        if rule.check_category == CHECK_COMPLETENESS:
+            result = _convert_completeness_rule(rule, idx)
+        elif rule.check_category == CHECK_STAMP:
+            result = _convert_stamp_rule(rule, idx)
+        else:
+            _report(
+                "LLM 转换规则",
+                10 + int((idx - 1) / total * 70),
+                f"正在转换规则 {idx}/{total}：[{rule.doc_type}] {rule.rule_text[:40]}...",
+            )
+            result = _convert_one_rule(rule, idx)
         if auto_confirm_all or result.confidence >= threshold:
             result.auto_confirmed = True
             auto_confirmed_count += 1
@@ -184,6 +303,11 @@ def build_graph(
 
     # 4. 全量替换：先清除旧图谱，再写入新图谱
     # 注：每次重建生成新 graph_id，旧 graph_id 的节点自然保留为历史快照
+    _report(
+        "写入 Neo4j",
+        85,
+        f"正在写入 Neo4j：{len(all_entities)} 实体 / {len(all_relationships)} 关系",
+    )
     neo4j.write_rule_graph(
         graph_id=graph_id,
         entities=[e.model_dump() for e in all_entities],
@@ -194,6 +318,7 @@ def build_graph(
     graph_data = neo4j.get_graph_data(graph_id)
 
     # 6. 保存规则快照
+    _report("保存规则快照", 95, "正在保存规则快照")
     snapshot = RuleSnapshot(
         snapshot_time=datetime.now(),
         rule_count=len(rules),

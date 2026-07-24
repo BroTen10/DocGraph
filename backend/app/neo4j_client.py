@@ -103,7 +103,7 @@ class Neo4jClient:
         """幂等写入规则图谱（MERGE）。
 
         entities: [{"name": "代理协议.协议方", "type": "Field", "attributes": {...}}]
-        relationships: [{"source": "...", "target": "...", "type": "COMPARE_TO",
+        relationships: [{"source": "...", "target": "...", "type": "COMPARE_TO|REQUIRED|MUST_STAMP",
                          "attributes": {"operator": "等于", "tolerance": 0, "rule_id": "R001"}}]
         """
         # 写节点
@@ -120,15 +120,22 @@ class Neo4jClient:
                     "attrs": {k: v for k, v in attrs.items() if k not in ("name", "graph_id")},
                 },
             )
-        # 写关系
+        # 写关系（尊重 rel.type，不再硬编码 COMPARE_TO）
         for rel in relationships:
             attrs = rel.get("attributes", {}) or {}
             attrs = {**attrs, "graph_id": graph_id}
-            self.execute_write(
+            rel_type = rel.get("type", "COMPARE_TO")
+            # 白名单校验，防止注入
+            if rel_type not in ("COMPARE_TO", "REQUIRED", "MUST_STAMP"):
+                rel_type = "COMPARE_TO"
+            cypher = (
                 "MATCH (a:RuleEntity {name: $src, graph_id: $graph_id}), "
                 "(b:RuleEntity {name: $tgt, graph_id: $graph_id}) "
-                "MERGE (a)-[r:COMPARE_TO]->(b) "
-                "SET r += $attrs",
+                f"MERGE (a)-[r:{rel_type}]->(b) "
+                "SET r += $attrs"
+            )
+            self.execute_write(
+                cypher,
                 {
                     "src": rel["source"],
                     "tgt": rel["target"],
@@ -137,6 +144,57 @@ class Neo4jClient:
                 },
             )
         return {"nodes": len(entities), "relationships": len(relationships)}
+
+    # ---------- 图谱驱动审查查询 ----------
+
+    def get_required_docs(self, graph_id: str) -> list[dict]:
+        """查所有齐套性要求（REQUIRED 关系）。
+
+        返回: [{"doc_type": "委托出口确认单", "rule_id": "R001", "rule_text": "...", ...}]
+        """
+        records = self.execute_read(
+            "MATCH (a:RuleEntity)-[r:REQUIRED]->(b:RuleEntity) "
+            "WHERE a.graph_id = $graph_id "
+            "RETURN a.name AS source, b.name AS target, "
+            "a.type AS source_type, b.type AS target_type, "
+            "properties(r) AS rel_props, properties(a) AS source_props, "
+            "properties(b) AS target_props",
+            {"graph_id": graph_id},
+        )
+        return records
+
+    def get_stamp_requirements(self, graph_id: str) -> list[dict]:
+        """查所有印章要求（MUST_STAMP 关系）。
+
+        返回: [{"source": "代理协议", "rule_id": "R001", ...}]
+        """
+        records = self.execute_read(
+            "MATCH (a:RuleEntity)-[r:MUST_STAMP]->(b:RuleEntity) "
+            "WHERE a.graph_id = $graph_id "
+            "RETURN a.name AS source, b.name AS target, "
+            "a.type AS source_type, b.type AS target_type, "
+            "properties(r) AS rel_props, properties(a) AS source_props, "
+            "properties(b) AS target_props",
+            {"graph_id": graph_id},
+        )
+        return records
+
+    def get_compare_relationships(self, graph_id: str) -> list[dict]:
+        """查所有字段比对要求（COMPARE_TO 关系）。
+
+        返回: [{"source": "代理协议.协议方", "target": "委托单.委托方",
+               "operator": "等于", "tolerance": 0, "rule_id": "R001", ...}]
+        """
+        records = self.execute_read(
+            "MATCH (a:RuleEntity)-[r:COMPARE_TO]->(b:RuleEntity) "
+            "WHERE a.graph_id = $graph_id "
+            "RETURN a.name AS source, b.name AS target, "
+            "a.type AS source_type, b.type AS target_type, "
+            "properties(r) AS rel_props, properties(a) AS source_props, "
+            "properties(b) AS target_props",
+            {"graph_id": graph_id},
+        )
+        return records
 
     def get_graph_data(self, graph_id: str) -> dict:
         """获取指定图谱的节点和边，供前端力导向图渲染。"""

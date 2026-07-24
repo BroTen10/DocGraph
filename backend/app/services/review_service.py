@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import logging
+import re
 import threading
 import uuid
 from datetime import datetime
@@ -208,27 +209,47 @@ def _run_review_pipeline(
         task.progress = 5 + int((i + 1) / max(total, 1) * 50)  # 5%-55%
         db.commit()
 
-    # ============ 阶段2：4 类检查 ============
+    # ============ 阶段2：规则比对（图谱优先 + 旧逻辑 fallback） ============
     task.stage = "规则比对中"
     task.progress = 60
     db.commit()
 
-    # 加载启用规则（按 doc_type + check_category 索引）
-    rules_by_key: dict[tuple[str, str], list[Rule]] = {}
-    for rule in _load_enabled_rules(db):
-        rules_by_key.setdefault((rule.doc_type, rule.check_category), []).append(rule)
+    results_from_graph: list[ReviewResult] = []
+    graph_used = False
+    try:
+        from .graph_review_service import run_graph_review_with_contract
+        results_from_graph = run_graph_review_with_contract(db, contract, docs)
+        if results_from_graph:
+            graph_used = True
+            logger.info("审查任务 %s: 使用图谱驱动，生成 %d 条结果", task.id, len(results_from_graph))
+        else:
+            logger.info("审查任务 %s: 图谱返回空结果，fallback 到旧逻辑", task.id)
+    except ValueError as e:
+        # 无图谱快照，fallback
+        logger.info("审查任务 %s: 图谱不可用（%s），fallback 到旧逻辑", task.id, e)
+    except Exception as e:
+        # 图谱查询异常，fallback
+        logger.warning("审查任务 %s: 图谱驱动审查失败（%s），fallback 到旧逻辑", task.id, e, exc_info=True)
 
-    # 检查1：齐套性
-    results.extend(_check_completeness(db, docs, rules_by_key, contract))
+    if graph_used:
+        results.extend(results_from_graph)
+    else:
+        # 旧逻辑：加载启用规则（按 doc_type + check_category 索引）
+        rules_by_key: dict[tuple[str, str], list[Rule]] = {}
+        for rule in _load_enabled_rules(db):
+            rules_by_key.setdefault((rule.doc_type, rule.check_category), []).append(rule)
 
-    # 检查2：印章
-    results.extend(_check_stamp(db, docs, rules_by_key))
+        # 检查1：齐套性
+        results.extend(_check_completeness(db, docs, rules_by_key, contract))
 
-    # 检查3：信息准确性
-    results.extend(_check_accuracy(db, docs, rules_by_key, contract))
+        # 检查2：印章
+        results.extend(_check_stamp(db, docs, rules_by_key))
 
-    # 检查4：时间逻辑
-    results.extend(_check_time_logic(db, docs, rules_by_key, contract))
+        # 检查3：信息准确性
+        results.extend(_check_accuracy(db, docs, rules_by_key, contract))
+
+        # 检查4：时间逻辑
+        results.extend(_check_time_logic(db, docs, rules_by_key, contract))
 
     # ============ 阶段3：生成建议 + 持久化 ============
     task.stage = "生成报告中"
@@ -653,6 +674,103 @@ def _check_time_logic(
     return results
 
 
+# ============ 结果过滤 ============
+
+# "字段无法提取"类 unverifiable 的典型模式
+_UNEXTRACTABLE_PATTERN = re.compile(r"字段无法提取|日期字段无法提取|日期无法解析|字段无法解析")
+
+
+def _dedup_key(item: dict) -> tuple:
+    """生成去重键：同一 (result, check_category, doc_type, issue_desc, doc_id) 视为重复。"""
+    return (
+        item.get("result"),
+        item.get("check_category"),
+        item.get("doc_type"),
+        item.get("issue_desc"),
+        str(item.get("doc_id") or ""),
+    )
+
+
+def _filter_results(items: list[dict]) -> list[dict]:
+    """过滤审查结果：
+    1. 去除完全重复项（同一结果/类型/描述/doc_id）
+    2. 将同类"字段无法提取"的 unverifiable 合并为一条摘要，
+       避免几十条"X.字段 与 Y.字段 字段无法提取"淹没真正的 fail
+    """
+    # ---- 去重 ----
+    seen: set[tuple] = set()
+    deduped: list[dict] = []
+    for item in items:
+        key = _dedup_key(item)
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(item)
+
+    # ---- 合并"字段无法提取"类 unverifiable ----
+    unextractable: list[dict] = []   # 需要合并的项
+    kept: list[dict] = []            # 保留的项
+    for item in deduped:
+        if (
+            item.get("result") == "unverifiable"
+            and item.get("issue_desc")
+            and _UNEXTRACTABLE_PATTERN.search(item["issue_desc"])
+        ):
+            unextractable.append(item)
+        else:
+            kept.append(item)
+
+    if not unextractable:
+        return kept
+
+    # 按 check_category 分组合并
+    groups: dict[str, list[dict]] = {}
+    for item in unextractable:
+        cat = item.get("check_category") or "其他"
+        groups.setdefault(cat, []).append(item)
+
+    for cat, group in groups.items():
+        if len(group) == 1:
+            kept.append(group[0])
+            continue
+        # 合并为摘要项：doc_type 列出涉及的文件类型
+        doc_types = sorted({it.get("doc_type") or "" for it in group})
+        examples = [it["issue_desc"] for it in group[:3]]
+        merged = {
+            "id": group[0]["id"],
+            "rule_id": None,
+            "rule_text": None,
+            "doc_type": "、".join(dt for dt in doc_types if dt) or None,
+            "check_category": cat,
+            "doc_id": None,
+            "doc_name": None,
+            "result": "unverifiable",
+            "issue_desc": f"共 {len(group)} 项字段缺失无法核验，涉及: {'、'.join(dt for dt in doc_types if dt)}",
+            "detail": {
+                "merged_count": len(group),
+                "doc_types": doc_types,
+                "examples": examples,
+            },
+            "suggestion": "请补充上传相关文件或确认文件 OCR 质量后重新审查",
+        }
+        kept.append(merged)
+
+    # 保持排序：fail > unverifiable > pass
+    priority = {"fail": 0, "unverifiable": 1, "pass": 2}
+    kept.sort(key=lambda r: (priority.get(r.get("result", ""), 3), r.get("check_category") or "", r.get("doc_type") or ""))
+    return kept
+
+
+def _recompute_summary(items: list[dict]) -> dict:
+    """根据过滤后的结果重算汇总。"""
+    return {
+        "total": len(items),
+        "pass": sum(1 for r in items if r.get("result") == "pass"),
+        "fail": sum(1 for r in items if r.get("result") == "fail"),
+        "unverifiable": sum(1 for r in items if r.get("result") == "unverifiable"),
+    }
+
+
 # ============ 结果查询 ============
 def get_task_status(db: Session, task_id: uuid.UUID) -> Optional[ReviewTask]:
     return db.get(ReviewTask, task_id)
@@ -673,10 +791,6 @@ def get_results_by_rule(db: Session, task_id: uuid.UUID) -> dict:
     )
     results = list(db.execute(stmt).scalars().all())
 
-    # 排序：fail 和 unverifiable 置顶
-    priority = {"fail": 0, "unverifiable": 1, "pass": 2}
-    results.sort(key=lambda r: (priority.get(r.result, 3), r.check_category or "", r.doc_type or ""))
-
     items = []
     for r in results:
         doc_name = r.document.file_name if r.document else None
@@ -695,7 +809,12 @@ def get_results_by_rule(db: Session, task_id: uuid.UUID) -> dict:
                 "suggestion": r.suggestion,
             }
         )
-    return {"task_id": str(task_id), "results": items, "summary": task.summary or {}}
+
+    # 过滤：去重 + 合并 unverifiable 字段缺失噪声
+    items = _filter_results(items)
+    summary = _recompute_summary(items)
+
+    return {"task_id": str(task_id), "results": items, "summary": summary}
 
 
 def get_results_by_doc(db: Session, task_id: uuid.UUID) -> dict:
@@ -713,34 +832,49 @@ def get_results_by_doc(db: Session, task_id: uuid.UUID) -> dict:
     )
     results = list(db.execute(stmt).scalars().all())
 
-    # 按文档分组
-    docs_map: dict[str, dict] = {}
-    no_doc_results: list[dict] = []
+    # 先构造全部 items 列表，便于统一过滤
+    all_items: list[dict] = []
     for r in results:
+        doc_id_str = str(r.doc_id) if r.doc_id else None
         item = {
             "id": str(r.id),
             "rule_id": str(r.rule_id) if r.rule_id else None,
             "rule_text": r.rule_text,
             "doc_type": r.doc_type,
             "check_category": r.check_category,
+            "doc_id": doc_id_str,
+            "doc_name": r.document.file_name if r.document else None,
             "result": r.result,
             "issue_desc": r.issue_desc,
             "detail": r.detail,
             "suggestion": r.suggestion,
         }
-        if r.doc_id is None:
+        all_items.append(item)
+
+    # 过滤：去重 + 合并 unverifiable 字段缺失噪声
+    filtered_items = _filter_results(all_items)
+    summary = _recompute_summary(filtered_items)
+
+    # 按文档分组
+    docs_map: dict[str, dict] = {}
+    no_doc_results: list[dict] = []
+    for item in filtered_items:
+        # 过滤后合并项的 doc_id 被置空，归到"未绑定文件"组
+        doc_id_str = item.get("doc_id")
+        if not doc_id_str:
             no_doc_results.append(item)
-        else:
-            doc_id = str(r.doc_id)
-            if doc_id not in docs_map:
-                doc = r.document
-                docs_map[doc_id] = {
-                    "doc_id": doc_id,
-                    "file_name": doc.file_name if doc else None,
-                    "doc_type": r.doc_type or (doc.doc_type if doc else None),
-                    "results": [],
-                }
-            docs_map[doc_id]["results"].append(item)
+            continue
+        if doc_id_str not in docs_map:
+            # 从原始结果中找文档元信息
+            orig = next((r for r in results if str(r.id) == item["id"]), None)
+            doc = orig.document if orig else None
+            docs_map[doc_id_str] = {
+                "doc_id": doc_id_str,
+                "file_name": doc.file_name if doc else item.get("doc_name"),
+                "doc_type": item.get("doc_type") or (doc.doc_type if doc else None),
+                "results": [],
+            }
+        docs_map[doc_id_str]["results"].append(item)
 
     docs_list = list(docs_map.values())
     # 有问题的文件置顶
@@ -753,4 +887,4 @@ def get_results_by_doc(db: Session, task_id: uuid.UUID) -> dict:
     if no_doc_results:
         docs_list.insert(0, {"file_name": None, "doc_type": None, "results": no_doc_results})
 
-    return {"task_id": str(task_id), "docs": docs_list, "summary": task.summary or {}}
+    return {"task_id": str(task_id), "docs": docs_list, "summary": summary}
