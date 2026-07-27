@@ -5,9 +5,9 @@ import {
   Select, Space, message, Typography, Tooltip, Popconfirm, Tabs, List, Spin, Alert,
   Upload,
 } from 'antd'
-import { PlusOutlined, EditOutlined, DeleteOutlined, ThunderboltOutlined, HistoryOutlined, ImportOutlined, InboxOutlined, FileTextOutlined, SettingOutlined } from '@ant-design/icons'
-import { rulesApi, graphApi, constantsApi } from '../api/client'
-import type { Rule, RuleSnapshot, DocTypeMeta, ConstantsResponse, RuleImportResponse, RuleDocumentImportResponse } from '../types'
+import { PlusOutlined, EditOutlined, DeleteOutlined, ThunderboltOutlined, HistoryOutlined, ImportOutlined, InboxOutlined, FileTextOutlined, SettingOutlined, CheckOutlined } from '@ant-design/icons'
+import { rulesApi, graphApi, constantsApi, ruleSetsApi } from '../api/client'
+import type { Rule, RuleSet, RuleSnapshot, DocTypeMeta, ConstantsResponse, RuleImportResponse, RuleDocumentImportResponse } from '../types'
 import PageHeader from '../components/PageHeader'
 import { useRuleSet } from '../context/RuleSetContext'
 import dayjs from 'dayjs'
@@ -22,8 +22,11 @@ export default function RulesPage() {
   const [rules, setRules] = useState<Rule[]>([])
   const [snapshots, setSnapshots] = useState<RuleSnapshot[]>([])
   const [docTypes, setDocTypes] = useState<DocTypeMeta[]>([])
+  const [ruleSet, setRuleSet] = useState<RuleSet | null>(null)  // 当前规则集详情（含 doc_types / check_categories）
   const [loading, setLoading] = useState(false)
   const [building, setBuilding] = useState(false)
+  const [deleting, setDeleting] = useState(false)
+  const [selectedRowKeys, setSelectedRowKeys] = useState<string[]>([])
   const [modalOpen, setModalOpen] = useState(false)
   const [editing, setEditing] = useState<Rule | null>(null)
   const [form] = Form.useForm()
@@ -35,19 +38,32 @@ export default function RulesPage() {
   // 文件导入
   const [importFile, setImportFile] = useState<File | null>(null)
   const [fileImportResult, setFileImportResult] = useState<RuleDocumentImportResponse | null>(null)
+  // 导入阶段提示（解决"点了没反馈"的问题）
+  const [importStage, setImportStage] = useState<'parsing' | 'llm' | 'saving' | null>(null)
+  const [importError, setImportError] = useState<string | null>(null)
+  // 批量确认
+  const [confirming, setConfirming] = useState(false)
+
+  const STAGE_TIP: Record<NonNullable<typeof importStage>, string> = {
+    parsing: '正在解析文档为文本（PDF/Excel/Word）...',
+    llm: '正在调用大模型提取规则（约 20-30 秒）...',
+    saving: '正在入库，请稍候...',
+  }
 
   const load = async () => {
     if (!currentId) return
     setLoading(true)
     try {
-      const [r, s, c] = await Promise.all([
+      const [r, s, c, rs] = await Promise.all([
         rulesApi.list(currentId),
         rulesApi.listSnapshots(currentId),
         constantsApi.docTypes(),
+        ruleSetsApi.get(currentId),
       ])
       setRules(r)
       setSnapshots(s)
       setDocTypes(c.doc_types)
+      setRuleSet(rs)
     } catch (e: any) {
       message.error('加载失败: ' + (e?.message || e))
     } finally {
@@ -67,6 +83,31 @@ export default function RulesPage() {
     })
     return m
   }, [rules])
+
+  // 动态文件类型列表（种子 + 规则集声明 + 实际规则中的类型，去重）
+
+  // 动态文件类型列表（种子 + 规则集声明 + 实际规则中的类型，去重）
+  const effectiveDocTypes = useMemo(() => {
+    const seed: string[] = docTypes.map((d) => d.name)
+    const fromSet: string[] = ruleSet?.doc_types || []
+    const fromRules: string[] = [...new Set(rules.map((r) => r.doc_type))]
+    const merged = [...new Set([...seed, ...fromSet, ...fromRules])]
+    // 排序：已声明的种子靠前（保持 seed 相对顺序），新增的放后面
+    const seedOrder = new Map(seed.map((n, i) => [n, i]))
+    return merged.sort((a, b) => {
+      const ia = seedOrder.has(a) ? seedOrder.get(a)! : 999
+      const ib = seedOrder.has(b) ? seedOrder.get(b)! : 999
+      return ia - ib
+    })
+  }, [docTypes, ruleSet, rules])
+
+  // 动态检查项列表（种子 + 规则集声明 + 实际规则，去重）
+  const effectiveCheckCategories = useMemo(() => {
+    const seed: string[] = [...CHECK_CATEGORIES]
+    const fromSet: string[] = ruleSet?.check_categories || []
+    const fromRules: string[] = [...new Set(rules.map((r) => r.check_category))]
+    return [...new Set([...seed, ...fromSet, ...fromRules])]
+  }, [ruleSet, rules])
 
   const openCreate = () => {
     setEditing(null)
@@ -143,11 +184,44 @@ export default function RulesPage() {
     }
   }
 
+  /** 批量删除规则：传 ids 仅删指定；不传则清空当前规则集全部规则 */
+  const handleBatchDelete = async (ids?: string[]) => {
+    if (!currentId) return
+    setDeleting(true)
+    try {
+      const resp = await rulesApi.batchDelete(currentId, ids)
+      message.success(`已删除 ${resp.deleted} 条规则`)
+      setSelectedRowKeys([])
+      await load()
+    } catch (e: any) {
+      message.error('删除失败: ' + (e?.response?.data?.detail || e?.message || e))
+    } finally {
+      setDeleting(false)
+    }
+  }
+
+  /** 批量确认：传 ids 仅确认指定；不传则确认所有 pending 规则 */
+  const handleBatchConfirm = async (ids?: string[]) => {
+    if (!currentId) return
+    setConfirming(true)
+    try {
+      const resp = await rulesApi.confirmBatch(currentId, ids)
+      message.success(resp.message)
+      await load()
+    } catch (e: any) {
+      message.error('确认失败: ' + (e?.response?.data?.detail || e?.message || e))
+    } finally {
+      setConfirming(false)
+    }
+  }
+
   const openImport = () => {
     setImportText('')
     setImportResult(null)
     setImportFile(null)
     setFileImportResult(null)
+    setImportStage(null)
+    setImportError(null)
     setImportMode('text')
     setImportOpen(true)
   }
@@ -159,6 +233,8 @@ export default function RulesPage() {
     }
     setImporting(true)
     setImportResult(null)
+    setImportStage('llm')
+    setImportError(null)
     try {
       const resp = await rulesApi.importBatch(currentId!, importText)
       setImportResult(resp)
@@ -169,9 +245,12 @@ export default function RulesPage() {
         message.warning(`未导入任何规则，跳过 ${resp.skipped} 条`)
       }
     } catch (e: any) {
-      message.error('导入失败: ' + (e?.response?.data?.detail || e?.message || e))
+      const msg = '导入失败: ' + (e?.response?.data?.detail || e?.message || e)
+      setImportError(msg)
+      message.error(msg)
     } finally {
       setImporting(false)
+      setImportStage(null)
     }
   }
 
@@ -183,8 +262,14 @@ export default function RulesPage() {
     }
     setImporting(true)
     setFileImportResult(null)
+    setImportError(null)
+    setImportStage('parsing')
+    // 阶段 1：上传+解析（典型 1-3 秒）
+    await new Promise((r) => setTimeout(r, 50)) // 让 UI 渲染出阶段 1
+    setImportStage('llm')
     try {
       const resp = await rulesApi.importDocument(currentId!, importFile)
+      setImportStage('saving')
       setFileImportResult(resp)
       if (resp.imported > 0) {
         message.success(`导入完成：成功 ${resp.imported} 条，跳过 ${resp.skipped} 条`)
@@ -193,9 +278,12 @@ export default function RulesPage() {
         message.warning(`未导入任何规则，跳过 ${resp.skipped} 条`)
       }
     } catch (e: any) {
-      message.error('文件导入失败: ' + (e?.response?.data?.detail || e?.message || e))
+      const msg = '文件导入失败: ' + (e?.response?.data?.detail || e?.message || e)
+      setImportError(msg)
+      message.error(msg)
     } finally {
       setImporting(false)
+      setImportStage(null)
     }
   }
 
@@ -230,29 +318,26 @@ export default function RulesPage() {
 
   // 二维表格渲染
   const renderMatrix = () => {
-    const requiredTypes = docTypes.filter((d) => d.is_required)
-    const optionalTypes = docTypes.filter((d) => d.is_optional)
-    const otherTypes = docTypes.filter((d) => !d.is_required && !d.is_optional)
-    const ordered = [...requiredTypes, ...optionalTypes, ...otherTypes]
-
     return (
       <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
         <thead>
           <tr>
             <th style={thStyle}>文件类型 \ 检查项</th>
-            {CHECK_CATEGORIES.map((c) => <th key={c} style={thStyle}>{c}</th>)}
+            {effectiveCheckCategories.map((c) => <th key={c} style={thStyle}>{c}</th>)}
           </tr>
         </thead>
         <tbody>
-          {ordered.map((dt) => (
-            <tr key={dt.name}>
+          {effectiveDocTypes.map((dt) => {
+            const meta = docTypes.find((d) => d.name === dt)
+            return (
+            <tr key={dt}>
               <td style={tdStyle}>
-                <Text strong>{dt.name}</Text>
-                {dt.is_required && <Tag color="red" style={{ marginLeft: 4 }}>必备</Tag>}
-                {dt.is_optional && <Tag color="blue" style={{ marginLeft: 4 }}>非必备</Tag>}
+                <Text strong>{dt}</Text>
+                {meta?.is_required && <Tag color="red" style={{ marginLeft: 4 }}>必备</Tag>}
+                {meta?.is_optional && <Tag color="blue" style={{ marginLeft: 4 }}>非必备</Tag>}
               </td>
-              {CHECK_CATEGORIES.map((cc) => {
-                const cellRules = matrix[dt.name]?.[cc] || []
+              {effectiveCheckCategories.map((cc) => {
+                const cellRules = matrix[dt]?.[cc] || []
                 return (
                   <td key={cc} style={tdStyle} onClick={() => cellRules.length > 0 && openEdit(cellRules[0])}>
                     {cellRules.length === 0 ? (
@@ -268,7 +353,7 @@ export default function RulesPage() {
                 )
               })}
             </tr>
-          ))}
+          )})}
         </tbody>
       </table>
     )
@@ -281,6 +366,23 @@ export default function RulesPage() {
     { title: '文件类型', dataIndex: 'doc_type', key: 'doc_type', width: 140 },
     { title: '检查项', dataIndex: 'check_category', key: 'check_category', width: 120 },
     { title: '规则文本', dataIndex: 'rule_text', key: 'rule_text', ellipsis: true },
+    {
+      title: '置信度', key: 'confidence', width: 90,
+      render: (_: unknown, row: Rule) => {
+        if (row.confidence == null) return <Text type="secondary">-</Text>
+        const c = row.confidence
+        const color = c >= 0.9 ? 'green' : c >= 0.7 ? 'orange' : 'red'
+        return <Tag color={color}>{(c * 100).toFixed(0)}%</Tag>
+      },
+    },
+    {
+      title: '状态', key: 'status', width: 90,
+      render: (_: unknown, row: Rule) => (
+        row.status === 'confirmed'
+          ? <Tag color="green">已确认</Tag>
+          : <Tag color="orange">待确认</Tag>
+      ),
+    },
     {
       title: '容差', key: 'tolerance', width: 200,
       render: (_: unknown, row: Rule) => {
@@ -311,9 +413,14 @@ export default function RulesPage() {
       ),
     },
     {
-      title: '操作', key: 'action', width: 120,
+      title: '操作', key: 'action', width: 160,
       render: (_: unknown, row: Rule) => (
         <Space>
+          {row.status !== 'confirmed' && (
+            <Popconfirm title="确认该条规则？" onConfirm={() => handleBatchConfirm([row.id])}>
+              <Button size="small" type="primary" ghost icon={<CheckOutlined />}>确认</Button>
+            </Popconfirm>
+          )}
           <Button size="small" icon={<EditOutlined />} onClick={() => openEdit(row)} />
           <Popconfirm title="确定删除该规则？" onConfirm={() => handleDelete(row.id)}>
             <Button size="small" danger icon={<DeleteOutlined />} />
@@ -327,17 +434,24 @@ export default function RulesPage() {
     <div>
       <PageHeader
         title="规则管理"
-        subtitle="维护审查规则，支持新增、批量导入与图谱生成。规则按文档类型与检查类别分类管理"
+        subtitle="维护审查规则，支持新增、批量导入。规则按文档类型与检查类别分类管理"
         icon={<SettingOutlined />}
         extra={
           <Space>
             <Button icon={<PlusOutlined />} onClick={openCreate}>新增规则</Button>
             <Button icon={<ImportOutlined />} onClick={openImport}>批量导入</Button>
-            <Button type="primary" icon={<ThunderboltOutlined />} loading={building} onClick={() => handleBuild(false)}>生成图谱</Button>
             <Popconfirm title="一键自动确认全部规则（忽略置信度）？" onConfirm={() => handleBuild(true)}>
               <Button icon={<ThunderboltOutlined />} loading={building}>一键自动确认</Button>
             </Popconfirm>
             <Button icon={<HistoryOutlined />} onClick={load}>刷新</Button>
+            <Popconfirm
+              title={`确定清空当前规则集的全部 ${rules.length} 条规则？此操作不可恢复`}
+              onConfirm={() => handleBatchDelete()}
+              okText="清空"
+              okButtonProps={{ danger: true }}
+            >
+              <Button danger icon={<DeleteOutlined />} loading={deleting}>清空规则</Button>
+            </Popconfirm>
           </Space>
         }
       />
@@ -359,7 +473,41 @@ export default function RulesPage() {
             label: '规则列表',
             children: (
               <Card loading={loading}>
-                <Table dataSource={rules} columns={ruleColumns} rowKey="id" size="small" pagination={{ pageSize: 20 }} />
+                <Space style={{ marginBottom: 12 }}>
+                  <Popconfirm
+                    title={`确定删除选中的 ${selectedRowKeys.length} 条规则？此操作不可恢复`}
+                    onConfirm={() => handleBatchDelete(selectedRowKeys)}
+                    okText="删除"
+                    okButtonProps={{ danger: true }}
+                    disabled={selectedRowKeys.length === 0}
+                  >
+                    <Button danger icon={<DeleteOutlined />} loading={deleting} disabled={selectedRowKeys.length === 0}>
+                      删除选中 ({selectedRowKeys.length})
+                    </Button>
+                  </Popconfirm>
+                  {selectedRowKeys.length > 0 && (
+                    <Button onClick={() => setSelectedRowKeys([])}>取消选择</Button>
+                  )}
+                  <Popconfirm
+                    title="一键确认全部待定规则（忽略置信度）？"
+                    onConfirm={() => handleBatchConfirm()}
+                  >
+                    <Button icon={<CheckOutlined />} loading={confirming}>
+                      一键确认待定
+                    </Button>
+                  </Popconfirm>
+                </Space>
+                <Table
+                  dataSource={rules}
+                  columns={ruleColumns}
+                  rowKey="id"
+                  size="small"
+                  pagination={{ pageSize: 20 }}
+                  rowSelection={{
+                    selectedRowKeys,
+                    onChange: (keys) => setSelectedRowKeys(keys as string[]),
+                  }}
+                />
               </Card>
             ),
           },
@@ -457,12 +605,27 @@ export default function RulesPage() {
       <Modal
         title="批量导入规则"
         open={importOpen}
-        onCancel={() => setImportOpen(false)}
+        onCancel={() => !importing && setImportOpen(false)}
+        closable={!importing}
+        maskClosable={!importing}
         width={760}
         footer={null}
         destroyOnClose
       >
-        <Tabs
+        {/* importing 时全屏遮罩 + 阶段提示（解决"点了没反馈"的问题） */}
+        <Spin spinning={importing} tip={importStage ? STAGE_TIP[importStage] : '处理中...'} size="large">
+          {importError && (
+            <Alert
+              type="error"
+              showIcon
+              closable
+              onClose={() => setImportError(null)}
+              style={{ marginBottom: 12 }}
+              message="导入失败"
+              description={importError}
+            />
+          )}
+          <Tabs
           activeKey={importMode}
           onChange={(k) => setImportMode(k as 'text' | 'file')}
           items={[
@@ -492,7 +655,7 @@ export default function RulesPage() {
                   />
                   <div style={{ marginTop: 12, textAlign: 'right' }}>
                     <Space>
-                      <Button onClick={() => setImportOpen(false)}>关闭</Button>
+                      <Button onClick={() => setImportOpen(false)} disabled={importing}>关闭</Button>
                       <Button type="primary" loading={importing} onClick={handleImport}>
                         开始解析并导入
                       </Button>
@@ -547,13 +710,8 @@ export default function RulesPage() {
                   </Dragger>
                   <div style={{ marginTop: 12, textAlign: 'right' }}>
                     <Space>
-                      <Button onClick={() => setImportOpen(false)}>关闭</Button>
-                      <Button
-                        type="primary"
-                        loading={importing}
-                        onClick={handleImportFile}
-                        disabled={!importFile}
-                      >
+                      <Button onClick={() => setImportOpen(false)} disabled={importing}>关闭</Button>
+                      <Button type="primary" loading={importing} onClick={handleImportFile} disabled={!importFile}>
                         开始解析并导入
                       </Button>
                     </Space>
@@ -610,6 +768,7 @@ export default function RulesPage() {
             },
           ]}
         />
+        </Spin>
       </Modal>
     </div>
   )

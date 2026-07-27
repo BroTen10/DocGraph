@@ -10,7 +10,7 @@ from sqlalchemy.orm import Session
 
 from ..database import get_db
 from ..schemas.graph import GraphSnapshotOut
-from ..schemas.rule import RuleCreate, RuleImportRequest, RuleImportResponse, RuleOut, RuleUpdate
+from ..schemas.rule import RuleBatchConfirmRequest, RuleCreate, RuleImportRequest, RuleImportResponse, RuleOut, RuleUpdate
 from ..services import rule_import_service, rule_service
 
 router = APIRouter(prefix="/api/rules", tags=["rules"])
@@ -67,6 +67,40 @@ def delete_rule(rule_id: uuid.UUID, db: Session = Depends(get_db)) -> dict:
     if not rule_service.delete_rule(db, rule_id):
         raise HTTPException(status_code=404, detail="规则不存在")
     return {"success": True, "message": "规则已删除"}
+
+
+@router.delete("")
+def delete_rules_batch(
+    rule_set_id: uuid.UUID = Query(..., description="规则集 ID"),
+    ids: Optional[str] = Query(
+        None, description="逗号分隔的规则 ID 列表；不提供则清空该规则集全部规则"
+    ),
+    db: Session = Depends(get_db),
+) -> dict:
+    """批量删除规则。提供 ids 则仅删除指定规则；否则清空该规则集下所有规则。"""
+    id_list: Optional[list[uuid.UUID]] = None
+    if ids:
+        try:
+            id_list = [uuid.UUID(x.strip()) for x in ids.split(",") if x.strip()]
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=f"非法规则 ID: {e}")
+    deleted = rule_service.delete_rules_batch(db, rule_set_id, id_list)
+    return {"success": True, "deleted": deleted}
+
+
+# ============ 批量确认 ============
+@router.post("/confirm")
+def confirm_rules_batch(
+    payload: RuleBatchConfirmRequest,
+    rule_set_id: uuid.UUID = Query(..., description="规则集 ID"),
+    confirmed_by: str = Query("user", description="确认人"),
+    db: Session = Depends(get_db),
+) -> dict:
+    """批量确认规则。提供 ids 则仅确认这些；不提供则确认该规则集下所有 pending 规则。"""
+    count = rule_service.confirm_rules_batch(
+        db, rule_set_id, payload.ids, confirmed_by=confirmed_by,
+    )
+    return {"success": True, "confirmed": count, "message": f"已确认 {count} 条规则"}
 
 
 # ============ 规则快照 ============

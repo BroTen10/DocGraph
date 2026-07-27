@@ -16,6 +16,10 @@ class RuleBase(BaseModel):
     tolerance: dict[str, Any] = Field(default_factory=dict)
     enabled: bool = True
     priority: int = 100
+    # LLM 置信度 (0-1)，null 表示未评估
+    confidence: float | None = None
+    # 确认状态：pending = 待确认, confirmed = 已确认
+    status: str = "pending"
 
 
 class RuleCreate(RuleBase):
@@ -29,6 +33,8 @@ class RuleUpdate(BaseModel):
     tolerance: dict[str, Any] | None = None
     enabled: bool | None = None
     priority: int | None = None
+    confidence: float | None = None
+    status: str | None = None
 
 
 class RuleImportRequest(BaseModel):
@@ -50,5 +56,14 @@ class RuleOut(RuleBase):
 
     id: UUID
     rule_set_id: UUID
+    status: str
+    confidence: float | None = None
+    confirmed_at: datetime | None = None
+    confirmed_by: str | None = None
     updated_at: datetime
     created_at: datetime
+
+
+class RuleBatchConfirmRequest(BaseModel):
+    """批量确认规则。ids 不传则确认该规则集下所有 pending 规则。"""
+    ids: list[UUID] | None = None

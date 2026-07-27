@@ -34,6 +34,8 @@ class RuleSet(Base):
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
     # 适用文件类型清单，如 ["代理协议","委托单","报关单"]
     doc_types: Mapped[list] = mapped_column(JSONB, default=list, nullable=False)
+    # 适用检查项类别清单，如 ["齐套性","基础判断","信息准确性","时间逻辑"]
+    check_categories: Mapped[list] = mapped_column(JSONB, default=list, nullable=False)
     # 是否默认规则集（同一时刻只能有一个默认）
     is_default: Mapped[bool] = mapped_column(
         Boolean, default=False, nullable=False, index=True

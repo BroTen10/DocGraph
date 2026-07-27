@@ -33,7 +33,8 @@ export default function UploadPage() {
   const [compareLoading, setCompareLoading] = useState(false)
   // OCR 任务状态:当前正在运行的 OCR 任务(选中合同时显示进度)
   const [ocrTask, setOcrTask] = useState<OcrTask | null>(null)
-  const [ocrTriggering, setOcrTriggering] = useState(false) // 触发按钮 loading
+  const [ocrTriggering, setOcrTriggering] = useState(false) // 批量触发按钮 loading
+  const [docOcrLoading, setDocOcrLoading] = useState<Record<string, boolean>>({}) // 单文档触发 loading(按文档粒度,支持并行触发)
   const ocrPollRef = useRef<ReturnType<typeof setInterval> | null>(null)
 
   const load = async () => {
@@ -199,6 +200,7 @@ export default function UploadPage() {
 
   const triggerDocOcr = async (docId: string, fileName: string) => {
     if (!currentId) return
+    setDocOcrLoading((m) => ({ ...m, [docId]: true }))
     try {
       const t = await ocrApi.triggerDoc(currentId, docId)
       setOcrTask(t)
@@ -206,6 +208,8 @@ export default function UploadPage() {
       pollOcrTask(t.id)
     } catch (e: any) {
       message.error('触发 OCR 失败: ' + (e?.message || e))
+    } finally {
+      setDocOcrLoading((m) => ({ ...m, [docId]: false }))
     }
   }
 
@@ -336,7 +340,7 @@ export default function UploadPage() {
                 type="link"
                 icon={row.ocr_status === 'failed' ? <ReRunIcon /> : <ThunderboltOutlined />}
                 onClick={() => triggerDocOcr(row.id, row.file_name)}
-                disabled={ocrTriggering || ocrTask?.status === 'running'}
+                disabled={docOcrLoading[row.id]}
               >
                 {row.ocr_status === 'failed' ? '重试' : '识别'}
               </Button>

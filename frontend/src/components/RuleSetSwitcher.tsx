@@ -1,7 +1,8 @@
 /** 规则集切换器:Header 右上角下拉切换 + 创建新规则集弹窗。 */
 
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { Button, Dropdown, Modal, Form, Input, Select, Switch, Space, Tag, Tooltip, Typography } from 'antd'
+import type { MenuProps } from 'antd'
 import { PlusOutlined, DownOutlined, AppstoreOutlined } from '@ant-design/icons'
 import { useRuleSet } from '../context/RuleSetContext'
 import { constantsApi } from '../api/client'
@@ -10,7 +11,7 @@ import type { DocTypeMeta } from '../types'
 const { Text } = Typography
 
 export function RuleSetSwitcher() {
-  const { ruleSets, current, currentId, loading, switchTo, create, refresh } = useRuleSet()
+  const { ruleSets, current, currentId, loading, switchTo, create } = useRuleSet()
   const [modalOpen, setModalOpen] = useState(false)
   const [docTypes, setDocTypes] = useState<DocTypeMeta[]>([])
   const [submitting, setSubmitting] = useState(false)
@@ -40,8 +41,8 @@ export function RuleSetSwitcher() {
     }
   }
 
-  const menuItems = [
-    ...ruleSets.map((r) => ({
+  const menuItems: MenuProps['items'] = useMemo(() => {
+    const items: MenuProps['items'] = ruleSets.map((r) => ({
       key: r.id,
       label: (
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, minWidth: 240 }}>
@@ -59,9 +60,11 @@ export function RuleSetSwitcher() {
         </div>
       ),
       onClick: () => switchTo(r.id),
-    })),
-    { type: 'divider' as const },
-    {
+    }))
+    if (ruleSets.length > 0) {
+      items.push({ type: 'divider' })
+    }
+    items.push({
       key: '__create__',
       label: (
         <div style={{ display: 'flex', alignItems: 'center', gap: 8, color: '#6366f1', fontWeight: 500 }}>
@@ -69,8 +72,9 @@ export function RuleSetSwitcher() {
         </div>
       ),
       onClick: () => setModalOpen(true),
-    },
-  ]
+    })
+    return items
+  }, [ruleSets, currentId, switchTo])
 
   return (
     <>
@@ -79,9 +83,8 @@ export function RuleSetSwitcher() {
           menu={{ items: menuItems }}
           trigger={['click']}
           placement="bottomRight"
-          onOpenChange={(open) => {
-            if (open) refresh()
-          }}
+          getPopupContainer={() => document.body}
+          destroyOnHidden={false}
         >
           <Button
             loading={loading}
