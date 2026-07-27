@@ -133,14 +133,22 @@ def run_graph_review(
     """
     neo4j = neo4j or get_neo4j_client()
 
-    # 1. 取最新快照的 graph_id
+    # 1. 取最新快照的 graph_id（按 contract.rule_set_id 过滤，否则会用错规则集的图谱）
     from sqlalchemy import select
-    stmt = select(RuleSnapshot).order_by(RuleSnapshot.snapshot_time.desc()).limit(1)
+    stmt = (
+        select(RuleSnapshot)
+        .where(RuleSnapshot.rule_set_id == contract.rule_set_id)
+        .order_by(RuleSnapshot.snapshot_time.desc())
+        .limit(1)
+    )
     snapshot = db.execute(stmt).scalars().first()
     if snapshot is None or not snapshot.graph_id:
         raise ValueError("无可用图谱快照，请先构建规则图谱")
     graph_id = snapshot.graph_id
-    logger.info("图谱驱动审查: graph_id=%s, 合同=%s, 文档数=%d", graph_id, contract.contract_no, len(docs))
+    logger.info(
+        "图谱驱动审查: graph_id=%s, rule_set_id=%s, 合同=%s, 文档数=%d",
+        graph_id, contract.rule_set_id, contract.contract_no, len(docs),
+    )
 
     results: list[ReviewResult] = []
 

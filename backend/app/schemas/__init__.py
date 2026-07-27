@@ -18,6 +18,7 @@ from .graph import (
     GraphSnapshotOut,
     RuleGraphConvertResult,
 )
+from .ocr_task import OcrTaskBrief, OcrTaskOut
 from .review import (
     ReviewResultByDoc,
     ReviewResultByRule,
@@ -27,6 +28,7 @@ from .review import (
     ReviewTaskSummary,
 )
 from .rule import RuleCreate, RuleOut, RuleUpdate
+from .rule_set import RuleSetCreate, RuleSetOut, RuleSetUpdate
 
 __all__ = [
     "ContractAliasUpdate",
@@ -35,9 +37,14 @@ __all__ = [
     "ContractUploadResponse",
     "DocTypeUpdate",
     "DocumentBrief",
+    "OcrTaskBrief",
+    "OcrTaskOut",
     "RuleCreate",
     "RuleOut",
     "RuleUpdate",
+    "RuleSetCreate",
+    "RuleSetOut",
+    "RuleSetUpdate",
     "EntityData",
     "EdgeData",
     "GraphData",

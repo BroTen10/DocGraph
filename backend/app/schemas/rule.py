@@ -49,5 +49,6 @@ class RuleOut(RuleBase):
     model_config = ConfigDict(from_attributes=True)
 
     id: UUID
+    rule_set_id: UUID
     updated_at: datetime
     created_at: datetime

@@ -58,18 +58,18 @@ if errorlevel 1 (
     timeout /t 2 /nobreak >nul
     goto wait_pg
 )
-echo       数据库就绪（Postgres:5432  Neo4j:7687）。
+echo       数据库就绪（Postgres:5432  Neo4j:17687（Bolt））。
 echo.
 
 REM ---- 3. 启动后端 ----
-echo [3/5] 启动后端 FastAPI（端口 8000）...
+echo [3/5] 启动后端 FastAPI（端口 8800）...
 if not exist "%BACKEND_DIR%\.venv\Scripts\python.exe" (
     echo [错误] 未找到后端虚拟环境：%BACKEND_DIR%\.venv
     echo        请先在 backend 目录下创建虚拟环境并安装 requirements.txt。
     pause
     exit /b 1
 )
-start "后端 - FastAPI (8000)" /D "%BACKEND_DIR%" cmd /k "chcp 65001 >nul & .\.venv\Scripts\python.exe run.py"
+start "后端 - FastAPI (8800)" /D "%BACKEND_DIR%" cmd /k "chcp 65001 >nul & .\.venv\Scripts\python.exe run.py"
 echo       后端窗口已打开。
 echo.
 
@@ -96,7 +96,7 @@ REM ---- 5. 等待后端就绪后打开浏览器 ----
 echo [5/5] 等待后端服务就绪...
 set "WAIT_SEC=0"
 :wait_backend
-powershell -NoProfile -Command "try { (Invoke-WebRequest -UseBasicParsing -Uri 'http://localhost:8000/api/health' -TimeoutSec 2).StatusCode } catch { 0 }" > "%TEMP%\_doc_review_hc.txt" 2>nul
+powershell -NoProfile -Command "try { (Invoke-WebRequest -UseBasicParsing -Uri 'http://localhost:8800/api/health' -TimeoutSec 2).StatusCode } catch { 0 }" > "%TEMP%\_doc_review_hc.txt" 2>nul
 set /p HC=<"%TEMP%\_doc_review_hc.txt"
 if "%HC%"=="200" (
     echo       后端已就绪。
@@ -118,7 +118,7 @@ echo   全部启动完成！
 echo.
 echo   Postgres:      localhost:5432  (postgres / postgres)
 echo   Neo4j 控制台:  http://localhost:7474  (neo4j / neo4jpassword)
-echo   后端 API:      http://localhost:8000/api/health
+echo   后端 API:      http://localhost:8800/api/health
 echo   前端页面:      http://localhost:5173
 echo.
 echo   关闭对应子窗口即可停止后端/前端。

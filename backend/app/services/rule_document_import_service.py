@@ -13,6 +13,7 @@ from __future__ import annotations
 import logging
 import os
 import tempfile
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -146,6 +147,7 @@ def extract_text_from_file(file_path: str, filename: str) -> str:
 
 def import_rules_from_document(
     db: Session,
+    rule_set_id: uuid.UUID,
     file_content: bytes,
     filename: str,
 ) -> dict[str, Any]:
@@ -153,6 +155,7 @@ def import_rules_from_document(
 
     Args:
         db: 数据库会话
+        rule_set_id: 规则集 ID（导入规则归到该规则集下）
         file_content: 文件二进制内容
         filename: 原始文件名
 
@@ -177,7 +180,7 @@ def import_rules_from_document(
         logger.info("文件 %s 提取到 %d 字符文本", filename, len(text))
 
         # 复用已有的文本导入逻辑
-        result = import_rules_from_text(db, text)
+        result = import_rules_from_text(db, rule_set_id, text)
         result["extracted_text_preview"] = text[:500]  # 预览前 500 字符
         result["extracted_text_length"] = len(text)
         result["source_filename"] = filename

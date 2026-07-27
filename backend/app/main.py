@@ -1,10 +1,12 @@
 """FastAPI 应用入口。
 
 启动时：
-1. 初始化 Postgres 表结构
-2. 插入种子规则（若 rules 表为空）
-3. 注册所有路由
-4. 启用 CORS（前端独立部署）
+1. 初始化 Postgres 表结构（DROP SCHEMA + CREATE SCHEMA + create_all）
+2. 注册所有路由（含 rule-sets）
+3. 启用 CORS（前端独立部署）
+
+注意：多 RuleSet 改造后，不再自动插入种子规则。
+用户需在前端手动创建规则集、添加规则后才能使用审查能力。
 """
 
 from __future__ import annotations
@@ -16,9 +18,8 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from .config import settings
-from .database import SessionLocal, init_db
-from .routers import contracts, graph, reviews, rules
-from .services.seed_rules import init_seed_rules
+from .database import init_db
+from .routers import contracts, graph, ocr, reviews, rule_sets, rules
 
 logging.basicConfig(
     level=logging.INFO,
@@ -31,17 +32,15 @@ logger = logging.getLogger(__name__)
 async def lifespan(app: FastAPI):
     """应用生命周期：启动时初始化。"""
     logger.info("=== 启动文档审查智能体后端 ===")
-    # 1. 创建表
+    # 1. 创建表（含 rule_sets 表与 rule_set_id 外键）
+    #    注意：init_db 会先 DROP SCHEMA public CASCADE，再 CREATE SCHEMA public，再 create_all
+    #    用户已确认不迁移旧数据。
     init_db()
     logger.info("Postgres 表已就绪")
-    # 2. 插入种子规则
-    with SessionLocal() as db:
-        n = init_seed_rules(db)
-        if n:
-            logger.info("已插入 %d 条种子规则", n)
-        else:
-            logger.info("种子规则已存在，跳过")
-    # 3. 确保上传目录存在
+    # 多 RuleSet 改造后不再自动插入种子规则。
+    # 用户需在前端手动创建规则集（POST /api/rule-sets），
+    # 再为规则集添加规则（POST /api/rules?rule_set_id=...）。
+    # 2. 确保上传目录存在
     settings.ensure_upload_root()
     yield
     logger.info("=== 后端关闭 ===")
@@ -50,7 +49,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="基于知识图谱的自动文档审查智能体 API",
     version="1.0.0",
-    description="出口代理贸易单证自动审查 - MVP",
+    description="出口代理贸易单证自动审查 - MVP（多规则集）",
     lifespan=lifespan,
 )
 
@@ -64,10 +63,12 @@ app.add_middleware(
 )
 
 # 注册路由
+app.include_router(rule_sets.router)
 app.include_router(contracts.router)
 app.include_router(rules.router)
 app.include_router(graph.router)
 app.include_router(reviews.router)
+app.include_router(ocr.router)
 
 
 @app.get("/api/health")

@@ -31,8 +31,15 @@ _build_tasks_lock = threading.Lock()
 class GraphBuildTaskState:
     """图谱构建任务的内存状态。"""
 
-    def __init__(self, task_id: str, operator: str, auto_confirm_all: bool):
+    def __init__(
+        self,
+        task_id: str,
+        rule_set_id: str,
+        operator: str,
+        auto_confirm_all: bool,
+    ):
         self.task_id = task_id
+        self.rule_set_id: str = rule_set_id
         self.status: str = "running"  # running / completed / failed
         self.progress: int = 0  # 0-100
         self.stage: str = "初始化"
@@ -67,6 +74,7 @@ class GraphBuildTaskState:
         """序列化为可返回前端的字典。"""
         return {
             "task_id": self.task_id,
+            "rule_set_id": self.rule_set_id,
             "status": self.status,
             "progress": self.progress,
             "stage": self.stage,
@@ -104,15 +112,17 @@ def list_build_tasks(limit: int = 20) -> list[dict[str, Any]]:
 
 
 def start_async_build(
+    rule_set_id: str,
     operator: str = "system",
     auto_confirm_all: bool = False,
 ) -> str:
     """启动异步图谱构建，返回 task_id。
 
     在后台线程中执行 build_graph，通过状态对象追踪进度。
+    rule_set_id 用于按规则集隔离规则与快照。
     """
     task_id = str(uuid.uuid4())
-    state = GraphBuildTaskState(task_id, operator, auto_confirm_all)
+    state = GraphBuildTaskState(task_id, rule_set_id, operator, auto_confirm_all)
     with _build_tasks_lock:
         _build_tasks[task_id] = state
 
@@ -121,7 +131,7 @@ def start_async_build(
 
     thread = threading.Thread(
         target=_run_async_build,
-        args=(task_id, operator, auto_confirm_all),
+        args=(task_id, rule_set_id, operator, auto_confirm_all),
         name=f"graph-build-{task_id}",
         daemon=True,
     )
@@ -149,7 +159,9 @@ def _cleanup_old_tasks(max_keep: int = 50) -> None:
             del _build_tasks[task_id]
 
 
-def _run_async_build(task_id: str, operator: str, auto_confirm_all: bool) -> None:
+def _run_async_build(
+    task_id: str, rule_set_id: str, operator: str, auto_confirm_all: bool
+) -> None:
     """后台线程执行图谱构建。"""
     state = get_build_task(task_id)
     if state is None:
@@ -179,9 +191,10 @@ def _run_async_build(task_id: str, operator: str, auto_confirm_all: bool) -> Non
                     level = "error"
                 state.add_message(level, stage, message)
 
-        # 调用 build_graph（在后台线程中执行，传入进度回调）
+        # 调用 build_graph（在后台线程中执行，传入 rule_set_id 与进度回调）
         result = graph_builder_service.build_graph(
             db=db,
+            rule_set_id=uuid.UUID(rule_set_id),
             auto_confirm_all=auto_confirm_all,
             operator=operator,
             progress_callback=_progress_callback,

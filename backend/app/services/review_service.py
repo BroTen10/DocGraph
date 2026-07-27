@@ -234,9 +234,9 @@ def _run_review_pipeline(
     if graph_used:
         results.extend(results_from_graph)
     else:
-        # 旧逻辑：加载启用规则（按 doc_type + check_category 索引）
+        # 旧逻辑：加载该合同所属规则集下的启用规则（按 doc_type + check_category 索引）
         rules_by_key: dict[tuple[str, str], list[Rule]] = {}
-        for rule in _load_enabled_rules(db):
+        for rule in _load_enabled_rules(db, contract.rule_set_id):
             rules_by_key.setdefault((rule.doc_type, rule.check_category), []).append(rule)
 
         # 检查1：齐套性
@@ -282,11 +282,13 @@ def _run_review_pipeline(
     db.commit()
 
 
-def _load_enabled_rules(db: Session) -> list[Rule]:
+def _load_enabled_rules(db: Session, rule_set_id: uuid.UUID) -> list[Rule]:
+    """加载指定规则集下的启用规则（按 priority 排序）。"""
     from sqlalchemy import select
 
     stmt = (
         select(Rule)
+        .where(Rule.rule_set_id == rule_set_id)
         .where(Rule.enabled.is_(True))
         .order_by(Rule.priority)
     )

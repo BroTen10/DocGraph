@@ -27,9 +27,12 @@ import type { UploadProps } from 'antd'
 import { graphApi, rulesApi } from '../api/client'
 import type { GraphData, GraphEdge, GraphBuildTaskStatus, RuleDocumentImportResponse, Rule, RuleSnapshot } from '../types'
 import GraphView from '../components/GraphView'
+import PageHeader from '../components/PageHeader'
+import EmptyState from '../components/EmptyState'
+import { useRuleSet } from '../context/RuleSetContext'
 import dayjs from 'dayjs'
 
-const { Title, Text, Paragraph } = Typography
+const { Text, Paragraph } = Typography
 
 /** 构建任务状态颜色 */
 const BUILD_STATUS_COLOR: Record<string, string> = {
@@ -47,6 +50,7 @@ const MSG_LEVEL_COLOR: Record<string, string> = {
 }
 
 export default function GraphPage() {
+  const { currentId } = useRuleSet()
   // 图谱数据
   const [graph, setGraph] = useState<GraphData | null>(null)
   const [loading, setLoading] = useState(false)
@@ -85,9 +89,10 @@ export default function GraphPage() {
 
   // ============ 数据加载 ============
   const loadGraph = useCallback(async () => {
+    if (!currentId) return
     setLoading(true)
     try {
-      const g = await graphApi.getLatest()
+      const g = await graphApi.getLatest(currentId)
       setGraph(g)
     } catch (e: any) {
       if (e?.response?.status === 404) {
@@ -98,20 +103,21 @@ export default function GraphPage() {
     } finally {
       setLoading(false)
     }
-  }, [])
+  }, [currentId])
 
   const loadWorkspace = useCallback(async () => {
+    if (!currentId) return
     try {
       const [rulesData, snapsData] = await Promise.all([
-        rulesApi.list({ enabled_only: true }),
-        rulesApi.listSnapshots(),
+        rulesApi.list(currentId, { enabled_only: true }),
+        rulesApi.listSnapshots(currentId),
       ])
       setRules(rulesData)
       setSnapshots(snapsData)
     } catch {
       // 静默
     }
-  }, [])
+  }, [currentId])
 
   const loadBuildTasks = useCallback(async () => {
     try {
@@ -190,7 +196,7 @@ export default function GraphPage() {
     setBuildTask(null)
     setActiveTab('progress')
     try {
-      const resp = await graphApi.buildAsync(autoConfirmAll)
+      const resp = await graphApi.buildAsync(currentId!, autoConfirmAll)
       message.info('图谱构建已启动，进度请看右侧面板')
       startPolling(resp.task_id)
     } catch (e: any) {
@@ -212,11 +218,15 @@ export default function GraphPage() {
         message.error('文件大小不能超过 10MB')
         return false
       }
+      if (!currentId) {
+        message.error('尚未选择规则集')
+        return false
+      }
 
       setImporting(true)
       setImportResult(null)
       rulesApi
-        .importDocument(file)
+        .importDocument(currentId, file)
         .then((result) => {
           setImportResult(result)
           message.success(
@@ -306,14 +316,11 @@ export default function GraphPage() {
   // ============ 渲染 ============
   return (
     <div>
-      {/* 顶部工具栏 */}
-      <Row justify="space-between" align="middle" style={{ marginBottom: 16 }}>
-        <Col>
-          <Title level={4} style={{ marginBottom: 0 }}>
-            <ApartmentOutlined /> 知识图谱
-          </Title>
-        </Col>
-        <Col>
+      <PageHeader
+        title="知识图谱"
+        subtitle="从规则文档导入并构建图谱，可视化节点关系，确认后写入 Neo4j 生效"
+        icon={<ApartmentOutlined />}
+        extra={
           <Space>
             <Upload {...importUploadProps}>
               <Button icon={<UploadOutlined />} loading={importing}>
@@ -342,8 +349,8 @@ export default function GraphPage() {
               <Button icon={<CheckCircleOutlined />}>确认生效</Button>
             </Popconfirm>
           </Space>
-        </Col>
-      </Row>
+        }
+      />
 
       <Row gutter={16}>
         {/* 左侧：图谱可视化 */}
@@ -368,11 +375,17 @@ export default function GraphPage() {
                 <Spin size="large" tip="加载图谱中..." />
               </div>
             ) : !graph ? (
-              <div style={{ textAlign: 'center', padding: 120 }}>
-                <Empty description="暂无图谱">
-                  <Paragraph type="secondary">
-                    请先导入规则文档或直接构建图谱
-                  </Paragraph>
+              <EmptyState
+                description={
+                  <>
+                    <div style={{ marginBottom: 4 }}>暂无图谱</div>
+                    <Paragraph type="secondary" style={{ margin: 0 }}>
+                      请先导入规则文档或直接构建图谱
+                    </Paragraph>
+                  </>
+                }
+                padding={80}
+                action={
                   <Space>
                     <Upload {...importUploadProps}>
                       <Button icon={<UploadOutlined />} type="primary">
@@ -387,8 +400,8 @@ export default function GraphPage() {
                       构建图谱
                     </Button>
                   </Space>
-                </Empty>
-              </div>
+                }
+              />
             ) : (
               <>
                 <Alert
@@ -455,22 +468,6 @@ export default function GraphPage() {
                           startPolling(t.task_id)
                         }
                       }}
-                    />
-                  ),
-                },
-                // ============ 规则文档导入 ============
-                {
-                  key: 'import',
-                  label: (
-                    <span>
-                      <UploadOutlined /> 规则导入
-                    </span>
-                  ),
-                  children: (
-                    <RuleImportPanel
-                      importResult={importResult}
-                      importing={importing}
-                      uploadProps={importUploadProps}
                     />
                   ),
                 },
@@ -684,112 +681,6 @@ function BuildProgressPanel({
               </List.Item>
             )}
           />
-        </div>
-      )}
-    </div>
-  )
-}
-
-// ============ 子组件：规则导入面板 ============
-function RuleImportPanel({
-  importResult,
-  importing,
-  uploadProps,
-}: {
-  importResult: RuleDocumentImportResponse | null
-  importing: boolean
-  uploadProps: UploadProps
-}) {
-  return (
-    <div style={{ padding: 12 }}>
-      <Alert
-        type="info"
-        showIcon
-        message="支持上传规则描述文档"
-        description="支持 PDF、Excel、Word、Markdown 格式。系统会自动提取文本并通过 LLM 解析为结构化规则。"
-        style={{ marginBottom: 12 }}
-      />
-
-      <Upload.Dragger {...uploadProps} disabled={importing}>
-        <p className="ant-upload-drag-icon">
-          {importing ? <Spin /> : <UploadOutlined style={{ fontSize: 36, color: '#1890ff' }} />}
-        </p>
-        <p className="ant-upload-text">
-          {importing ? '正在导入...' : '点击或拖拽文件到此区域'}
-        </p>
-        <p className="ant-upload-hint">支持 PDF / Excel / Word / Markdown（10MB 以内）</p>
-      </Upload.Dragger>
-
-      {importResult && (
-        <div style={{ marginTop: 12 }}>
-          <Card size="small" title="导入结果">
-            <Row gutter={8}>
-              <Col span={8}>
-                <Statistic title="总规则" value={importResult.total} valueStyle={{ fontSize: 18 }} />
-              </Col>
-              <Col span={8}>
-                <Statistic
-                  title="成功"
-                  value={importResult.imported}
-                  valueStyle={{ fontSize: 18, color: '#52c41a' }}
-                />
-              </Col>
-              <Col span={8}>
-                <Statistic
-                  title="跳过"
-                  value={importResult.skipped}
-                  valueStyle={{ fontSize: 18, color: '#faad14' }}
-                />
-              </Col>
-            </Row>
-
-            {importResult.source_filename && (
-              <div style={{ marginTop: 8, fontSize: 12, color: '#999' }}>
-                来源文件: {importResult.source_filename}
-                {importResult.extracted_text_length > 0 && (
-                  <span>（提取 {importResult.extracted_text_length} 字符）</span>
-                )}
-              </div>
-            )}
-
-            {importResult.extracted_text_preview && (
-              <div style={{ marginTop: 8 }}>
-                <Text type="secondary" style={{ fontSize: 11 }}>
-                  提取文本预览:
-                </Text>
-                <Paragraph
-                  style={{
-                    fontSize: 11,
-                    background: '#f6f8fa',
-                    padding: 6,
-                    borderRadius: 4,
-                    maxHeight: 100,
-                    overflow: 'auto',
-                    margin: 0,
-                  }}
-                >
-                  {importResult.extracted_text_preview}
-                  {importResult.extracted_text_length > 500 ? '...' : ''}
-                </Paragraph>
-              </div>
-            )}
-
-            {importResult.errors.length > 0 && (
-              <div style={{ marginTop: 8 }}>
-                <Text type="secondary" style={{ fontSize: 11 }}>
-                  跳过原因:
-                </Text>
-                <div style={{ fontSize: 11, color: '#fa541c' }}>
-                  {importResult.errors.slice(0, 5).map((e, i) => (
-                    <div key={i}>· {e}</div>
-                  ))}
-                  {importResult.errors.length > 5 && (
-                    <div>... 还有 {importResult.errors.length - 5} 条</div>
-                  )}
-                </div>
-              </div>
-            )}
-          </Card>
         </div>
       )}
     </div>

@@ -8,9 +8,12 @@ import { ReloadOutlined, FileSearchOutlined } from '@ant-design/icons'
 import { reviewsApi } from '../api/client'
 import type { ReviewResultItem, ReviewResultByRule, ReviewResultByDoc, ReviewTaskListItem } from '../types'
 import { RESULT_COLOR, RESULT_LABEL } from '../types'
+import PageHeader from '../components/PageHeader'
+import EmptyState from '../components/EmptyState'
+import { useRuleSet } from '../context/RuleSetContext'
 import dayjs from 'dayjs'
 
-const { Title, Text } = Typography
+const { Text } = Typography
 
 const statusColor: Record<string, string> = {
   pending: 'default',
@@ -27,6 +30,7 @@ const statusLabel: Record<string, string> = {
 }
 
 export default function ResultsPage() {
+  const { currentId } = useRuleSet()
   const [searchParams, setSearchParams] = useSearchParams()
   const [tasks, setTasks] = useState<ReviewTaskListItem[]>([])
   const [tasksLoading, setTasksLoading] = useState(false)
@@ -36,9 +40,10 @@ export default function ResultsPage() {
   const [loading, setLoading] = useState(false)
 
   const loadTasks = async (preserveSelection = true) => {
+    if (!currentId) return
     setTasksLoading(true)
     try {
-      const list = await reviewsApi.list({ limit: 100 })
+      const list = await reviewsApi.list(currentId, { limit: 100 })
       setTasks(list)
       // 决定选中项
       const fromUrl = searchParams.get('task_id')
@@ -88,9 +93,9 @@ export default function ResultsPage() {
   // 初始加载：从 URL ?task_id= 读取，或加载列表
   useEffect(() => {
     loadTasks(false)
-    // 仅在 mount 时执行
+    // 切换规则集时重新加载(App.tsx 已通过 key 强制重挂载,这里加依赖更稳妥)
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [])
+  }, [currentId])
 
   const onSelect = (id: string) => {
     setSelectedId(id)
@@ -180,18 +185,20 @@ export default function ResultsPage() {
 
   return (
     <div>
-      <Row justify="space-between" align="middle">
-        <Col><Title level={4}>审查结果展示</Title></Col>
-        <Col>
+      <PageHeader
+        title="审查结果展示"
+        subtitle="按规则维度与文档维度查看审查明细，支持任务历史切换"
+        icon={<FileSearchOutlined />}
+        extra={
           <Button icon={<ReloadOutlined />} onClick={() => loadTasks()} loading={tasksLoading}>刷新任务列表</Button>
-        </Col>
-      </Row>
+        }
+      />
 
       <Row gutter={16} style={{ marginTop: 16 }}>
         <Col span={8}>
           <Card title="审查任务列表" size="small" loading={tasksLoading}>
             {tasks.length === 0 ? (
-              <Empty description="暂无审查任务" />
+              <EmptyState description="暂无审查任务" padding={48} />
             ) : (
               <List
                 dataSource={tasks}
@@ -203,8 +210,10 @@ export default function ResultsPage() {
                     style={{
                       cursor: 'pointer',
                       padding: '10px 12px',
-                      background: t.id === selectedId ? '#e6f4ff' : undefined,
-                      borderLeft: t.id === selectedId ? '3px solid #1677ff' : '3px solid transparent',
+                      background: t.id === selectedId ? '#eef2ff' : undefined,
+                      borderLeft: t.id === selectedId ? '3px solid #6366f1' : '3px solid transparent',
+                      borderRadius: 4,
+                      transition: 'all 0.2s',
                     }}
                   >
                     <div style={{ width: '100%' }}>

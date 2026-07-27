@@ -1,5 +1,30 @@
 /** 共享 TypeScript 类型定义。 */
 
+/** 规则集：多套规则、合同、图谱的命名空间 */
+export interface RuleSet {
+  id: string
+  name: string
+  description: string | null
+  doc_types: string[]
+  is_default: boolean
+  created_at: string
+  updated_at: string
+}
+
+export interface RuleSetCreate {
+  name: string
+  description?: string
+  doc_types?: string[]
+  is_default?: boolean
+}
+
+export interface RuleSetUpdate {
+  name?: string
+  description?: string
+  doc_types?: string[]
+  is_default?: boolean
+}
+
 export interface ContractBrief {
   id: string
   contract_no: string
@@ -7,6 +32,7 @@ export interface ContractBrief {
   upload_time: string
   status: string
   file_count: number
+  rule_set_id: string
 }
 
 export interface DocumentBrief {
@@ -52,6 +78,7 @@ export interface Rule {
   tolerance: Record<string, unknown>
   enabled: boolean
   priority: number
+  rule_set_id: string
   updated_at: string
   created_at: string
 }
@@ -65,6 +92,7 @@ export interface RuleSnapshot {
   edge_count: number | null
   operator: string | null
   note: string | null
+  rule_set_id: string
 }
 
 export interface RuleImportResponse {
@@ -223,6 +251,43 @@ export interface DocTypeMeta {
 export interface ConstantsResponse {
   doc_types: DocTypeMeta[]
   check_categories: string[]
+}
+
+/** OCR 任务:单文档或合同级批量 */
+export interface OcrTask {
+  id: string
+  rule_set_id: string
+  scope: 'single_doc' | 'contract_batch'
+  doc_id: string | null
+  contract_id: string | null
+  status: 'pending' | 'running' | 'completed' | 'failed'
+  progress: number
+  stage: string | null
+  total_count: number
+  done_count: number
+  success_count: number
+  failed_count: number
+  failures: Array<{ doc_id: string; file_name: string; error: string }>
+  start_time: string
+  end_time: string | null
+  error: string | null
+  created_at: string
+}
+
+/** OCR 任务精简版(列表用) */
+export interface OcrTaskBrief {
+  id: string
+  scope: 'single_doc' | 'contract_batch'
+  contract_id: string | null
+  status: 'pending' | 'running' | 'completed' | 'failed'
+  progress: number
+  stage: string | null
+  total_count: number
+  done_count: number
+  success_count: number
+  failed_count: number
+  start_time: string
+  end_time: string | null
 }
 
 /** 三态结果颜色映射。 */

@@ -5,9 +5,9 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 
-from sqlalchemy import DateTime, Integer, String, Text, func
+from sqlalchemy import DateTime, ForeignKey, Integer, String, Text, func
 from sqlalchemy.dialects.postgresql import JSONB, UUID
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from ..database import Base
 
@@ -19,6 +19,13 @@ class RuleSnapshot(Base):
 
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    # 所属规则集（命名空间），删除规则集时级联删除快照
+    rule_set_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("rule_sets.id", ondelete="CASCADE"),
+        index=True,
+        nullable=False,
     )
     snapshot_time: Mapped[datetime] = mapped_column(
         DateTime, server_default=func.now(), nullable=False
@@ -33,3 +40,6 @@ class RuleSnapshot(Base):
     edge_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
     operator: Mapped[str | None] = mapped_column(String(128), nullable=True)
     note: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    # 反向关系
+    rule_set: Mapped["RuleSet"] = relationship("RuleSet", back_populates="snapshots")
