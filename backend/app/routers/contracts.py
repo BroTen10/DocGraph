@@ -6,7 +6,7 @@ import mimetypes
 import uuid
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
 from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 
@@ -27,12 +27,13 @@ router = APIRouter(prefix="/api/contracts", tags=["contracts"])
 
 @router.post("/upload", response_model=ContractUploadResponse)
 async def upload_contract_folder(
+    rule_set_id: uuid.UUID = Query(..., description="所属规则集 ID"),
     files: list[UploadFile] = File(...),
     db: Session = Depends(get_db),
 ) -> ContractUploadResponse:
-    """上传合同文件夹（一个合同 = 一组文件）。"""
+    """上传合同文件夹（一个合同 = 一组文件），归属到指定规则集。"""
     try:
-        return await contract_service.upload_contract_folder(db, files)
+        return await contract_service.upload_contract_folder(db, rule_set_id, files)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
@@ -40,9 +41,14 @@ async def upload_contract_folder(
 
 
 @router.get("", response_model=list[ContractBrief])
-def list_contracts(db: Session = Depends(get_db)) -> list[ContractBrief]:
-    """合同列表。"""
-    return contract_service.list_contracts(db)
+def list_contracts(
+    rule_set_id: uuid.UUID | None = Query(
+        default=None, description="按规则集过滤（不传则返回全部）"
+    ),
+    db: Session = Depends(get_db),
+) -> list[ContractBrief]:
+    """合同列表，可按规则集过滤。"""
+    return contract_service.list_contracts(db, rule_set_id)
 
 
 @router.get("/{contract_id}", response_model=ContractDetail)

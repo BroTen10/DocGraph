@@ -7,12 +7,16 @@ import { PlayCircleOutlined, ReloadOutlined, FileSearchOutlined } from '@ant-des
 import { useNavigate } from 'react-router-dom'
 import { contractsApi, reviewsApi } from '../api/client'
 import type { ContractBrief, ReviewTaskSummary } from '../types'
+import PageHeader from '../components/PageHeader'
+import EmptyState from '../components/EmptyState'
+import { useRuleSet } from '../context/RuleSetContext'
 import dayjs from 'dayjs'
 
-const { Title, Text } = Typography
+const { Text } = Typography
 
 export default function ReviewPage() {
   const navigate = useNavigate()
+  const { currentId } = useRuleSet()
   const [contracts, setContracts] = useState<ContractBrief[]>([])
   const [selectedContract, setSelectedContract] = useState<string | undefined>()
   const [running, setRunning] = useState(false)
@@ -21,8 +25,9 @@ export default function ReviewPage() {
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null)
 
   const load = async () => {
+    if (!currentId) return
     try {
-      setContracts(await contractsApi.list())
+      setContracts(await contractsApi.list(currentId))
     } catch (e: any) {
       message.error('加载合同失败: ' + (e?.message || e))
     }
@@ -33,7 +38,7 @@ export default function ReviewPage() {
     return () => {
       if (pollRef.current) clearInterval(pollRef.current)
     }
-  }, [])
+  }, [currentId])
 
   const startReview = async () => {
     if (!selectedContract) {
@@ -89,9 +94,11 @@ export default function ReviewPage() {
 
   return (
     <div>
-      <Row justify="space-between" align="middle">
-        <Col><Title level={4}>审查执行</Title></Col>
-        <Col>
+      <PageHeader
+        title="审查执行"
+        subtitle="选择已上传的合同启动审查任务，系统将异步执行 OCR、字段提取、规则比对与报告生成"
+        icon={<FileSearchOutlined />}
+        extra={
           <Space>
             <Button icon={<ReloadOutlined />} onClick={load}>刷新合同</Button>
             <Button
@@ -104,8 +111,8 @@ export default function ReviewPage() {
               开始审查
             </Button>
           </Space>
-        </Col>
-      </Row>
+        }
+      />
 
       <Card style={{ marginTop: 16 }}>
         <Row gutter={16} align="middle">
@@ -170,7 +177,7 @@ export default function ReviewPage() {
 
       <Card title="审查历史" style={{ marginTop: 16 }}>
         {history.length === 0 ? (
-          <Empty description="暂无审查历史" />
+          <EmptyState description="暂无审查历史，启动一次审查后将在此显示" padding={48} />
         ) : (
           <List
             dataSource={history}

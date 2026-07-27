@@ -5,9 +5,9 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 
-from sqlalchemy import Boolean, DateTime, String, Text, func
+from sqlalchemy import Boolean, DateTime, ForeignKey, String, Text, func
 from sqlalchemy.dialects.postgresql import JSONB, UUID
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from ..database import Base
 
@@ -19,6 +19,13 @@ class Rule(Base):
 
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    # 所属规则集（命名空间），删除规则集时级联删除规则
+    rule_set_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("rule_sets.id", ondelete="CASCADE"),
+        index=True,
+        nullable=False,
     )
     # 文件类型：代理协议 / 委托出口确认单 / 出口报关单 / 运单 / 签收单 /
     # 出入仓单 / 派车单 / 收款水单 / 付款水单
@@ -39,6 +46,9 @@ class Rule(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime, server_default=func.now(), nullable=False
     )
+
+    # 反向关系
+    rule_set: Mapped["RuleSet"] = relationship("RuleSet", back_populates="rules")
 
     def __repr__(self) -> str:  # pragma: no cover
         return f"<Rule [{self.doc_type}/{self.check_category}]>"

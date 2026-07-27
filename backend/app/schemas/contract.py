@@ -37,6 +37,7 @@ class ContractBrief(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: UUID
+    rule_set_id: UUID
     contract_no: str
     alias_list: list[str] = Field(default_factory=list)
     upload_time: datetime

@@ -5,7 +5,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 
-from sqlalchemy import DateTime, String, Text, func
+from sqlalchemy import DateTime, ForeignKey, String, Text, func
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -20,6 +20,13 @@ class Contract(Base):
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
     )
+    # 所属规则集（命名空间），删除规则集时级联删除合同
+    rule_set_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("rule_sets.id", ondelete="CASCADE"),
+        index=True,
+        nullable=False,
+    )
     # 归一化后的主合同号
     contract_no: Mapped[str] = mapped_column(String(128), index=True, nullable=False)
     # 合同号别名列表（分批号、外贸号等）
@@ -33,6 +40,8 @@ class Contract(Base):
     # 备注信息
     note: Mapped[str | None] = mapped_column(Text, nullable=True)
 
+    # 反向关系到 RuleSet
+    rule_set: Mapped["RuleSet"] = relationship("RuleSet", back_populates="contracts")
     documents: Mapped[list["Document"]] = relationship(
         "Document", back_populates="contract", cascade="all, delete-orphan"
     )

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import logging
+import uuid
 from typing import Any
 
 from sqlalchemy.orm import Session
@@ -62,11 +63,14 @@ _USER_PROMPT_TEMPLATE = """可用文件类型枚举：{doc_types}
 请输出 JSON。"""
 
 
-def import_rules_from_text(db: Session, raw_text: str) -> dict[str, Any]:
+def import_rules_from_text(
+    db: Session, rule_set_id: uuid.UUID, raw_text: str
+) -> dict[str, Any]:
     """从自然语言规则清单文本批量导入规则。
 
     Args:
         db: 数据库会话
+        rule_set_id: 规则集 ID（导入规则归到该规则集下）
         raw_text: 自然语言规则清单文本
 
     Returns:
@@ -153,7 +157,7 @@ def import_rules_from_text(db: Session, raw_text: str) -> dict[str, Any]:
                 enabled=True,
                 priority=priority,
             )
-            rule_out = create_rule(db, payload)
+            rule_out = create_rule(db, rule_set_id, payload)
             imported.append(rule_out.model_dump(mode="json"))
         except Exception as e:
             errors.append(f"第 {i} 条：入库失败 - {e}")

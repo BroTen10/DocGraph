@@ -229,6 +229,7 @@ def _convert_stamp_rule(rule: Rule, rule_index: int) -> RuleGraphConvertResult:
 
 def build_graph(
     db: Session,
+    rule_set_id: uuid.UUID,
     neo4j: Optional[Neo4jClient] = None,
     auto_confirm_all: bool = False,
     operator: str = "system",
@@ -238,6 +239,7 @@ def build_graph(
 
     Args:
         db: 数据库会话
+        rule_set_id: 规则集 ID（按规则集查规则、写快照，命名空间隔离）
         neo4j: Neo4j 客户端（不传则用全局单例）
         auto_confirm_all: 是否一键自动确认全部（忽略置信度）
         operator: 操作人
@@ -252,9 +254,9 @@ def build_graph(
             except Exception:
                 pass  # 进度回调不应影响主流程
 
-    # 1. 读取启用规则
+    # 1. 读取启用规则（按 rule_set_id 过滤）
     _report("读取启用规则", 5, "正在读取启用的规则")
-    rules = get_enabled_rules_for_snapshot(db)
+    rules = get_enabled_rules_for_snapshot(db, rule_set_id)
     if not rules:
         raise ValueError("无启用的规则，请先添加规则")
 
@@ -317,9 +319,10 @@ def build_graph(
     # 5. 统计节点/关系数
     graph_data = neo4j.get_graph_data(graph_id)
 
-    # 6. 保存规则快照
+    # 6. 保存规则快照（带 rule_set_id）
     _report("保存规则快照", 95, "正在保存规则快照")
     snapshot = RuleSnapshot(
+        rule_set_id=rule_set_id,
         snapshot_time=datetime.now(),
         rule_count=len(rules),
         rules_json=[

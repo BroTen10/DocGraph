@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import uuid
 from typing import Any
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
@@ -26,19 +27,24 @@ router = APIRouter(prefix="/api/rules", tags=["graph"])
 
 @router.post("/build-graph", response_model=GraphBuildResponse)
 def build_graph(
+    rule_set_id: uuid.UUID = Query(..., description="规则集 ID"),
     auto_confirm_all: bool = False,
     operator: str = "system",
     db: Session = Depends(get_db),
 ) -> GraphBuildResponse:
-    """一键重建图谱（全量替换，同步）。
+    """一键重建图谱（全量替换，同步），按 rule_set_id 隔离规则与快照。
 
     Query 参数：
+    - rule_set_id: 规则集 ID
     - auto_confirm_all: 是否一键自动确认全部（忽略置信度）
     - operator: 操作人
     """
     try:
         return graph_builder_service.build_graph(
-            db=db, auto_confirm_all=auto_confirm_all, operator=operator
+            db=db,
+            rule_set_id=rule_set_id,
+            auto_confirm_all=auto_confirm_all,
+            operator=operator,
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -58,6 +64,7 @@ class AsyncBuildResponse(BaseModel):
 class BuildTaskStatus(BaseModel):
     """构建任务状态。"""
     task_id: str
+    rule_set_id: str | None = None
     status: str  # running / completed / failed
     progress: int
     stage: str
@@ -78,15 +85,19 @@ class BuildTaskStatus(BaseModel):
 
 @router.post("/build-graph-async", response_model=AsyncBuildResponse)
 def build_graph_async(
+    rule_set_id: uuid.UUID = Query(..., description="规则集 ID"),
     auto_confirm_all: bool = False,
     operator: str = "system",
 ) -> AsyncBuildResponse:
     """异步启动图谱构建（后台线程执行），返回 task_id 用于轮询进度。
 
     适合规则较多、LLM 调用耗时较长的场景。
+    rule_set_id 用于按规则集隔离规则与快照。
     """
     task_id = graph_build_progress.start_async_build(
-        operator=operator, auto_confirm_all=auto_confirm_all
+        rule_set_id=str(rule_set_id),
+        operator=operator,
+        auto_confirm_all=auto_confirm_all,
     )
     return AsyncBuildResponse(task_id=task_id, message="图谱构建已启动，请通过 task_id 轮询进度")
 
@@ -124,10 +135,11 @@ class RuleDocumentImportResponse(BaseModel):
 
 @router.post("/import-document", response_model=RuleDocumentImportResponse)
 async def import_rules_from_document(
+    rule_set_id: uuid.UUID = Query(..., description="所属规则集 ID"),
     file: UploadFile = File(...),
     db: Session = Depends(get_db),
 ) -> RuleDocumentImportResponse:
-    """从上传的规则描述文档（PDF/EXCEL/WORD/MD）导入规则。
+    """从上传的规则描述文档（PDF/EXCEL/WORD/MD）导入规则，归到指定规则集下。
 
     自动提取文本 → 调用 LLM 解析为结构化规则 → 入库。
     """
@@ -138,6 +150,7 @@ async def import_rules_from_document(
         content = await file.read()
         result = rule_document_import_service.import_rules_from_document(
             db=db,
+            rule_set_id=rule_set_id,
             file_content=content,
             filename=file.filename,
         )
@@ -152,9 +165,12 @@ async def import_rules_from_document(
 
 
 @router.get("/graph", response_model=GraphData)
-def get_latest_graph(db: Session = Depends(get_db)) -> GraphData:
-    """查看最新规则图谱。"""
-    snap = rule_service.get_latest_snapshot(db)
+def get_latest_graph(
+    rule_set_id: uuid.UUID = Query(..., description="规则集 ID"),
+    db: Session = Depends(get_db),
+) -> GraphData:
+    """查看指定规则集的最新规则图谱。"""
+    snap = rule_service.get_latest_snapshot(db, rule_set_id)
     if snap is None or not snap.graph_id:
         raise HTTPException(status_code=404, detail="暂无图谱，请先构建")
     return graph_builder_service.get_graph(None, snap.graph_id)

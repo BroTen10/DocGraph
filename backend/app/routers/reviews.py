@@ -37,10 +37,13 @@ def start_review(
 @router.get("", response_model=list[ReviewTaskListItem])
 def list_tasks(
     contract_id: uuid.UUID | None = Query(default=None),
+    rule_set_id: uuid.UUID | None = Query(
+        default=None, description="按规则集过滤（通过 join contract）"
+    ),
     limit: int = Query(default=100, ge=1, le=500),
     db: Session = Depends(get_db),
 ) -> list[ReviewTaskListItem]:
-    """审查任务列表（默认按开始时间倒序，可按合同过滤）。"""
+    """审查任务列表（默认按开始时间倒序，可按合同/规则集过滤）。"""
     stmt = (
         select(ReviewTask, Contract.contract_no)
         .join(Contract, Contract.id == ReviewTask.contract_id, isouter=True)
@@ -49,6 +52,8 @@ def list_tasks(
     )
     if contract_id is not None:
         stmt = stmt.where(ReviewTask.contract_id == contract_id)
+    if rule_set_id is not None:
+        stmt = stmt.where(Contract.rule_set_id == rule_set_id)
     rows = db.execute(stmt).all()
     out: list[ReviewTaskListItem] = []
     for task, contract_no in rows:

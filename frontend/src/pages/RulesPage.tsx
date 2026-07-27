@@ -5,17 +5,20 @@ import {
   Select, Space, message, Typography, Tooltip, Popconfirm, Tabs, List, Spin, Alert,
   Upload,
 } from 'antd'
-import { PlusOutlined, EditOutlined, DeleteOutlined, ThunderboltOutlined, HistoryOutlined, ImportOutlined, InboxOutlined, FileTextOutlined } from '@ant-design/icons'
+import { PlusOutlined, EditOutlined, DeleteOutlined, ThunderboltOutlined, HistoryOutlined, ImportOutlined, InboxOutlined, FileTextOutlined, SettingOutlined } from '@ant-design/icons'
 import { rulesApi, graphApi, constantsApi } from '../api/client'
 import type { Rule, RuleSnapshot, DocTypeMeta, ConstantsResponse, RuleImportResponse, RuleDocumentImportResponse } from '../types'
+import PageHeader from '../components/PageHeader'
+import { useRuleSet } from '../context/RuleSetContext'
 import dayjs from 'dayjs'
 
-const { Title, Text } = Typography
+const { Text } = Typography
 const { Dragger } = Upload
 const CHECK_CATEGORIES = ['齐套性', '基础判断', '信息准确性', '时间逻辑']
 const FILE_ACCEPT = '.pdf,.xlsx,.xls,.docx,.md,.txt'
 
 export default function RulesPage() {
+  const { currentId } = useRuleSet()
   const [rules, setRules] = useState<Rule[]>([])
   const [snapshots, setSnapshots] = useState<RuleSnapshot[]>([])
   const [docTypes, setDocTypes] = useState<DocTypeMeta[]>([])
@@ -34,11 +37,12 @@ export default function RulesPage() {
   const [fileImportResult, setFileImportResult] = useState<RuleDocumentImportResponse | null>(null)
 
   const load = async () => {
+    if (!currentId) return
     setLoading(true)
     try {
       const [r, s, c] = await Promise.all([
-        rulesApi.list(),
-        rulesApi.listSnapshots(),
+        rulesApi.list(currentId),
+        rulesApi.listSnapshots(currentId),
         constantsApi.docTypes(),
       ])
       setRules(r)
@@ -51,7 +55,7 @@ export default function RulesPage() {
     }
   }
 
-  useEffect(() => { load() }, [])
+  useEffect(() => { load() }, [currentId])
 
   // 二维表格：行=文件类型，列=检查项
   const matrix = useMemo(() => {
@@ -105,7 +109,7 @@ export default function RulesPage() {
         await rulesApi.update(editing.id, payload)
         message.success('规则已更新')
       } else {
-        await rulesApi.create(payload as any)
+        await rulesApi.create(currentId!, payload as any)
         message.success('规则已新增')
       }
       setModalOpen(false)
@@ -129,7 +133,7 @@ export default function RulesPage() {
   const handleBuild = async (autoAll = false) => {
     setBuilding(true)
     try {
-      const resp = await graphApi.build(autoAll)
+      const resp = await graphApi.build(currentId!, autoAll)
       message.success(`${resp.message}（节点 ${resp.node_count} / 关系 ${resp.edge_count}）`)
       await load()
     } catch (e: any) {
@@ -156,7 +160,7 @@ export default function RulesPage() {
     setImporting(true)
     setImportResult(null)
     try {
-      const resp = await rulesApi.importBatch(importText)
+      const resp = await rulesApi.importBatch(currentId!, importText)
       setImportResult(resp)
       if (resp.imported > 0) {
         message.success(`导入完成：成功 ${resp.imported} 条，跳过 ${resp.skipped} 条`)
@@ -180,7 +184,7 @@ export default function RulesPage() {
     setImporting(true)
     setFileImportResult(null)
     try {
-      const resp = await rulesApi.importDocument(importFile)
+      const resp = await rulesApi.importDocument(currentId!, importFile)
       setFileImportResult(resp)
       if (resp.imported > 0) {
         message.success(`导入完成：成功 ${resp.imported} 条，跳过 ${resp.skipped} 条`)
@@ -321,9 +325,11 @@ export default function RulesPage() {
 
   return (
     <div>
-      <Row justify="space-between" align="middle">
-        <Col><Title level={4}>规则管理</Title></Col>
-        <Col>
+      <PageHeader
+        title="规则管理"
+        subtitle="维护审查规则，支持新增、批量导入与图谱生成。规则按文档类型与检查类别分类管理"
+        icon={<SettingOutlined />}
+        extra={
           <Space>
             <Button icon={<PlusOutlined />} onClick={openCreate}>新增规则</Button>
             <Button icon={<ImportOutlined />} onClick={openImport}>批量导入</Button>
@@ -333,8 +339,8 @@ export default function RulesPage() {
             </Popconfirm>
             <Button icon={<HistoryOutlined />} onClick={load}>刷新</Button>
           </Space>
-        </Col>
-      </Row>
+        }
+      />
 
       <Tabs
         defaultActiveKey="matrix"

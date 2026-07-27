@@ -50,11 +50,13 @@ def _contract_upload_dir(contract_no: str) -> Path:
 
 async def upload_contract_folder(
     db: Session,
+    rule_set_id: uuid.UUID,
     files: list[UploadFile],
 ) -> ContractUploadResponse:
     """上传合同文件夹：保存所有文件、分类、识别合同号、归一化、写库。
 
     一个合同文件夹 = 一个合同 = 一条 Contract 记录 + N 条 Document 记录。
+    所有文件归属到指定 rule_set_id 命名空间下。
     """
     if not files:
         raise ValueError("未接收到任何文件")
@@ -83,8 +85,9 @@ async def upload_contract_folder(
         canonical = f"UNKNOWN-{uuid.uuid4().hex[:8]}"
         alias_list = []
 
-    # 3. 创建 Contract 记录
+    # 3. 创建 Contract 记录（带 rule_set_id）
     contract = Contract(
+        rule_set_id=rule_set_id,
         contract_no=canonical,
         alias_list=alias_list,
         status="uploaded",
@@ -137,8 +140,10 @@ async def upload_contract_folder(
     )
 
 
-def list_contracts(db: Session) -> list[ContractBrief]:
-    """合同列表（含文件数）。"""
+def list_contracts(
+    db: Session, rule_set_id: Optional[uuid.UUID] = None
+) -> list[ContractBrief]:
+    """合同列表（含文件数），可按规则集过滤。"""
     stmt = (
         select(
             Contract,
@@ -148,6 +153,8 @@ def list_contracts(db: Session) -> list[ContractBrief]:
         .group_by(Contract.id)
         .order_by(Contract.upload_time.desc())
     )
+    if rule_set_id is not None:
+        stmt = stmt.where(Contract.rule_set_id == rule_set_id)
     rows = db.execute(stmt).all()
     out: list[ContractBrief] = []
     for contract, file_count in rows:

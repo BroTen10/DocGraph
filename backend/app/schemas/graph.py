@@ -74,6 +74,7 @@ class GraphSnapshotOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: UUID
+    rule_set_id: UUID
     snapshot_time: datetime
     rule_count: int
     graph_id: str | None = None
