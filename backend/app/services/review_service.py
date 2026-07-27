@@ -474,9 +474,11 @@ def _check_accuracy(
     pay_docs = _docs_by_type(docs, DOC_PAY_VOUCHER)
     vat_docs = _docs_by_type(docs, DOC_VAT_INVOICE)
 
-    receive_total = aggregate_amount(DOC_RECEIVE_VOUCHER, [d.extracted_fields for d in receive_docs]) if receive_docs else None
-    pay_total = aggregate_amount(DOC_PAY_VOUCHER, [d.extracted_fields for d in pay_docs]) if pay_docs else None
-    vat_total = aggregate_amount(DOC_VAT_INVOICE, [d.extracted_fields for d in vat_docs]) if vat_docs else None
+    # aggregate_amount 期望入参形如 [{"fields": {...}}, ...]，
+    # 而 document.extracted_fields 本身就是扁平字段 dict，需包一层 fields，否则解析恒为 None。
+    receive_total = aggregate_amount(DOC_RECEIVE_VOUCHER, [{"fields": d.extracted_fields} for d in receive_docs]) if receive_docs else None
+    pay_total = aggregate_amount(DOC_PAY_VOUCHER, [{"fields": d.extracted_fields} for d in pay_docs]) if pay_docs else None
+    vat_total = aggregate_amount(DOC_VAT_INVOICE, [{"fields": d.extracted_fields} for d in vat_docs]) if vat_docs else None
 
     rule_pay = _find_rule(rules_by_key, DOC_PAY_VOUCHER, CHECK_ACCURACY)
 

@@ -24,6 +24,10 @@ class Settings(BaseSettings):
     app_debug: bool = True
     upload_root: str = "./uploads"
     max_file_size_mb: int = 50
+    # 启动时是否重建数据库（DROP SCHEMA + 清空 Neo4j）。
+    # 默认 False：仅幂等 create_all，不丢数据。
+    # 仅在 schema 破坏性变更或需要干净环境时临时置 True。
+    db_reset_on_startup: bool = False
 
     # Postgres
     pg_host: str = "localhost"

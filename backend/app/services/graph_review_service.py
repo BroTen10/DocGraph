@@ -18,6 +18,7 @@
 
 from __future__ import annotations
 
+import contextvars
 import logging
 import uuid
 from datetime import datetime
@@ -35,7 +36,7 @@ from ..constants import (
 from ..models import Contract, Document, ReviewResult, RuleSnapshot
 from ..neo4j_client import Neo4jClient, get_neo4j_client
 from .contract_normalizer import extract_contract_numbers, normalize_contract_no
-from .field_extraction_service import aggregate_amount, parse_amount, parse_date
+from .field_extraction_service import parse_amount, parse_date
 
 logger = logging.getLogger(__name__)
 
@@ -513,14 +514,18 @@ def _cmp_contains(
 
 # ---------- 辅助 ----------
 
-_current_contract_ref: Optional[Contract] = None
+# 用 ContextVar 而非模块级全局：并发/多线程审查时各自隔离，避免合同上下文互相覆盖串数据。
+_current_contract_var: contextvars.ContextVar[Optional[Contract]] = contextvars.ContextVar(
+    "_current_contract_var", default=None
+)
 
 
 def _current_contract() -> Contract:
-    """获取当前线程上下文的合同对象（用于 _cmp_contains 中的别名匹配）。"""
-    if _current_contract_ref is None:
+    """获取当前执行上下文的合同对象（用于 _cmp_contains 中的别名匹配）。"""
+    contract = _current_contract_var.get()
+    if contract is None:
         raise RuntimeError("当前合同上下文未初始化")
-    return _current_contract_ref
+    return contract
 
 
 def _first_field(docs: list[Document], doc_type: str, field: str):
@@ -557,9 +562,8 @@ def run_graph_review_with_contract(
     neo4j: Optional[Neo4jClient] = None,
 ) -> list[ReviewResult]:
     """与 run_graph_review 相同，但设置当前合同上下文供 _cmp_contains 使用。"""
-    global _current_contract_ref
-    _current_contract_ref = contract
+    token = _current_contract_var.set(contract)
     try:
         return run_graph_review(db, contract, docs, neo4j)
     finally:
-        _current_contract_ref = None
+        _current_contract_var.reset(token)
