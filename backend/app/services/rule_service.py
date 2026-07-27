@@ -75,6 +75,27 @@ def delete_rule(db: Session, rule_id: uuid.UUID) -> bool:
     return True
 
 
+def delete_rules_batch(
+    db: Session,
+    rule_set_id: uuid.UUID,
+    ids: Optional[list[uuid.UUID]] = None,
+) -> int:
+    """批量删除规则。提供 ids 则仅删除这些（且必须属于该规则集）；否则清空该规则集全部规则。
+
+    Returns:
+        实际删除的规则条数
+    """
+    stmt = select(Rule).where(Rule.rule_set_id == rule_set_id)
+    if ids:
+        stmt = stmt.where(Rule.id.in_(ids))
+    rows = db.execute(stmt).scalars().all()
+    n = len(rows)
+    for r in rows:
+        db.delete(r)
+    db.commit()
+    return n
+
+
 def list_snapshots(db: Session, rule_set_id: uuid.UUID) -> list[RuleSnapshot]:
     """规则快照列表（按规则集过滤、按时间倒序）。"""
     stmt = (
@@ -100,6 +121,32 @@ def get_latest_snapshot(
         .limit(1)
     )
     return db.execute(stmt).scalars().first()
+
+
+def confirm_rules_batch(
+    db: Session, rule_set_id: uuid.UUID, ids: Optional[list[uuid.UUID]] = None,
+    confirmed_by: str = "user",
+) -> int:
+    """批量确认规则：将指定规则（或所有 pending 规则）状态改为 confirmed。
+
+    Returns:
+        实际确认的规则条数
+    """
+    from datetime import datetime
+    stmt = select(Rule).where(
+        Rule.rule_set_id == rule_set_id,
+        Rule.status != "confirmed",
+    )
+    if ids:
+        stmt = stmt.where(Rule.id.in_(ids))
+    rows = db.execute(stmt).scalars().all()
+    now = datetime.now()
+    for r in rows:
+        r.status = "confirmed"
+        r.confirmed_at = now
+        r.confirmed_by = confirmed_by
+    db.commit()
+    return len(rows)
 
 
 def get_enabled_rules_for_snapshot(

@@ -92,6 +92,25 @@ export const rulesApi = {
   },
   update: (id: string, data: Partial<Rule>) => http.put<Rule>(`/rules/${id}`, data).then((r) => r.data),
   delete: (id: string) => http.delete(`/rules/${id}`).then((r) => r.data),
+  /** 批量删除规则：传 ids 仅删指定；不传则清空该规则集全部规则 */
+  batchDelete: (ruleSetId: string, ids?: string[]) =>
+    http
+      .delete<{ success: boolean; deleted: number }>('/rules', {
+        params: {
+          rule_set_id: ruleSetId,
+          ...(ids && ids.length ? { ids: ids.join(',') } : {}),
+        },
+      })
+      .then((r) => r.data),
+  /** 批量确认规则：传 ids 仅确认指定；不传则确认该规则集所有 pending 规则 */
+  confirmBatch: (ruleSetId: string, ids?: string[]) =>
+    http
+      .post<{ success: boolean; confirmed: number; message: string }>(
+        '/rules/confirm',
+        { ids: ids || null },
+        { params: { rule_set_id: ruleSetId } },
+      )
+      .then((r) => r.data),
   listSnapshots: (ruleSetId: string) =>
     http.get<RuleSnapshot[]>('/rules/snapshots', { params: { rule_set_id: ruleSetId } }).then((r) => r.data),
   getSnapshot: (id: string) => http.get<RuleSnapshot>(`/rules/snapshots/${id}`).then((r) => r.data),

@@ -6,6 +6,7 @@ export interface RuleSet {
   name: string
   description: string | null
   doc_types: string[]
+  check_categories: string[]
   is_default: boolean
   created_at: string
   updated_at: string
@@ -79,6 +80,10 @@ export interface Rule {
   enabled: boolean
   priority: number
   rule_set_id: string
+  confidence: number | null
+  status: string
+  confirmed_at: string | null
+  confirmed_by: string | null
   updated_at: string
   created_at: string
 }

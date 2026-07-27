@@ -74,3 +74,7 @@ Thumbs.db
 # ============ Docker ============
 # docker-compose 本身要上传，但卷数据不上传
 docker-volumes/
+.workbuddy/
+acceptance_output/
+nul
+~

@@ -5,7 +5,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, String, Text, func
+from sqlalchemy import Boolean, DateTime, Float, ForeignKey, String, Text, func
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -40,6 +40,14 @@ class Rule(Base):
     enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     # 优先级（数字越小越先执行）
     priority: Mapped[int] = mapped_column(default=100, nullable=False)
+    # ----- LLM 置信度与确认状态 -----
+    # LLM 解析该规则时的置信度 (0-1)，null 表示旧数据未评估
+    confidence: Mapped[float | None] = mapped_column(Float, nullable=True, default=None)
+    # 确认状态：'pending' 待确认 / 'confirmed' 已确认
+    status: Mapped[str] = mapped_column(String(16), default="pending", nullable=False, index=True)
+    confirmed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, default=None)
+    confirmed_by: Mapped[str | None] = mapped_column(String(64), nullable=True, default=None)
+    # ----- -----
     updated_at: Mapped[datetime] = mapped_column(
         DateTime, server_default=func.now(), onupdate=func.now(), nullable=False
     )
@@ -51,4 +59,4 @@ class Rule(Base):
     rule_set: Mapped["RuleSet"] = relationship("RuleSet", back_populates="rules")
 
     def __repr__(self) -> str:  # pragma: no cover
-        return f"<Rule [{self.doc_type}/{self.check_category}]>"
+        return f"<Rule [{self.doc_type}/{self.check_category}] status={self.status}>"
