@@ -94,6 +94,12 @@ class Neo4jClient:
         )
         return records[0]["cnt"] if records else 0
 
+    def clear_all_rule_graphs(self) -> int:
+        """清除所有规则图谱节点（跨 graph_id）。用于数据库重置时与 Postgres 同步。返回剩余节点数（应为 0）。"""
+        self.execute_write("MATCH (n:RuleEntity) DETACH DELETE n")
+        records = self.execute_read("MATCH (n:RuleEntity) RETURN count(n) AS cnt")
+        return records[0]["cnt"] if records else 0
+
     def write_rule_graph(
         self,
         graph_id: str,
