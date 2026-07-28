@@ -19,7 +19,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from .config import settings
 from .database import init_db
-from .routers import contracts, graph, ocr, reviews, rule_sets, rules
+from .routers import contracts, graph, ocr, reviews, rule_parse_skills, rule_sets, rules
 
 logging.basicConfig(
     level=logging.INFO,
@@ -69,6 +69,7 @@ app.include_router(rules.router)
 app.include_router(graph.router)
 app.include_router(reviews.router)
 app.include_router(ocr.router)
+app.include_router(rule_parse_skills.router)
 
 
 @app.get("/api/health")

@@ -420,10 +420,14 @@ export default function DocumentCompare({ doc, fileUrl, height = 600 }: Document
     },
   ]
 
-  const fieldData = Object.entries(doc.extracted_fields || {}).map(([k, v]) => ({
-    key: k,
-    value: String(v ?? ''),
-  }))
+  const fieldData = Object.entries(doc.extracted_fields || {})
+    .filter(([k]) => k !== '__inferred_doc_type__')
+    .map(([k, v]) => ({
+      key: k,
+      value: String(v ?? ''),
+    }))
+
+  const inferredDocType = (doc.extracted_fields as Record<string, unknown>)?.['__inferred_doc_type__'] as string | undefined
 
   // OCR 文本按行分割，每行可点击高亮
   const ocrLines = (doc.ocr_text || '').split('\n').filter((line) => line.trim())
@@ -479,6 +483,11 @@ export default function DocumentCompare({ doc, fileUrl, height = 600 }: Document
         >
           {/* 元信息 */}
           <div style={{ marginBottom: 12, fontSize: 12, color: '#666' }}>
+            {inferredDocType && (
+              <Tag color="purple" style={{ marginRight: 8 }}>
+                模型推测类型: {inferredDocType}
+              </Tag>
+            )}
             {doc.ocr_confidence != null && (
               <span>置信度: {(doc.ocr_confidence * 100).toFixed(1)}% </span>
             )}

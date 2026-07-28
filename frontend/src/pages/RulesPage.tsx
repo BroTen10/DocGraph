@@ -3,13 +3,14 @@ import type { UploadProps, UploadFile } from 'antd'
 import {
   Card, Row, Col, Table, Tag, Button, Modal, Form, Input, InputNumber, Switch,
   Select, Space, message, Typography, Tooltip, Popconfirm, Tabs, List, Spin, Alert,
-  Upload,
+  Upload, Drawer,
 } from 'antd'
-import { PlusOutlined, EditOutlined, DeleteOutlined, ThunderboltOutlined, HistoryOutlined, ImportOutlined, InboxOutlined, FileTextOutlined, SettingOutlined, CheckOutlined } from '@ant-design/icons'
+import { PlusOutlined, EditOutlined, DeleteOutlined, ThunderboltOutlined, HistoryOutlined, ImportOutlined, InboxOutlined, FileTextOutlined, SettingOutlined, CheckOutlined, WarningOutlined } from '@ant-design/icons'
 import { rulesApi, graphApi, constantsApi, ruleSetsApi } from '../api/client'
 import type { Rule, RuleSet, RuleSnapshot, DocTypeMeta, ConstantsResponse, RuleImportResponse, RuleDocumentImportResponse } from '../types'
 import PageHeader from '../components/PageHeader'
 import { useRuleSet } from '../context/RuleSetContext'
+import SkillTab from './SkillTab'
 import dayjs from 'dayjs'
 
 const { Text } = Typography
@@ -43,6 +44,16 @@ export default function RulesPage() {
   const [importError, setImportError] = useState<string | null>(null)
   // 批量确认
   const [confirming, setConfirming] = useState(false)
+  // Skill 选择
+  const [allSkills, setAllSkills] = useState<Array<{ id: string; name: string; is_builtin: boolean }>>([])
+  const [importSkillIds, setImportSkillIds] = useState<string[]>([])
+  // 冲突检测
+  const [conflictDetecting, setConflictDetecting] = useState(false)
+  const [conflictModalOpen, setConflictModalOpen] = useState(false)
+  const [conflictData, setConflictData] = useState<Array<{ rule_ids: string[]; type: string; severity: string; description: string; rules: Rule[] }>>([])
+  // 缺陷详情侧边栏（统一展示冲突/错误/警告）
+  const [defectDrawerOpen, setDefectDrawerOpen] = useState(false)
+  const [defectDrawerTab, setDefectDrawerTab] = useState<'conflict' | 'error' | 'warning'>('error')
 
   const STAGE_TIP: Record<NonNullable<typeof importStage>, string> = {
     parsing: '正在解析文档为文本（PDF/Excel/Word）...',
@@ -108,6 +119,26 @@ export default function RulesPage() {
     const fromRules: string[] = [...new Set(rules.map((r) => r.check_category))]
     return [...new Set([...seed, ...fromSet, ...fromRules])]
   }, [ruleSet, rules])
+
+  // 计算缺陷统计
+  const defectSummary = useMemo(() => {
+    const summary = { error: 0, warning: 0, info: 0, total: 0, conflict: 0 }
+    rules.forEach((r) => {
+      const defects = (r as any).defects || []
+      defects.forEach((d: any) => {
+        const sev = d.severity || 'info'
+        // 冲突类单独计数
+        if (['logical_contradiction', 'boundary_overlap', 'redundant'].includes(d.type)) {
+          summary.conflict++
+        }
+        if (sev === 'error') summary.error++
+        else if (sev === 'warning') summary.warning++
+        else summary.info++
+        summary.total++
+      })
+    })
+    return summary
+  }, [rules])
 
   const openCreate = () => {
     setEditing(null)
@@ -215,7 +246,44 @@ export default function RulesPage() {
     }
   }
 
-  const openImport = () => {
+  const handleDetectConflicts = async (openInDrawer = false) => {
+    if (!currentId || conflictDetecting) return
+    setConflictDetecting(true)
+    try {
+      const resp = await rulesApi.detectConflicts(currentId)
+      if (resp.total_conflicts === 0) {
+        message.success('未检测到语义冲突')
+        await load()
+        return
+      }
+      // 将冲突与规则数据关联
+      const conflictGroups = resp.conflicts.map((c) => ({
+        ...c,
+        rules: c.rule_ids.map((rid) => rules.find((r) => r.id === rid)!).filter(Boolean),
+      }))
+      setConflictData(conflictGroups)
+      if (openInDrawer) {
+        setDefectDrawerTab('conflict')
+        setDefectDrawerOpen(true)
+      } else {
+        setConflictModalOpen(true)
+      }
+      message.success(`检测到 ${resp.total_conflicts} 个冲突，涉及 ${resp.affected_rules} 条规则`)
+      await load()
+    } catch (e: any) {
+      message.error('冲突检测失败: ' + (e?.response?.data?.detail || e?.message || e))
+    } finally {
+      setConflictDetecting(false)
+    }
+  }
+
+  /** 打开缺陷侧边栏（数据在 Drawer 中实时计算，无需预加载） */
+  const handleShowDefects = (severity: 'error' | 'warning') => {
+    setDefectDrawerTab(severity)
+    setDefectDrawerOpen(true)
+  }
+
+  const openImport = async () => {
     setImportText('')
     setImportResult(null)
     setImportFile(null)
@@ -223,6 +291,17 @@ export default function RulesPage() {
     setImportStage(null)
     setImportError(null)
     setImportMode('text')
+    setImportSkillIds([])
+    // 加载可用 Skill
+    if (currentId) {
+      try {
+        const { skillsApi } = await import('../api/client')
+        const skills = await skillsApi.list(currentId)
+        setAllSkills(skills.map((s) => ({ id: s.id, name: s.name, is_builtin: s.is_builtin })))
+      } catch {
+        // 加载 Skill 失败不阻塞导入
+      }
+    }
     setImportOpen(true)
   }
 
@@ -236,7 +315,7 @@ export default function RulesPage() {
     setImportStage('llm')
     setImportError(null)
     try {
-      const resp = await rulesApi.importBatch(currentId!, importText)
+      const resp = await rulesApi.importBatch(currentId!, importText, importSkillIds.length ? importSkillIds : undefined)
       setImportResult(resp)
       if (resp.imported > 0) {
         message.success(`导入完成：成功 ${resp.imported} 条，跳过 ${resp.skipped} 条`)
@@ -268,7 +347,7 @@ export default function RulesPage() {
     await new Promise((r) => setTimeout(r, 50)) // 让 UI 渲染出阶段 1
     setImportStage('llm')
     try {
-      const resp = await rulesApi.importDocument(currentId!, importFile)
+      const resp = await rulesApi.importDocument(currentId!, importFile, importSkillIds.length ? importSkillIds : undefined)
       setImportStage('saving')
       setFileImportResult(resp)
       if (resp.imported > 0) {
@@ -384,6 +463,35 @@ export default function RulesPage() {
       ),
     },
     {
+      title: '缺陷', key: 'defects', width: 140,
+      render: (_: unknown, row: Rule) => {
+        const defects = row.defects || []
+        if (defects.length === 0) return <Text type="secondary">-</Text>
+        const errors = defects.filter((d) => d.severity === 'error')
+        const warnings = defects.filter((d) => d.severity === 'warning')
+        const infos = defects.filter((d) => d.severity === 'info')
+        return (
+          <Space size={4} wrap>
+            {errors.length > 0 && (
+              <Tooltip title={errors.map((d) => d.description).join('\n')}>
+                <Tag color="red">{errors.length} 错误</Tag>
+              </Tooltip>
+            )}
+            {warnings.length > 0 && (
+              <Tooltip title={warnings.map((d) => d.description).join('\n')}>
+                <Tag color="orange">{warnings.length} 警告</Tag>
+              </Tooltip>
+            )}
+            {infos.length > 0 && (
+              <Tooltip title={infos.map((d) => d.description).join('\n')}>
+                <Tag color="blue">{infos.length} 提示</Tag>
+              </Tooltip>
+            )}
+          </Space>
+        )
+      },
+    },
+    {
       title: '容差', key: 'tolerance', width: 200,
       render: (_: unknown, row: Rule) => {
         const t = row.tolerance || {}
@@ -443,6 +551,7 @@ export default function RulesPage() {
             <Popconfirm title="一键自动确认全部规则（忽略置信度）？" onConfirm={() => handleBuild(true)}>
               <Button icon={<ThunderboltOutlined />} loading={building}>一键自动确认</Button>
             </Popconfirm>
+            <Button icon={<WarningOutlined />} loading={conflictDetecting} onClick={() => handleDetectConflicts()}>检测冲突</Button>
             <Button icon={<HistoryOutlined />} onClick={load}>刷新</Button>
             <Popconfirm
               title={`确定清空当前规则集的全部 ${rules.length} 条规则？此操作不可恢复`}
@@ -473,6 +582,27 @@ export default function RulesPage() {
             label: '规则列表',
             children: (
               <Card loading={loading}>
+                {defectSummary.total > 0 && (
+                  <Alert
+                    type="warning"
+                    showIcon
+                    icon={conflictDetecting ? <Spin size="small" /> : <WarningOutlined />}
+                    style={{ marginBottom: 12, cursor: defectSummary.conflict > 0 ? 'pointer' : 'default' }}
+                    onClick={() => defectSummary.conflict > 0 && handleDetectConflicts(true)}
+                    message={
+                      <span>
+                        规则缺陷概览：
+                        {defectSummary.conflict > 0 && <Tag color="red" style={{ marginLeft: 8, cursor: conflictDetecting ? 'not-allowed' : 'pointer' }} onClick={(e) => { e.stopPropagation(); handleDetectConflicts(true) }}>{defectSummary.conflict} 个冲突{conflictDetecting ? '（检测中...）' : ''}</Tag>}
+                        {defectSummary.error > 0 && <Tag color="red" style={{ marginLeft: 4, cursor: 'pointer' }} onClick={(e) => { e.stopPropagation(); handleShowDefects('error') }}>{defectSummary.error} 个错误</Tag>}
+                        {defectSummary.warning > 0 && <Tag color="orange" style={{ cursor: 'pointer' }} onClick={(e) => { e.stopPropagation(); handleShowDefects('warning') }}>{defectSummary.warning} 个警告</Tag>}
+                        {defectSummary.info > 0 && <Tag color="blue">{defectSummary.info} 条提示</Tag>}
+                        <Text type="secondary" style={{ marginLeft: 8, fontSize: 12 }}>
+                          缺陷规则需手工确认修正
+                        </Text>
+                      </span>
+                    }
+                  />
+                )}
                 <Space style={{ marginBottom: 12 }}>
                   <Popconfirm
                     title={`确定删除选中的 ${selectedRowKeys.length} 条规则？此操作不可恢复`}
@@ -537,6 +667,11 @@ export default function RulesPage() {
                 />
               </Card>
             ),
+          },
+          {
+            key: 'skills',
+            label: '解析 Skill',
+            children: <SkillTab ruleSetId={currentId!} />,
           },
         ]}
       />
@@ -646,6 +781,27 @@ export default function RulesPage() {
                       </span>
                     }
                   />
+                  <div style={{ marginBottom: 12 }}>
+                    <Space style={{ width: '100%' }} align="start">
+                      <Select
+                        mode="multiple"
+                        style={{ minWidth: 360 }}
+                        placeholder="选择应用的 Skill（不选则使用默认配置）"
+                        value={importSkillIds}
+                        onChange={setImportSkillIds}
+                        options={allSkills.map((s) => ({
+                          value: s.id,
+                          label: `${s.name}${s.is_builtin ? ' (内置)' : ''}`,
+                        }))}
+                        allowClear
+                      />
+                      {allSkills.length > 0 && (
+                        <Text type="secondary" style={{ fontSize: 12, lineHeight: '32px' }}>
+                          已选 {importSkillIds.length} 个
+                        </Text>
+                      )}
+                    </Space>
+                  </div>
                   <Input.TextArea
                     rows={10}
                     value={importText}
@@ -681,6 +837,20 @@ export default function RulesPage() {
                           }
                         />
                       )}
+                      {importResult.conflict_report && importResult.conflict_report.total_defects > 0 && (
+                        <Alert
+                          type="warning"
+                          showIcon
+                          icon={<WarningOutlined />}
+                          style={{ marginTop: 8 }}
+                          message={
+                            <span>
+                              缺陷检测报告：{importResult.conflict_report.by_severity.error > 0 && <Tag color="red">{importResult.conflict_report.by_severity.error} 错误</Tag>}{importResult.conflict_report.by_severity.warning > 0 && <Tag color="orange">{importResult.conflict_report.by_severity.warning} 警告</Tag>}{importResult.conflict_report.by_severity.info > 0 && <Tag color="blue">{importResult.conflict_report.by_severity.info} 提示</Tag>}
+                              <Text type="secondary" style={{ fontSize: 12 }}>（回到规则列表可查看详情）</Text>
+                            </span>
+                          }
+                        />
+                      )}
                     </div>
                   )}
                 </>
@@ -703,6 +873,28 @@ export default function RulesPage() {
                       </span>
                     }
                   />
+                  <div style={{ marginBottom: 12 }}>
+                    <Space style={{ width: '100%' }} align="start">
+                      <Select
+                        mode="multiple"
+                        style={{ minWidth: 360 }}
+                        placeholder="选择应用的 Skill（不选则使用默认配置）"
+                        value={importSkillIds}
+                        onChange={setImportSkillIds}
+                        options={allSkills.map((s) => ({
+                          value: s.id,
+                          label: `${s.name}${s.is_builtin ? ' (内置)' : ''}`,
+                        }))}
+                        allowClear
+                        disabled={importing}
+                      />
+                      {allSkills.length > 0 && (
+                        <Text type="secondary" style={{ fontSize: 12, lineHeight: '32px' }}>
+                          已选 {importSkillIds.length} 个
+                        </Text>
+                      )}
+                    </Space>
+                  </div>
                   <Dragger {...fileUploadProps} disabled={importing}>
                     <p className="ant-upload-drag-icon"><InboxOutlined /></p>
                     <p className="ant-upload-text">{importing ? '解析中...' : '点击或拖拽文件到此区域'}</p>
@@ -761,6 +953,20 @@ export default function RulesPage() {
                           }
                         />
                       )}
+                      {fileImportResult.conflict_report && fileImportResult.conflict_report.total_defects > 0 && (
+                        <Alert
+                          type="warning"
+                          showIcon
+                          icon={<WarningOutlined />}
+                          style={{ marginTop: 8 }}
+                          message={
+                            <span>
+                              缺陷检测报告：{fileImportResult.conflict_report.by_severity.error > 0 && <Tag color="red">{fileImportResult.conflict_report.by_severity.error} 错误</Tag>}{fileImportResult.conflict_report.by_severity.warning > 0 && <Tag color="orange">{fileImportResult.conflict_report.by_severity.warning} 警告</Tag>}{fileImportResult.conflict_report.by_severity.info > 0 && <Tag color="blue">{fileImportResult.conflict_report.by_severity.info} 提示</Tag>}
+                              <Text type="secondary" style={{ fontSize: 12 }}>（回到规则列表可查看详情）</Text>
+                            </span>
+                          }
+                        />
+                      )}
                     </div>
                   )}
                 </>
@@ -770,6 +976,252 @@ export default function RulesPage() {
         />
         </Spin>
       </Modal>
+
+      {/* 冲突详情弹窗（"检测冲突"按钮专用，详细报告） */}
+      <Modal
+        title={`语义冲突检测报告（${conflictData.length} 个冲突）`}
+        open={conflictModalOpen}
+        onCancel={() => setConflictModalOpen(false)}
+        footer={<Button onClick={() => setConflictModalOpen(false)}>关闭</Button>}
+        width={800}
+      >
+        {conflictData.map((group, gi) => {
+          // 查找冲突规则在表格里的行 key
+          const ruleRows = group.rules.map((r) => r.id)
+          return (
+            <Card
+              key={gi}
+              size="small"
+              style={{ marginBottom: 12 }}
+              title={
+                <Space>
+                  <Tag color={group.severity === 'error' ? 'red' : group.severity === 'warning' ? 'orange' : 'blue'}>
+                    {group.type === 'logical_contradiction' ? '逻辑矛盾' : group.type === 'boundary_overlap' ? '边界冲突' : '冗余'}
+                  </Tag>
+                  <Text strong>{group.description}</Text>
+                </Space>
+              }
+            >
+              <List
+                size="small"
+                dataSource={group.rules}
+                renderItem={(r) => (
+                  <List.Item
+                    actions={[
+                      <Button
+                        size="small"
+                        type="link"
+                        onClick={() => {
+                          // 跳转到该规则（选中并滚动）
+                          setSelectedRowKeys([r.id])
+                          setConflictModalOpen(false)
+                        }}
+                      >
+                        定位
+                      </Button>,
+                    ]}
+                  >
+                    <List.Item.Meta
+                      title={<Tag color="blue">{r.doc_type} / {r.check_category}</Tag>}
+                      description={<Text style={{ fontSize: 12 }}>{r.rule_text}</Text>}
+                    />
+                  </List.Item>
+                )}
+              />
+            </Card>
+          )
+        })}
+        {conflictData.length === 0 && (
+          <Alert type="success" showIcon message="未检测到语义冲突" />
+        )}
+      </Modal>
+
+      {/* 统一缺陷处理侧边栏（从缺陷概览标签点击进入，含分页防卡顿） */}
+      <Drawer
+        title="规则缺陷处理"
+        open={defectDrawerOpen}
+        onClose={() => setDefectDrawerOpen(false)}
+        width={720}
+        extra={<Button size="small" onClick={() => setDefectDrawerOpen(false)}>关闭</Button>}
+      >
+        <Tabs
+          activeKey={defectDrawerTab}
+          onChange={(k) => {
+            if (k === 'conflict') {
+              // 切换到冲突 tab 时如有数据直接显示，无数据触发检测
+              if (conflictData.length === 0 && !conflictDetecting) {
+                handleDetectConflicts(true)
+              }
+              return
+            }
+            setDefectDrawerTab(k as 'error' | 'warning')
+          }}
+          items={[
+            ...(defectSummary.conflict > 0
+              ? [{
+                  key: 'conflict' as const,
+                  label: `冲突（${defectSummary.conflict}）`,
+                  children: (
+                    <div>
+                      {conflictDetecting ? (
+                        <div style={{ textAlign: 'center', padding: 40 }}>
+                          <Spin tip="正在检测语义冲突..." />
+                        </div>
+                      ) : conflictData.length === 0 ? (
+                        <Alert type="info" showIcon message="点击「检测冲突」按钮查看详细报告" />
+                      ) : (
+                        <div>
+                          <Alert
+                            type="info"
+                            showIcon
+                            style={{ marginBottom: 12 }}
+                            message={`共 ${conflictData.length} 个冲突组，涉及 ${new Set(conflictData.flatMap((g) => g.rule_ids)).size} 条规则`}
+                          />
+                          <Space style={{ marginBottom: 12 }}>
+                            <Button size="small" onClick={() => { setDefectDrawerOpen(false); setConflictModalOpen(true) }}>
+                              查看详细报告
+                            </Button>
+                            <Button size="small" loading={conflictDetecting} onClick={() => handleDetectConflicts(true)}>
+                              重新检测
+                            </Button>
+                          </Space>
+                          <Table
+                            dataSource={conflictData}
+                            rowKey={(_, i) => `c-${i}`}
+                            size="small"
+                            pagination={{ pageSize: 10, showSizeChanger: true, pageSizeOptions: ['5', '10', '20'], size: 'small' }}
+                            columns={[
+                              {
+                                title: '类型', width: 90,
+                                render: (_: any, group: any) => (
+                                  <Tag color={group.severity === 'error' ? 'red' : group.severity === 'warning' ? 'orange' : 'blue'}>
+                                    {group.type === 'logical_contradiction' ? '逻辑矛盾' : group.type === 'boundary_overlap' ? '边界冲突' : '冗余'}
+                                  </Tag>
+                                ),
+                              },
+                              { title: '描述', dataIndex: 'description', ellipsis: true },
+                              {
+                                title: '涉及规则', width: 80,
+                                render: (_: any, group: any) => <Tag>{group.rules.length} 条</Tag>,
+                              },
+                              {
+                                title: '操作', width: 80,
+                                render: (_: any, group: any) => (
+                                  <Button
+                                    size="small"
+                                    type="link"
+                                    onClick={() => {
+                                      setSelectedRowKeys(group.rules.map((r: Rule) => r.id))
+                                      setDefectDrawerOpen(false)
+                                    }}
+                                  >
+                                    定位
+                                  </Button>
+                                ),
+                              },
+                            ]}
+                          />
+                        </div>
+                      )}
+                    </div>
+                  ),
+                }]
+              : []),
+            ...(defectSummary.error > 0
+              ? [{
+                  key: 'error' as const,
+                  label: `错误（${defectSummary.error}）`,
+                  children: (() => {
+                    const entries: Array<{ ruleId: string; docType: string; checkCategory: string; ruleText: string; type: string; description: string }> = []
+                    rules.forEach((r) => {
+                      ;(r.defects || []).filter((d) => d.severity === 'error').forEach((d) => {
+                        entries.push({
+                          ruleId: r.id, docType: r.doc_type, checkCategory: r.check_category,
+                          ruleText: r.rule_text, type: d.type, description: d.description,
+                        })
+                      })
+                    })
+                    return (
+                      <Table
+                        dataSource={entries}
+                        rowKey={(_, i) => `e-${i}`}
+                        size="small"
+                        pagination={{ pageSize: 20, showSizeChanger: true, pageSizeOptions: ['10', '20', '50'], size: 'small' }}
+                        columns={[
+                          { title: '文件类型', dataIndex: 'docType', width: 100 },
+                          { title: '检查项', dataIndex: 'checkCategory', width: 80 },
+                          { title: '规则文本', dataIndex: 'ruleText', ellipsis: true },
+                          { title: '缺陷描述', dataIndex: 'description', ellipsis: true },
+                          {
+                            title: '操作', width: 80,
+                            render: (_: any, row: any) => (
+                              <Button
+                                size="small"
+                                type="link"
+                                onClick={() => {
+                                  setSelectedRowKeys([row.ruleId])
+                                  setDefectDrawerOpen(false)
+                                }}
+                              >
+                                定位
+                              </Button>
+                            ),
+                          },
+                        ]}
+                      />
+                    )
+                  })(),
+                }]
+              : []),
+            ...(defectSummary.warning > 0
+              ? [{
+                  key: 'warning' as const,
+                  label: `警告（${defectSummary.warning}）`,
+                  children: (() => {
+                    const entries: Array<{ ruleId: string; docType: string; checkCategory: string; ruleText: string; type: string; description: string }> = []
+                    rules.forEach((r) => {
+                      ;(r.defects || []).filter((d) => d.severity === 'warning').forEach((d) => {
+                        entries.push({
+                          ruleId: r.id, docType: r.doc_type, checkCategory: r.check_category,
+                          ruleText: r.rule_text, type: d.type, description: d.description,
+                        })
+                      })
+                    })
+                    return (
+                      <Table
+                        dataSource={entries}
+                        rowKey={(_, i) => `w-${i}`}
+                        size="small"
+                        pagination={{ pageSize: 20, showSizeChanger: true, pageSizeOptions: ['10', '20', '50'], size: 'small' }}
+                        columns={[
+                          { title: '文件类型', dataIndex: 'docType', width: 100 },
+                          { title: '检查项', dataIndex: 'checkCategory', width: 80 },
+                          { title: '规则文本', dataIndex: 'ruleText', ellipsis: true },
+                          { title: '缺陷描述', dataIndex: 'description', ellipsis: true },
+                          {
+                            title: '操作', width: 80,
+                            render: (_: any, row: any) => (
+                              <Button
+                                size="small"
+                                type="link"
+                                onClick={() => {
+                                  setSelectedRowKeys([row.ruleId])
+                                  setDefectDrawerOpen(false)
+                                }}
+                              >
+                                定位
+                              </Button>
+                            ),
+                          },
+                        ]}
+                      />
+                    )
+                  })(),
+                }]
+              : []),
+          ]}
+        />
+      </Drawer>
     </div>
   )
 }

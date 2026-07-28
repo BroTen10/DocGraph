@@ -75,17 +75,21 @@ export const rulesApi = {
     http.get<Rule[]>('/rules', { params: { rule_set_id: ruleSetId, ...params } }).then((r) => r.data),
   create: (ruleSetId: string, data: Partial<Rule>) =>
     http.post<Rule>('/rules', data, { params: { rule_set_id: ruleSetId } }).then((r) => r.data),
-  importBatch: (ruleSetId: string, raw_text: string) =>
+  importBatch: (ruleSetId: string, raw_text: string, skill_ids?: string[]) =>
     http
-      .post<RuleImportResponse>('/rules/import-batch', { raw_text }, { params: { rule_set_id: ruleSetId } })
+      .post<RuleImportResponse>('/rules/import-batch', { raw_text, skill_ids: skill_ids || [] }, { params: { rule_set_id: ruleSetId } })
       .then((r) => r.data),
   /** 从上传的规则描述文档（PDF/EXCEL/WORD/MD）导入规则 */
-  importDocument: (ruleSetId: string, file: File) => {
+  importDocument: (ruleSetId: string, file: File, skill_ids?: string[]) => {
     const form = new FormData()
     form.append('file', file)
+    const params: Record<string, any> = { rule_set_id: ruleSetId }
+    if (skill_ids && skill_ids.length) {
+      params.skill_ids = skill_ids.join(',')
+    }
     return http
       .post<RuleDocumentImportResponse>('/rules/import-document', form, {
-        params: { rule_set_id: ruleSetId },
+        params,
         headers: { 'Content-Type': 'multipart/form-data' },
       })
       .then((r) => r.data)
@@ -114,6 +118,9 @@ export const rulesApi = {
   listSnapshots: (ruleSetId: string) =>
     http.get<RuleSnapshot[]>('/rules/snapshots', { params: { rule_set_id: ruleSetId } }).then((r) => r.data),
   getSnapshot: (id: string) => http.get<RuleSnapshot>(`/rules/snapshots/${id}`).then((r) => r.data),
+  /** 语义冲突检测 */
+  detectConflicts: (ruleSetId: string) =>
+    http.post<import('../types').ConflictDetectionResponse>('/rules/detect-conflicts', null, { params: { rule_set_id: ruleSetId } }).then((r) => r.data),
 }
 
 // ============ 图谱 ============
@@ -184,4 +191,18 @@ export const ocrApi = {
 export const constantsApi = {
   docTypes: () => http.get<ConstantsResponse>('/constants/doc-types').then((r) => r.data),
   health: () => http.get<{ status: string }>('/health').then((r) => r.data),
+}
+
+// ============ 规则解析 Skill ============
+export const skillsApi = {
+  list: (ruleSetId: string) =>
+    http.get<import('../types').RuleParseSkill[]>(`/rule-sets/${ruleSetId}/skills`).then((r) => r.data),
+  create: (ruleSetId: string, data: import('../types').RuleParseSkillCreate) =>
+    http.post<import('../types').RuleParseSkill>(`/rule-sets/${ruleSetId}/skills`, data).then((r) => r.data),
+  get: (ruleSetId: string, skillId: string) =>
+    http.get<import('../types').RuleParseSkill>(`/rule-sets/${ruleSetId}/skills/${skillId}`).then((r) => r.data),
+  update: (ruleSetId: string, skillId: string, data: import('../types').RuleParseSkillUpdate) =>
+    http.put<import('../types').RuleParseSkill>(`/rule-sets/${ruleSetId}/skills/${skillId}`, data).then((r) => r.data),
+  delete: (ruleSetId: string, skillId: string) =>
+    http.delete(`/rule-sets/${ruleSetId}/skills/${skillId}`).then((r) => r.data),
 }

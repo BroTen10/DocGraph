@@ -305,16 +305,26 @@ export default function UploadPage() {
   const docColumns = [
     { title: '文件名', dataIndex: 'file_name', key: 'file_name', ellipsis: true },
     {
-      title: '业务类型', dataIndex: 'doc_type', key: 'doc_type', width: 160,
-      render: (v: string, row: any) => (
-        <Select
-          size="small"
-          value={v}
-          style={{ width: '100%' }}
-          onChange={(val) => handleDocTypeChange(row.id, val)}
-          options={docTypes.map((d) => ({ value: d.name, label: `${d.name}${d.is_required ? '（必备）' : d.is_optional ? '（非必备）' : ''}` }))}
-        />
-      ),
+      title: '业务类型', dataIndex: 'doc_type', key: 'doc_type', width: 180,
+      render: (v: string, row: any) => {
+        const inferred = (row.extracted_fields as Record<string, unknown>)?.['__inferred_doc_type__'] as string | undefined
+        return (
+          <div>
+            <Select
+              size="small"
+              value={v}
+              style={{ width: '100%' }}
+              onChange={(val) => handleDocTypeChange(row.id, val)}
+              options={docTypes.map((d) => ({ value: d.name, label: `${d.name}${d.is_required ? '（必备）' : d.is_optional ? '（非必备）' : ''}` }))}
+            />
+            {inferred && inferred !== v && (
+              <div style={{ fontSize: 11, color: '#8B5CF6', marginTop: 2, lineHeight: '16px' }}>
+                模型推测: {inferred}
+              </div>
+            )}
+          </div>
+        )
+      },
     },
     {
       title: '必备', dataIndex: 'is_required', key: 'is_required', width: 80, align: 'center' as const,
