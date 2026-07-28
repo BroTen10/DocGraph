@@ -15,6 +15,7 @@ from ..schemas.graph import (
     GraphConfirmRequest,
     GraphData,
 )
+from ..schemas.rule import RuleImportResponse
 from ..services import (
     graph_builder_service,
     graph_build_progress,
@@ -121,13 +122,8 @@ def list_build_tasks(limit: int = Query(default=20, ge=1, le=100)) -> list[Build
 # ============ 规则文档导入 ============
 
 
-class RuleDocumentImportResponse(BaseModel):
+class RuleDocumentImportResponse(RuleImportResponse):
     """规则文档导入响应。"""
-    total: int
-    imported: int
-    skipped: int
-    rules: list[dict[str, Any]] = []
-    errors: list[str] = []
     extracted_text_preview: str = ""
     extracted_text_length: int = 0
     source_filename: str = ""
@@ -137,14 +133,23 @@ class RuleDocumentImportResponse(BaseModel):
 async def import_rules_from_document(
     rule_set_id: uuid.UUID = Query(..., description="所属规则集 ID"),
     file: UploadFile = File(...),
+    skill_ids: str | None = Query(None, description="逗号分隔的 Skill ID 列表"),
     db: Session = Depends(get_db),
 ) -> RuleDocumentImportResponse:
     """从上传的规则描述文档（PDF/EXCEL/WORD/MD）导入规则，归到指定规则集下。
 
-    自动提取文本 → 调用 LLM 解析为结构化规则 → 入库。
+    自动提取文本 → （可选应用 Skill）→ 调用 LLM 解析为结构化规则 → 入库。
+    skill_ids 参数传逗号分隔的 Skill UUID，不传则使用该规则集默认配置。
     """
     if not file.filename:
         raise HTTPException(status_code=400, detail="文件名为空")
+
+    parsed_skill_ids = None
+    if skill_ids:
+        try:
+            parsed_skill_ids = [uuid.UUID(s.strip()) for s in skill_ids.split(",") if s.strip()]
+        except ValueError:
+            raise HTTPException(status_code=400, detail="skill_ids 格式错误，应为逗号分隔的 UUID")
 
     try:
         content = await file.read()
@@ -153,6 +158,7 @@ async def import_rules_from_document(
             rule_set_id=rule_set_id,
             file_content=content,
             filename=file.filename,
+            skill_ids=parsed_skill_ids,
         )
         return RuleDocumentImportResponse(**result)
     except ValueError as e:

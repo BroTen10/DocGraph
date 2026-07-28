@@ -19,7 +19,8 @@ from typing import Any
 
 from sqlalchemy.orm import Session
 
-from .rule_import_service import import_rules_from_text
+from .rule_import_service import import_rules_from_text, import_rules_with_skills
+from .rule_parse_engine import RuleParseDirective
 
 logger = logging.getLogger(__name__)
 
@@ -150,6 +151,7 @@ def import_rules_from_document(
     rule_set_id: uuid.UUID,
     file_content: bytes,
     filename: str,
+    skill_ids: list[uuid.UUID] | None = None,
 ) -> dict[str, Any]:
     """从上传的规则描述文档中提取文本，并调用 LLM 解析为结构化规则。
 
@@ -158,6 +160,7 @@ def import_rules_from_document(
         rule_set_id: 规则集 ID（导入规则归到该规则集下）
         file_content: 文件二进制内容
         filename: 原始文件名
+        skill_ids: 指定应用的 Skill ID，不传则使用默认
 
     Returns:
         导入结果（与 import_rules_from_text 相同结构，额外含 extracted_text_preview）
@@ -179,8 +182,8 @@ def import_rules_from_document(
 
         logger.info("文件 %s 提取到 %d 字符文本", filename, len(text))
 
-        # 复用已有的文本导入逻辑
-        result = import_rules_from_text(db, rule_set_id, text)
+        # 复用带 Skill 的导入逻辑
+        result = import_rules_with_skills(db, rule_set_id, text, skill_ids=skill_ids)
         result["extracted_text_preview"] = text[:500]  # 预览前 500 字符
         result["extracted_text_length"] = len(text)
         result["source_filename"] = filename

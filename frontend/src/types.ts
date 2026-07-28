@@ -71,6 +71,33 @@ export interface ContractUploadResponse {
   message: string
 }
 
+export interface DefectItem {
+  type: string
+  severity: 'error' | 'warning' | 'info'
+  description: string
+  rule_index?: number | null
+  related_rule_ids?: string[] | null
+}
+
+export interface ConflictReport {
+  total_defects: number
+  by_severity: Record<string, number>
+  defects: DefectItem[]
+}
+
+export interface ConflictItem {
+  rule_ids: string[]
+  type: string
+  severity: string
+  description: string
+}
+
+export interface ConflictDetectionResponse {
+  total_conflicts: number
+  affected_rules: number
+  conflicts: ConflictItem[]
+}
+
 export interface Rule {
   id: string
   doc_type: string
@@ -82,6 +109,7 @@ export interface Rule {
   rule_set_id: string
   confidence: number | null
   status: string
+  defects: DefectItem[]
   confirmed_at: string | null
   confirmed_by: string | null
   updated_at: string
@@ -106,6 +134,7 @@ export interface RuleImportResponse {
   skipped: number
   rules: Array<Record<string, unknown>>
   errors: string[]
+  conflict_report: ConflictReport | null
 }
 
 export interface GraphNode {
@@ -175,6 +204,7 @@ export interface RuleDocumentImportResponse {
   skipped: number
   rules: Array<Record<string, unknown>>
   errors: string[]
+  conflict_report: ConflictReport | null
   extracted_text_preview: string
   extracted_text_length: number
   source_filename: string
@@ -306,4 +336,47 @@ export const RESULT_LABEL: Record<string, string> = {
   pass: '通过',
   fail: '不通过',
   unverifiable: '无法核验',
+}
+
+// ============ 规则解析 Skill 类型 ============
+
+export interface RuleParseSkillContent {
+  prompt_instructions: string[]
+  field_mappings: Record<string, Record<string, string>>
+  defaults: Record<string, unknown>
+  validations: Array<{ field: string; rule: string; severity?: string; message?: string }>
+  text_preprocessing: Array<{ type: string; pattern?: string; replacement?: string; extraction?: string; description?: string }>
+  term_normalization: Record<string, string[]>
+  domain_context: { glossary?: Record<string, string>; common_patterns?: string[] }
+}
+
+export interface RuleParseSkill {
+  id: string
+  rule_set_id: string | null
+  parent_id: string | null
+  name: string
+  description: string | null
+  is_builtin: boolean
+  enabled: boolean
+  priority: number
+  content: RuleParseSkillContent
+  version: number
+  created_at: string
+  updated_at: string
+}
+
+export interface RuleParseSkillCreate {
+  name: string
+  description?: string
+  enabled?: boolean
+  priority?: number
+  content: RuleParseSkillContent
+}
+
+export interface RuleParseSkillUpdate {
+  name?: string
+  description?: string
+  enabled?: boolean
+  priority?: number
+  content?: RuleParseSkillContent
 }

@@ -55,14 +55,15 @@ class OCRClient:
         Args:
             image_path: 图片文件路径
             doc_type_hint: 文件业务类型提示（如"出口报关单"），帮助模型聚焦字段
-            field_template: 需提取的字段名列表（如 ["合同协议号","境内发货人",...]）
+            field_template: 需提取的字段名列表（如 ["合同协议号","境内发货人",...]），为空时自动推断类型+自由提取
 
         Returns:
             {
                 "text": "整页文本",
-                "has_stamp": True/False/None,  # None 表示无法判断
-                "fields": {"字段名": "值", ...},
-                "confidence": 0.0-1.0,  # 整体置信度
+                "has_stamp": True/False/None,
+                "fields": {"字段名": "值", ..., "__inferred_doc_type__": "推断类型"},
+                "inferred_doc_type": "模型推测的文档类型" or "",
+                "confidence": 0.0-1.0,
                 "low_confidence_fields": ["字段名", ...],
                 "success": True/False,
                 "error": "失败原因（仅 success=False 时）"
@@ -75,20 +76,31 @@ class OCRClient:
             return {"success": False, "error": f"读取图片失败: {e}"}
 
         hint = f"该文件类型为【{doc_type_hint}】。" if doc_type_hint else ""
-        fields_hint = ""
+
         if field_template:
+            # 已知文档类型：按模板提取 + 额外推断类型作为辅助信息
             fields_hint = "请重点提取以下字段：" + "、".join(field_template) + "。"
+            infer_hint = "额外从文档内容和布局推断当前文件的业务类型名称，填入 inferred_doc_type。"
+        else:
+            # 未知文档类型：自由推断类型 + 自由提取结构化信息
+            fields_hint = ""
+            infer_hint = (
+                "该文件业务类型未知。请从文档内容和布局推断文件的业务类型名称"
+                "（如'采购合同'、'装箱单'、'运单'等），填入 inferred_doc_type。"
+                "同时提取文档中任何明显的结构化信息（表格头、键值对、表单字段等），填入 fields 对象。"
+            )
 
         system_prompt = (
             "你是一个专业的贸易单证 OCR 助手。对图片执行：\n"
             "1. 识别全部可见文字；\n"
             "2. 判断图片中是否存在印章（红色圆形/椭圆形印章图形，has_stamp: true=有/false=无/null=无法判断）；\n"
             "3. 按要求提取结构化字段；\n"
-            "4. 给出整体置信度 confidence（0-1）和低置信度字段列表 low_confidence_fields。\n"
+            "4. 推断当前文档的业务类型名称，填入 inferred_doc_type；\n"
+            "5. 给出整体置信度 confidence（0-1）和低置信度字段列表 low_confidence_fields。\n"
             "严格输出 JSON，schema: {\"text\":string,\"has_stamp\":bool|null,\"fields\":object,"
-            "\"confidence\":number,\"low_confidence_fields\":[string]}"
+            "\"inferred_doc_type\":string|null,\"confidence\":number,\"low_confidence_fields\":[string]}"
         )
-        user_prompt = f"{hint}{fields_hint}请识别这张图片。"
+        user_prompt = f"{hint}{fields_hint}{infer_hint}请识别这张图片。"
 
         messages = [
             {"role": "system", "content": system_prompt},
@@ -110,11 +122,18 @@ class OCRClient:
             logger.error("OCR 未知错误 %s: %s", image_path, e)
             return {"success": False, "error": f"OCR 未知错误: {e}"}
 
+        # 把 inferred_doc_type 注入到 fields 里，让下游无缝存储到 DB
+        inferred = result.get("inferred_doc_type") or ""
+        fields_dict = result.get("fields", {}) or {}
+        if inferred:
+            fields_dict["__inferred_doc_type__"] = inferred
+
         # 标准化输出
         return {
             "text": result.get("text", ""),
             "has_stamp": result.get("has_stamp"),
-            "fields": result.get("fields", {}) or {},
+            "fields": fields_dict,
+            "inferred_doc_type": inferred,
             "confidence": float(result.get("confidence", 0.0)),
             "low_confidence_fields": result.get("low_confidence_fields", []) or [],
             "success": True,

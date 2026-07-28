@@ -75,24 +75,45 @@ def _llm_extract_fields_from_text(
 ) -> dict:
     """对文本型 PDF/DOCX，调用 LLM 提取结构化字段。
 
+    有 field_template 时按模板提取；
+    无 field_template 时让模型推断文档类型 + 自由提取结构化字段。
+
     返回 {fields: {...}, has_stamp: bool|null, confidence: float}
     """
-    if not text.strip() or not field_template:
+    if not text.strip():
         return {"fields": {}, "has_stamp": None, "confidence": 0.0}
 
     llm = get_llm_client()
-    system_prompt = (
-        "你是贸易单证字段提取助手。从给定文本中按字段列表提取结构化信息。\n"
-        "严格输出 JSON: {\"fields\": {字段名: 值}, \"has_stamp\": true|false|null, "
-        "\"confidence\": 0-1}\n"
-        "has_stamp: 文本中是否提及印章/盖章/用印；无法判断时填 null。\n"
-        "confidence: 整体提取置信度。"
-    )
-    user_prompt = (
-        f"文件类型: {doc_type}\n"
-        f"需提取字段: {', '.join(field_template)}\n"
-        f"文本内容:\n{text[:4000]}"
-    )
+
+    if not field_template:
+        # 自由提取模式：无预定义字段模板
+        system_prompt = (
+            "你是贸易单证字段提取助手。从给定文本中识别文档类型并提取结构化信息。\n"
+            "严格输出 JSON: {\"fields\": {字段名: 值}, \"inferred_doc_type\": string|null, "
+            "\"has_stamp\": true|false|null, \"confidence\": 0-1}\n"
+            "inferred_doc_type: 根据文本内容判断本文件是什么业务类型（如'采购合同'、'装箱单'、'运单'等）\n"
+            "fields: 提取文档中所有明显的结构化字段（表头内容、键值对、表单字段等）\n"
+            "has_stamp: 文本中是否提及印章/盖章/用印；无法判断时填 null\n"
+            "confidence: 整体提取置信度"
+        )
+        user_prompt = (
+            f"文件类型未知。请推断文档类型并提取结构化字段。\n"
+            f"文本内容:\n{text[:4000]}"
+        )
+    else:
+        system_prompt = (
+            "你是贸易单证字段提取助手。从给定文本中按字段列表提取结构化信息。\n"
+            "严格输出 JSON: {\"fields\": {字段名: 值}, \"inferred_doc_type\": string|null, "
+            "\"has_stamp\": true|false|null, \"confidence\": 0-1}\n"
+            "has_stamp: 文本中是否提及印章/盖章/用印；无法判断时填 null。\n"
+            "confidence: 整体提取置信度。"
+        )
+        user_prompt = (
+            f"文件类型: {doc_type}\n"
+            f"需提取字段: {', '.join(field_template)}\n"
+            f"文本内容:\n{text[:4000]}"
+        )
+
     try:
         resp = llm.chat_json(
             messages=[
@@ -102,8 +123,12 @@ def _llm_extract_fields_from_text(
             temperature=0.1,
             max_tokens=2048,
         )
+        fields = resp.get("fields", {}) or {}
+        inferred = resp.get("inferred_doc_type") or ""
+        if inferred:
+            fields["__inferred_doc_type__"] = inferred
         return {
-            "fields": resp.get("fields", {}) or {},
+            "fields": fields,
             "has_stamp": resp.get("has_stamp"),
             "confidence": float(resp.get("confidence", 0.0)),
         }

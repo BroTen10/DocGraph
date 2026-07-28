@@ -10,8 +10,16 @@ from sqlalchemy.orm import Session
 
 from ..database import get_db
 from ..schemas.graph import GraphSnapshotOut
-from ..schemas.rule import RuleBatchConfirmRequest, RuleCreate, RuleImportRequest, RuleImportResponse, RuleOut, RuleUpdate
-from ..services import rule_import_service, rule_service
+from ..schemas.rule import (
+    ConflictDetectionResponse,
+    RuleBatchConfirmRequest,
+    RuleCreate,
+    RuleImportRequest,
+    RuleImportResponse,
+    RuleOut,
+    RuleUpdate,
+)
+from ..services import rule_conflict_detector, rule_import_service, rule_service
 
 router = APIRouter(prefix="/api/rules", tags=["rules"])
 
@@ -44,9 +52,14 @@ def import_rules_batch(
     rule_set_id: uuid.UUID = Query(..., description="所属规则集 ID"),
     db: Session = Depends(get_db),
 ) -> RuleImportResponse:
-    """批量导入自然语言规则清单（LLM 解析后入库），归到指定规则集下。"""
+    """批量导入自然语言规则清单（LLM 解析后入库），归到指定规则集下。
+
+    可选的 skill_ids 参数指定应用的 Skill；不传则使用该规则集已启用的所有 Skill。
+    """
     try:
-        result = rule_import_service.import_rules_from_text(db, rule_set_id, payload.raw_text)
+        result = rule_import_service.import_rules_with_skills(
+            db, rule_set_id, payload.raw_text, skill_ids=payload.skill_ids
+        )
         return RuleImportResponse(**result)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -122,3 +135,18 @@ def get_snapshot(
     if snap is None:
         raise HTTPException(status_code=404, detail="快照不存在")
     return GraphSnapshotOut.model_validate(snap)
+
+
+# ============ 语义冲突检测 ============
+@router.post("/detect-conflicts", response_model=ConflictDetectionResponse)
+def detect_conflicts(
+    rule_set_id: uuid.UUID = Query(..., description="规则集 ID"),
+    db: Session = Depends(get_db),
+) -> ConflictDetectionResponse:
+    """检测指定规则集内所有启用规则的语义冲突。
+
+    按 (doc_type, check_category) 分组后逐组用 LLM 检测矛盾关系，
+    结果写入各规则的 defects 字段，并返回冲突报告。
+    """
+    result = rule_conflict_detector.run_conflict_detection(db, str(rule_set_id))
+    return ConflictDetectionResponse(**result)

@@ -47,6 +47,8 @@ class Rule(Base):
     status: Mapped[str] = mapped_column(String(16), default="pending", nullable=False, index=True)
     confirmed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, default=None)
     confirmed_by: Mapped[str | None] = mapped_column(String(64), nullable=True, default=None)
+    # LLM 检测到的缺陷列表：[{"type":"ambiguous_reference","severity":"warning","description":"..."}]
+    defects: Mapped[list] = mapped_column(JSONB, default=list, nullable=False)
     # ----- -----
     updated_at: Mapped[datetime] = mapped_column(
         DateTime, server_default=func.now(), onupdate=func.now(), nullable=False

@@ -48,27 +48,25 @@ def init_db() -> None:
         仅在 schema 破坏性变更或需要干净环境时临时开启。
     """
     # 导入所有模型以触发注册
-    from .models import (  # noqa: F401
-        contract,
-        document,
-        ocr_task,
-        review_result,
-        review_task,
-        rule,
-        rule_set,
-        rule_snapshot,
+    from .models import (
+        contract,       # noqa: F401
+        document,       # noqa: F401
+        ocr_task,       # noqa: F401
+        review_result,  # noqa: F401
+        review_task,    # noqa: F401
+        rule,           # noqa: F401
+        rule_parse_skill,  # noqa: F401
+        rule_set,       # noqa: F401
+        rule_snapshot,  # noqa: F401
     )
 
     if settings.db_reset_on_startup:
-        # 破坏性重置：清空 Postgres（会丢失所有表与数据）
         with engine.begin() as conn:
             conn.execute(text("DROP SCHEMA IF EXISTS public CASCADE;"))
             conn.execute(text("CREATE SCHEMA public;"))
         logger.warning("DB_RESET_ON_STARTUP=True：已重建 public schema（DROP + CREATE）")
-        # 同步清空 Neo4j，避免 PG 与图谱失联
         try:
             from .neo4j_client import get_neo4j_client
-
             remaining = get_neo4j_client().clear_all_rule_graphs()
             logger.warning("已同步清空 Neo4j 规则图谱（剩余节点=%s）", remaining)
         except Exception:
@@ -76,3 +74,88 @@ def init_db() -> None:
 
     Base.metadata.create_all(bind=engine)
     logger.info("Postgres 表已就绪（create_all 幂等）")
+
+    # 增量迁移：新增列与表（create_all 不处理已有表的列变更）
+    _run_migrations(engine)
+    # 种子数据：内置默认 Skill
+    _seed_builtin_skill()
+
+
+def _run_migrations(engine) -> None:
+    """执行增量 DDL 迁移。适用于在已有表上加列等操作。"""
+    migrations = [
+        "ALTER TABLE rules ADD COLUMN IF NOT EXISTS defects JSONB NOT NULL DEFAULT '[]'::jsonb;",
+    ]
+    with engine.begin() as conn:
+        for sql in migrations:
+            conn.execute(text(sql))
+    logger.info("增量迁移完成: %d 条", len(migrations))
+
+
+def _seed_builtin_skill() -> None:
+    """种子数据：如果不存在则创建内置默认 Skill。"""
+    from .models import RuleParseSkill
+    from sqlalchemy import select
+
+    with SessionLocal() as db:
+        existing = db.execute(
+            select(RuleParseSkill).where(RuleParseSkill.is_builtin.is_(True))
+        ).scalars().first()
+        if existing is not None:
+            return
+
+        skill = RuleParseSkill(
+            rule_set_id=None,
+            name="默认规则解析配置",
+            description="适用于大多数贸易合同审查场景的基础规则解析配置，开箱即用",
+            is_builtin=True,
+            enabled=True,
+            priority=100,
+            version=1,
+            content={
+                "prompt_instructions": [
+                    "rule_text 用简洁中文描述，如'报关单数量应不大于委托单数量'",
+                    "将自然语言规则拆分为单条规则时，保留原文的业务含义",
+                    "如果原始文档使用英文术语，保留英文术语并在括号内附中文翻译",
+                ],
+                "field_mappings": {},
+                "defaults": {
+                    "tolerance": {
+                        "amount_percent": 5.0,
+                        "weight_kg": 0.5,
+                    },
+                    "priority": {
+                        "齐套性": 10,
+                        "基础判断": 20,
+                        "信息准确性": 30,
+                        "时间逻辑": 40,
+                    },
+                },
+                "validations": [
+                    {
+                        "field": "tolerance.amount_percent",
+                        "rule": "值必须在 0-100 之间",
+                        "severity": "error",
+                        "message": "金额容差 '{value}' 超出 0-100 范围，请修正",
+                    },
+                    {
+                        "field": "tolerance.weight_kg",
+                        "rule": "值必须 >= 0",
+                        "severity": "error",
+                    },
+                ],
+                "text_preprocessing": [],
+                "term_normalization": {},
+                "domain_context": {
+                    "glossary": {},
+                    "common_patterns": [
+                        "金额对比类规则通常涉及报关单金额 vs 委托单金额",
+                        "数量对比类规则通常涉及报关单数量 vs 委托单数量",
+                        "日期逻辑类规则关注签订日期、报关日期、有效期的先后关系",
+                    ],
+                },
+            },
+        )
+        db.add(skill)
+        db.commit()
+        logger.info("已 seed 内置默认 Skill: %s", skill.name)
