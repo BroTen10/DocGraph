@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import uuid
 from typing import Optional
 
@@ -21,6 +22,8 @@ from ..schemas.rule import (
 )
 from ..services import rule_conflict_detector, rule_import_service, rule_service
 
+logger = logging.getLogger(__name__)
+
 router = APIRouter(prefix="/api/rules", tags=["rules"])
 
 
@@ -30,10 +33,19 @@ def list_rules(
     doc_type: Optional[str] = Query(None),
     check_category: Optional[str] = Query(None),
     enabled_only: bool = Query(False),
+    defect_severity: Optional[str] = Query(
+        None,
+        description="按缺陷严重程度过滤: none(无缺陷) / conflict / error / warning / info",
+    ),
+    only_confirmed: bool = Query(False),
     db: Session = Depends(get_db),
 ) -> list[RuleOut]:
-    """规则列表，支持按规则集 / 文件类型 / 检查项 / 启用状态过滤。"""
-    return rule_service.list_rules(db, rule_set_id, doc_type, check_category, enabled_only)
+    """规则列表，支持按规则集 / 文件类型 / 检查项 / 启用状态 / 缺陷严重程度过滤。"""
+    return rule_service.list_rules(
+        db, rule_set_id, doc_type, check_category, enabled_only,
+        defect_severity=defect_severity,
+        only_confirmed=only_confirmed,
+    )
 
 
 @router.post("", response_model=RuleOut, status_code=201)
@@ -72,6 +84,20 @@ def update_rule(
     rule = rule_service.update_rule(db, rule_id, payload)
     if rule is None:
         raise HTTPException(status_code=404, detail="规则不存在")
+
+    # 如果规则被禁用，同步清理图谱中该规则对应的节点/关系
+    if payload.enabled is False:
+        try:
+            from ..services.rule_service import get_latest_snapshot
+            from ..neo4j_client import get_neo4j_client
+            snap = get_latest_snapshot(db, rule.rule_set_id)
+            if snap and snap.graph_id:
+                neo4j = get_neo4j_client()
+                neo4j.remove_nodes_by_rule_id(snap.graph_id, str(rule_id))
+                logger.info("规则 %s 已禁用，已从图谱 %s 中移除对应节点", rule_id, snap.graph_id)
+        except Exception:
+            logger.warning("规则禁用后同步图谱失败（不影响规则更新）", exc_info=True)
+
     return rule
 
 
@@ -114,6 +140,16 @@ def confirm_rules_batch(
         db, rule_set_id, payload.ids, confirmed_by=confirmed_by,
     )
     return {"success": True, "confirmed": count, "message": f"已确认 {count} 条规则"}
+
+
+# ============ 缺陷概览 ============
+@router.get("/defect-summary")
+def get_defect_summary(
+    rule_set_id: uuid.UUID = Query(..., description="规则集 ID"),
+    db: Session = Depends(get_db),
+) -> dict:
+    """获取规则集缺陷概览统计：正常/冲突/错误/警告/提示各有多少条规则。"""
+    return rule_service.get_defect_summary(db, rule_set_id)
 
 
 # ============ 规则快照 ============

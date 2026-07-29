@@ -10,6 +10,7 @@ import type {
   GraphBuildResponse,
   GraphBuildTaskStatus,
   GraphData,
+  ImportTask,
   OcrTask,
   OcrTaskBrief,
   ReviewResultByDoc,
@@ -17,7 +18,6 @@ import type {
   ReviewTaskListItem,
   ReviewTaskSummary,
   Rule,
-  RuleDocumentImportResponse,
   RuleImportResponse,
   RuleSet,
   RuleSetCreate,
@@ -27,7 +27,8 @@ import type {
 
 const http = axios.create({
   baseURL: '/api',
-  timeout: 300000, // OCR + LLM 调用较慢，5 分钟超时
+  // 文档导入已改为异步任务模式，上传请求本身很快返回 task_id；此处仅兜底长链路。
+  timeout: 600000, // 10 分钟兜底
 })
 
 // ============ 规则集 ============
@@ -71,7 +72,7 @@ export const contractsApi = {
 
 // ============ 规则 ============
 export const rulesApi = {
-  list: (ruleSetId: string, params?: { doc_type?: string; check_category?: string; enabled_only?: boolean }) =>
+  list: (ruleSetId: string, params?: { doc_type?: string; check_category?: string; enabled_only?: boolean; defect_severity?: string; only_confirmed?: boolean }) =>
     http.get<Rule[]>('/rules', { params: { rule_set_id: ruleSetId, ...params } }).then((r) => r.data),
   create: (ruleSetId: string, data: Partial<Rule>) =>
     http.post<Rule>('/rules', data, { params: { rule_set_id: ruleSetId } }).then((r) => r.data),
@@ -79,7 +80,7 @@ export const rulesApi = {
     http
       .post<RuleImportResponse>('/rules/import-batch', { raw_text, skill_ids: skill_ids || [] }, { params: { rule_set_id: ruleSetId } })
       .then((r) => r.data),
-  /** 从上传的规则描述文档（PDF/EXCEL/WORD/MD）导入规则 */
+  /** 从上传的规则描述文档（PDF/EXCEL/WORD/MD）导入规则（异步任务模式，返回 task_id） */
   importDocument: (ruleSetId: string, file: File, skill_ids?: string[]) => {
     const form = new FormData()
     form.append('file', file)
@@ -88,12 +89,15 @@ export const rulesApi = {
       params.skill_ids = skill_ids.join(',')
     }
     return http
-      .post<RuleDocumentImportResponse>('/rules/import-document', form, {
+      .post<ImportTask>('/rules/import-document', form, {
         params,
         headers: { 'Content-Type': 'multipart/form-data' },
       })
       .then((r) => r.data)
   },
+  /** 轮询导入任务进度与结果 */
+  getImportTask: (taskId: string) =>
+    http.get<ImportTask>(`/rules/import-tasks/${taskId}`).then((r) => r.data),
   update: (id: string, data: Partial<Rule>) => http.put<Rule>(`/rules/${id}`, data).then((r) => r.data),
   delete: (id: string) => http.delete(`/rules/${id}`).then((r) => r.data),
   /** 批量删除规则：传 ids 仅删指定；不传则清空该规则集全部规则 */
@@ -121,6 +125,11 @@ export const rulesApi = {
   /** 语义冲突检测 */
   detectConflicts: (ruleSetId: string) =>
     http.post<import('../types').ConflictDetectionResponse>('/rules/detect-conflicts', null, { params: { rule_set_id: ruleSetId } }).then((r) => r.data),
+  /** 缺陷概览统计 */
+  getDefectSummary: (ruleSetId: string) =>
+    http.get<{ total_rules: number; healthy: number; conflict: number; error: number; warning: number; info: number }>(
+      '/rules/defect-summary', { params: { rule_set_id: ruleSetId } },
+    ).then((r) => r.data),
 }
 
 // ============ 图谱 ============
@@ -205,4 +214,7 @@ export const skillsApi = {
     http.put<import('../types').RuleParseSkill>(`/rule-sets/${ruleSetId}/skills/${skillId}`, data).then((r) => r.data),
   delete: (ruleSetId: string, skillId: string) =>
     http.delete(`/rule-sets/${ruleSetId}/skills/${skillId}`).then((r) => r.data),
+  /** 将人工修正规则的经验写回 Skill */
+  learn: (ruleSetId: string, data: import('../types').SkillLearnRequest) =>
+    http.post<import('../types').SkillLearnResponse>(`/rule-sets/${ruleSetId}/skills/learn`, data).then((r) => r.data),
 }

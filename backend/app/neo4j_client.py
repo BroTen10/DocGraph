@@ -251,6 +251,31 @@ class Neo4jClient:
             {"src": source, "tgt": target, "graph_id": graph_id},
         )
 
+    def remove_nodes_by_rule_id(self, graph_id: str, rule_id: str) -> int:
+        """从图谱中移除指定 rule_id 对应的所有节点和关系。
+
+        通过节点属性 rule_id 匹配（图谱构建时为每个节点/关系注入 rule_id）。
+        返回删除的节点数。
+        """
+        # 先删与该 rule_id 相关的关系
+        self.execute_write(
+            "MATCH (a:RuleEntity {graph_id: $graph_id})-[r]->(b:RuleEntity {graph_id: $graph_id}) "
+            "WHERE r.rule_id = $rule_id "
+            "DELETE r",
+            {"graph_id": graph_id, "rule_id": rule_id},
+        )
+        # 再删节点
+        result = self.execute_write(
+            "MATCH (n:RuleEntity {graph_id: $graph_id}) "
+            "WHERE n.rule_id = $rule_id "
+            "DETACH DELETE n "
+            "RETURN count(n) AS cnt",
+            {"graph_id": graph_id, "rule_id": rule_id},
+        )
+        count = result[0]["cnt"] if result else 0
+        logger.info("从图谱 %s 中移除 rule_id=%s 的 %d 个节点", graph_id, rule_id, count)
+        return count
+
 
 def get_neo4j_client() -> Neo4jClient:
     """全局单例 Neo4j 客户端。"""

@@ -18,6 +18,7 @@ from sqlalchemy.orm import Session
 
 from ..llm_client import LLMError, get_llm_client
 from ..models import Rule
+from .rule_import_task import ImportProgress, update_task
 
 logger = logging.getLogger(__name__)
 
@@ -136,7 +137,7 @@ def detect_conflicts_in_rules(rules: list[Rule]) -> list[dict]:
     return results
 
 
-def detect_all_conflicts(db: Session, rule_set_id: str) -> list[dict]:
+def detect_all_conflicts(db: Session, rule_set_id: str, progress: ImportProgress | None = None) -> list[dict]:
     """检测指定规则集内所有规则的语义冲突。
 
     按 (doc_type, check_category) 分组后逐组检测。
@@ -157,8 +158,12 @@ def detect_all_conflicts(db: Session, rule_set_id: str) -> list[dict]:
         key = (r.doc_type, r.check_category)
         groups.setdefault(key, []).append(r)
 
+    if progress is not None:
+        update_task(progress, conflict_total=len(groups), conflict_done=0,
+                    message=f"正在检测规则冲突（共 {len(groups)} 组）…")
+
     all_conflicts: list[dict] = []
-    for (_doc_type, _check_category), group in groups.items():
+    for _i, ((_doc_type, _check_category), group) in enumerate(groups.items(), start=1):
         conflicts = detect_conflicts_in_rules(group)
         all_conflicts.extend(conflicts)
         if conflicts:
@@ -166,6 +171,9 @@ def detect_all_conflicts(db: Session, rule_set_id: str) -> list[dict]:
                 "冲突检测 [%s/%s]: %d 条规则中发现 %d 个冲突",
                 _doc_type, _check_category, len(group), len(conflicts)
             )
+        if progress is not None:
+            update_task(progress, conflict_done=_i,
+                        message=f"冲突检测 {_i}/{len(groups)} 组")
 
     return all_conflicts
 
@@ -236,13 +244,13 @@ def clear_old_conflicts(db: Session, rule_set_id: str, current_conflict_ids: set
     return cleared
 
 
-def run_conflict_detection(db: Session, rule_set_id: str) -> dict[str, Any]:
+def run_conflict_detection(db: Session, rule_set_id: str, progress: ImportProgress | None = None) -> dict[str, Any]:
     """运行完整的冲突检测流程：检测 → 写入 → 清理。
 
     Returns:
         {"total_conflicts": N, "affected_rules": N, "conflicts": [...]}
     """
-    conflicts = detect_all_conflicts(db, rule_set_id)
+    conflicts = detect_all_conflicts(db, rule_set_id, progress=progress)
 
     # 当前冲突的描述作为去重标识
     current_descriptions = {c.get("description", "") for c in conflicts if c.get("description")}

@@ -135,6 +135,7 @@ export interface RuleImportResponse {
   rules: Array<Record<string, unknown>>
   errors: string[]
   conflict_report: ConflictReport | null
+  conflict_detected?: number
 }
 
 export interface GraphNode {
@@ -208,6 +209,27 @@ export interface RuleDocumentImportResponse {
   extracted_text_preview: string
   extracted_text_length: number
   source_filename: string
+}
+
+/** 异步导入任务状态与进度（前端轮询用） */
+export interface ImportTask {
+  task_id: string
+  rule_set_id: string
+  status: 'pending' | 'extracting' | 'parsing' | 'importing' | 'conflict' | 'done' | 'error'
+  message: string
+  file_name: string
+  total_chunks: number
+  parsed_chunks: number
+  total_rules: number
+  imported_rules: number
+  import_errors: number
+  conflict_total: number
+  conflict_done: number
+  conflict_found: number
+  result: RuleImportResponse | null
+  error: string | null
+  created_at: string
+  updated_at: string
 }
 
 export interface ReviewTaskSummary {
@@ -360,6 +382,7 @@ export interface RuleParseSkill {
   enabled: boolean
   priority: number
   content: RuleParseSkillContent
+  content_yaml: string
   version: number
   created_at: string
   updated_at: string
@@ -370,7 +393,8 @@ export interface RuleParseSkillCreate {
   description?: string
   enabled?: boolean
   priority?: number
-  content: RuleParseSkillContent
+  content_yaml?: string
+  content?: RuleParseSkillContent
 }
 
 export interface RuleParseSkillUpdate {
@@ -378,5 +402,20 @@ export interface RuleParseSkillUpdate {
   description?: string
   enabled?: boolean
   priority?: number
+  content_yaml?: string
   content?: RuleParseSkillContent
+}
+
+export interface SkillLearnRequest {
+  rule_id?: string
+  skill_id?: string
+  before: Record<string, unknown>
+  after: Record<string, unknown>
+  note?: string
+}
+
+export interface SkillLearnResponse {
+  success: boolean
+  skill: RuleParseSkill
+  added_instructions: string[]
 }
