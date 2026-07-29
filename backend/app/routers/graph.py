@@ -21,7 +21,9 @@ from ..services import (
     graph_build_progress,
     rule_document_import_service,
     rule_service,
+    rule_import_task,
 )
+from ..services.rule_import_task import ImportProgress
 
 router = APIRouter(prefix="/api/rules", tags=["graph"])
 
@@ -129,16 +131,17 @@ class RuleDocumentImportResponse(RuleImportResponse):
     source_filename: str = ""
 
 
-@router.post("/import-document", response_model=RuleDocumentImportResponse)
+@router.post("/import-document")
 async def import_rules_from_document(
     rule_set_id: uuid.UUID = Query(..., description="所属规则集 ID"),
     file: UploadFile = File(...),
     skill_ids: str | None = Query(None, description="逗号分隔的 Skill ID 列表"),
     db: Session = Depends(get_db),
-) -> RuleDocumentImportResponse:
+) -> dict:
     """从上传的规则描述文档（PDF/EXCEL/WORD/MD）导入规则，归到指定规则集下。
 
-    自动提取文本 → （可选应用 Skill）→ 调用 LLM 解析为结构化规则 → 入库。
+    该流程（提取文本 → LLM 解析 → 入库 → 冲突检测）较长，故改为异步任务：
+    立即落盘文件并返回 task_id，前端通过 GET /import-tasks/{task_id} 轮询进度。
     skill_ids 参数传逗号分隔的 Skill UUID，不传则使用该规则集默认配置。
     """
     if not file.filename:
@@ -151,20 +154,64 @@ async def import_rules_from_document(
         except ValueError:
             raise HTTPException(status_code=400, detail="skill_ids 格式错误，应为逗号分隔的 UUID")
 
-    try:
+    import os
+    import tempfile
+
+    # 落盘文件，交由后台线程处理
+    suffix = os.path.splitext(file.filename)[1].lower() or ".pdf"
+    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
         content = await file.read()
-        result = rule_document_import_service.import_rules_from_document(
-            db=db,
-            rule_set_id=rule_set_id,
-            file_content=content,
-            filename=file.filename,
-            skill_ids=parsed_skill_ids,
-        )
-        return RuleDocumentImportResponse(**result)
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"导入失败: {e}")
+        tmp.write(content)
+        tmp_path = tmp.name
+
+    task = rule_import_task.create_task(str(rule_set_id), file.filename)
+
+    import threading
+
+    t = threading.Thread(
+        target=rule_import_task.run_import_task,
+        args=(task, tmp_path, file.filename, parsed_skill_ids),
+        daemon=True,
+    )
+    t.start()
+    logger = __import__("logging").getLogger(__name__)
+    logger.info("已启动导入任务 %s (rule_set=%s, file=%s)", task.task_id, rule_set_id, file.filename)
+
+    return {
+        "task_id": task.task_id,
+        "rule_set_id": str(rule_set_id),
+        "status": task.status,
+        "message": "已接收文件，正在后台解析…",
+    }
+
+
+class ImportTaskOut(BaseModel):
+    task_id: str
+    rule_set_id: str
+    status: str
+    message: str = ""
+    file_name: str = ""
+    total_chunks: int = 0
+    parsed_chunks: int = 0
+    total_rules: int = 0
+    imported_rules: int = 0
+    import_errors: int = 0
+    conflict_total: int = 0
+    conflict_done: int = 0
+    conflict_found: int = 0
+    result: dict | None = None
+    error: str | None = None
+    created_at: str = ""
+    updated_at: str = ""
+
+
+@router.get("/import-tasks/{task_id}", response_model=ImportTaskOut)
+def get_import_task(task_id: str) -> ImportTaskOut:
+    """查询导入任务的进度与结果。前端轮询此接口。"""
+    task = rule_import_task.get_task(task_id)
+    if task is None:
+        raise HTTPException(status_code=404, detail="任务不存在或已过期")
+    return ImportTaskOut(**task.to_dict())
 
 
 # ============ 图谱查询与确认 ============

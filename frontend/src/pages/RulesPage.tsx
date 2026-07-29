@@ -3,11 +3,11 @@ import type { UploadProps, UploadFile } from 'antd'
 import {
   Card, Row, Col, Table, Tag, Button, Modal, Form, Input, InputNumber, Switch,
   Select, Space, message, Typography, Tooltip, Popconfirm, Tabs, List, Spin, Alert,
-  Upload, Drawer,
+  Upload, Drawer, Progress,
 } from 'antd'
 import { PlusOutlined, EditOutlined, DeleteOutlined, ThunderboltOutlined, HistoryOutlined, ImportOutlined, InboxOutlined, FileTextOutlined, SettingOutlined, CheckOutlined, WarningOutlined } from '@ant-design/icons'
-import { rulesApi, graphApi, constantsApi, ruleSetsApi } from '../api/client'
-import type { Rule, RuleSet, RuleSnapshot, DocTypeMeta, ConstantsResponse, RuleImportResponse, RuleDocumentImportResponse } from '../types'
+import { rulesApi, graphApi, constantsApi, ruleSetsApi, skillsApi } from '../api/client'
+import type { Rule, RuleSet, RuleSnapshot, DocTypeMeta, ConstantsResponse, RuleImportResponse, ImportTask } from '../types'
 import PageHeader from '../components/PageHeader'
 import { useRuleSet } from '../context/RuleSetContext'
 import SkillTab from './SkillTab'
@@ -17,6 +17,59 @@ const { Text } = Typography
 const { Dragger } = Upload
 const CHECK_CATEGORIES = ['齐套性', '基础判断', '信息准确性', '时间逻辑']
 const FILE_ACCEPT = '.pdf,.xlsx,.xls,.docx,.md,.txt'
+
+// 导入任务状态 → 中文标签
+function statusLabel(status: ImportTask['status']): string {
+  const map: Record<ImportTask['status'], string> = {
+    pending: '排队中',
+    extracting: '提取文本',
+    parsing: '大模型解析',
+    importing: '入库中',
+    conflict: '冲突检测',
+    done: '完成',
+    error: '失败',
+  }
+  return map[status] || status
+}
+
+// 估算整体进度百分比（0~100）
+function computeImportProgress(task: ImportTask): number {
+  const pct = (a: number, b: number) => (b > 0 ? Math.min(100, Math.round((a / b) * 100)) : 0)
+  switch (task.status) {
+    case 'pending':
+      return 2
+    case 'extracting':
+      return 8
+    case 'parsing':
+      return 10 + pct(task.parsed_chunks, task.total_chunks) * 0.5
+    case 'importing':
+      return 60 + pct(task.imported_rules, Math.max(task.total_rules, 1)) * 0.2
+    case 'conflict':
+      return 80 + pct(task.conflict_done, Math.max(task.conflict_total, 1)) * 0.2
+    case 'done':
+      return 100
+    case 'error':
+      return 100
+    default:
+      return 0
+  }
+}
+
+// 进度条上的文字描述
+function describeImportProgress(task: ImportTask): string {
+  switch (task.status) {
+    case 'parsing':
+      return `已解析 ${task.parsed_chunks}/${task.total_chunks} 段`
+    case 'importing':
+      return `已入库 ${task.imported_rules}/${task.total_rules} 条`
+    case 'conflict':
+      return `冲突检测 ${task.conflict_done}/${task.conflict_total} 组`
+    case 'done':
+      return `完成（${task.imported_rules} 条）`
+    default:
+      return ''
+  }
+}
 
 export default function RulesPage() {
   const { currentId } = useRuleSet()
@@ -38,10 +91,12 @@ export default function RulesPage() {
   const [importResult, setImportResult] = useState<RuleImportResponse | null>(null)
   // 文件导入
   const [importFile, setImportFile] = useState<File | null>(null)
-  const [fileImportResult, setFileImportResult] = useState<RuleDocumentImportResponse | null>(null)
+  const [fileImportResult, setFileImportResult] = useState<RuleImportResponse | null>(null)
   // 导入阶段提示（解决"点了没反馈"的问题）
   const [importStage, setImportStage] = useState<'parsing' | 'llm' | 'saving' | null>(null)
   const [importError, setImportError] = useState<string | null>(null)
+  // 异步导入任务进度（轮询用）
+  const [importTask, setImportTask] = useState<ImportTask | null>(null)
   // 批量确认
   const [confirming, setConfirming] = useState(false)
   // Skill 选择
@@ -55,26 +110,42 @@ export default function RulesPage() {
   const [defectDrawerOpen, setDefectDrawerOpen] = useState(false)
   const [defectDrawerTab, setDefectDrawerTab] = useState<'conflict' | 'error' | 'warning'>('error')
 
+  // 规则列表子标签页：按健康状态过滤
+  type RuleFilterKey = 'all' | 'healthy' | 'conflict' | 'error' | 'warning' | 'info'
+  const [activeRuleFilter, setActiveRuleFilter] = useState<RuleFilterKey>('all')
+  const [defectSummaryRemote, setDefectSummaryRemote] = useState<{ healthy: number; conflict: number; error: number; warning: number; info: number; total_rules: number } | null>(null)
+
   const STAGE_TIP: Record<NonNullable<typeof importStage>, string> = {
     parsing: '正在解析文档为文本（PDF/Excel/Word）...',
     llm: '正在调用大模型提取规则（约 20-30 秒）...',
     saving: '正在入库，请稍候...',
   }
 
-  const load = async () => {
+  const load = async (filterKey?: RuleFilterKey) => {
     if (!currentId) return
+    const fk = filterKey ?? activeRuleFilter
     setLoading(true)
     try {
-      const [r, s, c, rs] = await Promise.all([
-        rulesApi.list(currentId),
+      // 根据过滤键构建 API 参数
+      const apiParams: { defect_severity?: string } = {}
+      if (fk === 'healthy') apiParams.defect_severity = 'none'
+      else if (fk === 'conflict') apiParams.defect_severity = 'conflict'
+      else if (fk === 'error') apiParams.defect_severity = 'error'
+      else if (fk === 'warning') apiParams.defect_severity = 'warning'
+      else if (fk === 'info') apiParams.defect_severity = 'info'
+
+      const [r, s, c, rs, ds] = await Promise.all([
+        rulesApi.list(currentId, apiParams),
         rulesApi.listSnapshots(currentId),
         constantsApi.docTypes(),
         ruleSetsApi.get(currentId),
+        rulesApi.getDefectSummary(currentId).catch(() => null),
       ])
       setRules(r)
       setSnapshots(s)
       setDocTypes(c.doc_types)
       setRuleSet(rs)
+      if (ds) setDefectSummaryRemote(ds)
     } catch (e: any) {
       message.error('加载失败: ' + (e?.message || e))
     } finally {
@@ -83,6 +154,12 @@ export default function RulesPage() {
   }
 
   useEffect(() => { load() }, [currentId])
+
+  /** 切换规则列表子标签时重新加载过滤数据 */
+  const handleFilterChange = (key: RuleFilterKey) => {
+    setActiveRuleFilter(key)
+    load(key)
+  }
 
   // 二维表格：行=文件类型，列=检查项
   const matrix = useMemo(() => {
@@ -159,6 +236,67 @@ export default function RulesPage() {
     setModalOpen(true)
   }
 
+  /** 人工修正规则后，询问是否把修正经验写回解析 Skill（持续增强自定义 Skill） */
+  const promptLearnFromCorrection = (before: Rule, after: Record<string, unknown>) => {
+    const LEARN_FIELDS: Array<{ key: keyof Rule & string; label: string }> = [
+      { key: 'rule_text', label: '规则文本' },
+      { key: 'check_category', label: '检查类别' },
+      { key: 'doc_type', label: '适用单据' },
+    ]
+    const changes = LEARN_FIELDS.filter(
+      (f) => after[f.key] != null && String(after[f.key]) !== String((before as any)[f.key] ?? ''),
+    )
+    if (!changes.length) return
+
+    Modal.confirm({
+      title: '将本次修正作为解析经验？',
+      width: 560,
+      content: (
+        <div>
+          <p style={{ marginBottom: 8 }}>
+            检测到你修正了解析结果。可以把这次修正写入「经验修正（自动累积）」Skill，
+            下次导入规则时自动注入解析提示词，减少同类错误。
+          </p>
+          {changes.map((f) => (
+            <div key={f.key} style={{ fontSize: 12, marginBottom: 4 }}>
+              <Tag>{f.label}</Tag>
+              <Text delete type="secondary">{String((before as any)[f.key] ?? '（空）')}</Text>
+              {' → '}
+              <Text strong>{String(after[f.key])}</Text>
+            </div>
+          ))}
+        </div>
+      ),
+      okText: '写入经验',
+      cancelText: '仅本次修正',
+      onOk: async () => {
+        try {
+          const beforeData: Record<string, unknown> = {}
+          const afterData: Record<string, unknown> = {}
+          changes.forEach((f) => {
+            beforeData[f.key] = (before as any)[f.key]
+            afterData[f.key] = after[f.key]
+          })
+          // rule_text 未变时也带上，作为经验的定位锚点
+          if (afterData.rule_text == null) {
+            beforeData.rule_text = before.rule_text
+            afterData.rule_text = after.rule_text ?? before.rule_text
+          }
+          const resp = await skillsApi.learn(currentId!, {
+            rule_id: before.id,
+            before: beforeData,
+            after: afterData,
+          })
+          message.success(
+            `已写入 Skill「${resp.skill.name}」（v${resp.skill.version}，新增 ${resp.added_instructions.length} 条经验）`,
+          )
+        } catch (e: any) {
+          message.error('写入经验失败: ' + (e?.response?.data?.detail || e?.message || e))
+        }
+      },
+    })
+  }
+
   const handleSave = async () => {
     try {
       const values = await form.validateFields()
@@ -180,6 +318,7 @@ export default function RulesPage() {
       if (editing) {
         await rulesApi.update(editing.id, payload)
         message.success('规则已更新')
+        promptLearnFromCorrection(editing, payload)
       } else {
         await rulesApi.create(currentId!, payload as any)
         message.success('规则已新增')
@@ -231,13 +370,18 @@ export default function RulesPage() {
     }
   }
 
-  /** 批量确认：传 ids 仅确认指定；不传则确认所有 pending 规则 */
+  /** 批量确认：传 ids 仅确认指定；不传则确认所有 pending 规则。同时启用这些规则 */
   const handleBatchConfirm = async (ids?: string[]) => {
     if (!currentId) return
     setConfirming(true)
     try {
+      // 先确认
       const resp = await rulesApi.confirmBatch(currentId, ids)
-      message.success(resp.message)
+      // 再批量启用
+      if (ids && ids.length > 0) {
+        await Promise.all(ids.map((id) => rulesApi.update(id, { enabled: true }).catch(() => {})))
+      }
+      message.success(resp.message + '，已同步启用')
       await load()
     } catch (e: any) {
       message.error('确认失败: ' + (e?.response?.data?.detail || e?.message || e))
@@ -343,27 +487,55 @@ export default function RulesPage() {
     setFileImportResult(null)
     setImportError(null)
     setImportStage('parsing')
-    // 阶段 1：上传+解析（典型 1-3 秒）
-    await new Promise((r) => setTimeout(r, 50)) // 让 UI 渲染出阶段 1
-    setImportStage('llm')
+    setImportTask(null)
+    // 阶段 1：上传文件，后端立即返回 task_id（异步任务模式）
+    let taskId: string
     try {
-      const resp = await rulesApi.importDocument(currentId!, importFile, importSkillIds.length ? importSkillIds : undefined)
-      setImportStage('saving')
-      setFileImportResult(resp)
-      if (resp.imported > 0) {
-        message.success(`导入完成：成功 ${resp.imported} 条，跳过 ${resp.skipped} 条`)
-        await load()
-      } else {
-        message.warning(`未导入任何规则，跳过 ${resp.skipped} 条`)
-      }
+      const task = await rulesApi.importDocument(
+        currentId!,
+        importFile,
+        importSkillIds.length ? importSkillIds : undefined,
+      )
+      taskId = task.task_id
+      setImportStage('llm')
     } catch (e: any) {
-      const msg = '文件导入失败: ' + (e?.response?.data?.detail || e?.message || e)
+      const msg = '文件上传失败: ' + (e?.response?.data?.detail || e?.message || e)
       setImportError(msg)
       message.error(msg)
-    } finally {
       setImporting(false)
       setImportStage(null)
+      return
     }
+
+    // 阶段 2：轮询进度，直到 done / error
+    const poll = async (): Promise<void> => {
+      const task = await rulesApi.getImportTask(taskId)
+      setImportTask(task)
+      if (task.status === 'done') {
+        setFileImportResult(task.result)
+        if (task.result && task.result.imported > 0) {
+          message.success(`导入完成：成功 ${task.result.imported} 条，跳过 ${task.result.skipped} 条`)
+          await load()
+        } else {
+          message.warning(`未导入任何规则${task.result ? `，跳过 ${task.result.skipped} 条` : ''}`)
+        }
+        setImporting(false)
+        setImportStage(null)
+        return
+      }
+      if (task.status === 'error') {
+        const msg = '文件导入失败: ' + (task.error || '未知错误')
+        setImportError(msg)
+        message.error(msg)
+        setImporting(false)
+        setImportStage(null)
+        return
+      }
+      // 仍在进行中，1.5s 后继续
+      await new Promise((r) => setTimeout(r, 1500))
+      return poll()
+    }
+    await poll()
   }
 
   // 文件上传组件 props：单文件，手动触发上传
@@ -511,7 +683,17 @@ export default function RulesPage() {
           checked={v}
           onChange={async (checked) => {
             try {
-              await rulesApi.update(row.id, { enabled: checked })
+              const payload: Partial<Rule> = { enabled: checked }
+              // 在问题规则视图中启用时，同时确认该规则
+              if (checked && row.status !== 'confirmed' && activeRuleFilter !== 'healthy') {
+                payload.status = 'confirmed'
+              }
+              await rulesApi.update(row.id, payload)
+              message.success(
+                checked && row.status !== 'confirmed'
+                  ? '规则已确认并启用，将参与图谱构建'
+                  : checked ? '规则已启用' : '规则已禁用，已从图谱中移除'
+              )
               await load()
             } catch (e: any) {
               message.error('更新失败: ' + (e?.message || e))
@@ -521,12 +703,19 @@ export default function RulesPage() {
       ),
     },
     {
-      title: '操作', key: 'action', width: 160,
+      title: '操作', key: 'action', width: 180,
       render: (_: unknown, row: Rule) => (
         <Space>
           {row.status !== 'confirmed' && (
-            <Popconfirm title="确认该条规则？" onConfirm={() => handleBatchConfirm([row.id])}>
-              <Button size="small" type="primary" ghost icon={<CheckOutlined />}>确认</Button>
+            <Popconfirm
+              title="确认并启用该条规则？确认后规则将参与图谱构建和文档审查"
+              onConfirm={async () => {
+                await rulesApi.update(row.id, { status: 'confirmed', enabled: true })
+                message.success('规则已确认并启用')
+                await load()
+              }}
+            >
+              <Button size="small" type="primary" icon={<CheckOutlined />}>确认启用</Button>
             </Popconfirm>
           )}
           <Button size="small" icon={<EditOutlined />} onClick={() => openEdit(row)} />
@@ -548,11 +737,11 @@ export default function RulesPage() {
           <Space>
             <Button icon={<PlusOutlined />} onClick={openCreate}>新增规则</Button>
             <Button icon={<ImportOutlined />} onClick={openImport}>批量导入</Button>
-            <Popconfirm title="一键自动确认全部规则（忽略置信度）？" onConfirm={() => handleBuild(true)}>
-              <Button icon={<ThunderboltOutlined />} loading={building}>一键自动确认</Button>
+            <Popconfirm title="确认并启用所有规则后构建图谱？仅已确认且已启用的规则参与构建" onConfirm={() => handleBuild(false)}>
+              <Button type="primary" icon={<ThunderboltOutlined />} loading={building}>构建图谱</Button>
             </Popconfirm>
             <Button icon={<WarningOutlined />} loading={conflictDetecting} onClick={() => handleDetectConflicts()}>检测冲突</Button>
-            <Button icon={<HistoryOutlined />} onClick={load}>刷新</Button>
+            <Button icon={<HistoryOutlined />} onClick={() => load()}>刷新</Button>
             <Popconfirm
               title={`确定清空当前规则集的全部 ${rules.length} 条规则？此操作不可恢复`}
               onConfirm={() => handleBatchDelete()}
@@ -582,28 +771,74 @@ export default function RulesPage() {
             label: '规则列表',
             children: (
               <Card loading={loading}>
-                {defectSummary.total > 0 && (
-                  <Alert
-                    type="warning"
-                    showIcon
-                    icon={conflictDetecting ? <Spin size="small" /> : <WarningOutlined />}
-                    style={{ marginBottom: 12, cursor: defectSummary.conflict > 0 ? 'pointer' : 'default' }}
-                    onClick={() => defectSummary.conflict > 0 && handleDetectConflicts(true)}
-                    message={
-                      <span>
-                        规则缺陷概览：
-                        {defectSummary.conflict > 0 && <Tag color="red" style={{ marginLeft: 8, cursor: conflictDetecting ? 'not-allowed' : 'pointer' }} onClick={(e) => { e.stopPropagation(); handleDetectConflicts(true) }}>{defectSummary.conflict} 个冲突{conflictDetecting ? '（检测中...）' : ''}</Tag>}
-                        {defectSummary.error > 0 && <Tag color="red" style={{ marginLeft: 4, cursor: 'pointer' }} onClick={(e) => { e.stopPropagation(); handleShowDefects('error') }}>{defectSummary.error} 个错误</Tag>}
-                        {defectSummary.warning > 0 && <Tag color="orange" style={{ cursor: 'pointer' }} onClick={(e) => { e.stopPropagation(); handleShowDefects('warning') }}>{defectSummary.warning} 个警告</Tag>}
-                        {defectSummary.info > 0 && <Tag color="blue">{defectSummary.info} 条提示</Tag>}
-                        <Text type="secondary" style={{ marginLeft: 8, fontSize: 12 }}>
-                          缺陷规则需手工确认修正
-                        </Text>
-                      </span>
-                    }
-                  />
-                )}
+                {/* 子标签页：按规则健康状态分类 */}
+                <Tabs
+                  activeKey={activeRuleFilter}
+                  onChange={(k) => handleFilterChange(k as RuleFilterKey)}
+                  size="small"
+                  style={{ marginBottom: 12 }}
+                  items={[
+                    { key: 'all', label: `全部（${defectSummaryRemote?.total_rules ?? rules.length}）` },
+                    {
+                      key: 'healthy',
+                      label: (
+                        <span style={{ color: '#52c41a' }}>
+                          正常规则（{defectSummaryRemote?.healthy ?? 0}）
+                        </span>
+                      ),
+                    },
+                    {
+                      key: 'conflict',
+                      label: (
+                        <span style={{ color: '#ff4d4f' }}>
+                          冲突（{defectSummaryRemote?.conflict ?? defectSummary.conflict}）
+                        </span>
+                      ),
+                    },
+                    {
+                      key: 'error',
+                      label: (
+                        <span style={{ color: '#ff4d4f' }}>
+                          错误（{defectSummaryRemote?.error ?? defectSummary.error}）
+                        </span>
+                      ),
+                    },
+                    {
+                      key: 'warning',
+                      label: (
+                        <span style={{ color: '#fa8c16' }}>
+                          警告（{defectSummaryRemote?.warning ?? defectSummary.warning}）
+                        </span>
+                      ),
+                    },
+                    {
+                      key: 'info',
+                      label: (
+                        <span style={{ color: '#1890ff' }}>
+                          提示（{defectSummaryRemote?.info ?? defectSummary.info}）
+                        </span>
+                      ),
+                    },
+                  ]}
+                />
+
+                {/* 操作用工具栏 */}
                 <Space style={{ marginBottom: 12 }}>
+                  {activeRuleFilter !== 'healthy' && activeRuleFilter !== 'all' && (
+                    <Popconfirm
+                      title={`确认并启用当前视图中的全部待定规则？确认后这些规则将参与图谱构建`}
+                      onConfirm={async () => {
+                        const ids = rules.filter((r) => r.status !== 'confirmed').map((r) => r.id)
+                        if (ids.length === 0) { message.info('没有待确认的规则'); return }
+                        await handleBatchConfirm(ids)
+                        await load()
+                      }}
+                    >
+                      <Button type="primary" icon={<CheckOutlined />} loading={confirming}>
+                        一键确认并启用
+                      </Button>
+                    </Popconfirm>
+                  )}
                   <Popconfirm
                     title={`确定删除选中的 ${selectedRowKeys.length} 条规则？此操作不可恢复`}
                     onConfirm={() => handleBatchDelete(selectedRowKeys)}
@@ -618,15 +853,36 @@ export default function RulesPage() {
                   {selectedRowKeys.length > 0 && (
                     <Button onClick={() => setSelectedRowKeys([])}>取消选择</Button>
                   )}
-                  <Popconfirm
-                    title="一键确认全部待定规则（忽略置信度）？"
-                    onConfirm={() => handleBatchConfirm()}
-                  >
-                    <Button icon={<CheckOutlined />} loading={confirming}>
-                      一键确认待定
-                    </Button>
-                  </Popconfirm>
+                  <Button icon={<WarningOutlined />} loading={conflictDetecting} onClick={() => handleDetectConflicts()}>
+                    检测冲突
+                  </Button>
                 </Space>
+
+                {/* 正常规则提示 */}
+                {activeRuleFilter === 'healthy' && (
+                  <Alert
+                    type="success"
+                    showIcon
+                    icon={<CheckOutlined />}
+                    style={{ marginBottom: 12 }}
+                    message="以下规则已自动确认并启用，可直接参与图谱构建和文档审查"
+                  />
+                )}
+
+                {/* 问题规则提示 */}
+                {activeRuleFilter !== 'healthy' && activeRuleFilter !== 'all' && (
+                  <Alert
+                    type="warning"
+                    showIcon
+                    style={{ marginBottom: 12 }}
+                    message={
+                      activeRuleFilter === 'conflict'
+                        ? '以下规则存在语义冲突，默认为禁用状态。请逐条确认后手动启用，确认后的规则将参与图谱构建'
+                        : '以下规则存在缺陷，默认为禁用状态。请逐条确认后手动启用，确认后的规则将参与图谱构建'
+                    }
+                  />
+                )}
+
                 <Table
                   dataSource={rules}
                   columns={ruleColumns}
@@ -893,9 +1149,21 @@ export default function RulesPage() {
                           已选 {importSkillIds.length} 个
                         </Text>
                       )}
-                    </Space>
+                </Space>
+              </div>
+              {importTask && importTask.status !== 'done' && importTask.status !== 'error' && (
+                <Card size="small" style={{ marginTop: 12 }} title={<Text strong>{importTask.message || '正在处理…'}</Text>}>
+                  <Progress
+                    percent={computeImportProgress(importTask)}
+                    status="active"
+                    format={() => describeImportProgress(importTask)}
+                  />
+                  <div style={{ fontSize: 12, color: '#666', marginTop: 4 }}>
+                    {importTask.file_name} · 状态：{statusLabel(importTask.status)}
                   </div>
-                  <Dragger {...fileUploadProps} disabled={importing}>
+                </Card>
+              )}
+              <Dragger {...fileUploadProps} disabled={importing}>
                     <p className="ant-upload-drag-icon"><InboxOutlined /></p>
                     <p className="ant-upload-text">{importing ? '解析中...' : '点击或拖拽文件到此区域'}</p>
                     <p className="ant-upload-hint">单文件上传，解析后可查看提取的文本预览</p>
@@ -914,32 +1182,10 @@ export default function RulesPage() {
                         <Tag color="blue">解析 {fileImportResult.total} 条</Tag>
                         <Tag color="green">成功 {fileImportResult.imported} 条</Tag>
                         {fileImportResult.skipped > 0 && <Tag color="orange">跳过 {fileImportResult.skipped} 条</Tag>}
-                        <Tag color="purple">提取文本长度 {fileImportResult.extracted_text_length} 字符</Tag>
-                        <Tag>来源: {fileImportResult.source_filename}</Tag>
+                        {typeof fileImportResult.conflict_detected === 'number' && fileImportResult.conflict_detected > 0 && (
+                          <Tag color="red">冲突 {fileImportResult.conflict_detected} 个</Tag>
+                        )}
                       </Space>
-                      {fileImportResult.extracted_text_preview && (
-                        <Card
-                          size="small"
-                          type="inner"
-                          title={<Text type="secondary" style={{ fontSize: 12 }}>提取文本预览（前 500 字符）</Text>}
-                          style={{ marginTop: 8 }}
-                        >
-                          <pre style={{
-                            maxHeight: 160,
-                            overflow: 'auto',
-                            margin: 0,
-                            padding: 8,
-                            background: '#f6f8fa',
-                            borderRadius: 4,
-                            fontSize: 12,
-                            fontFamily: 'monospace',
-                            whiteSpace: 'pre-wrap',
-                            wordBreak: 'break-word',
-                          }}>
-                            {fileImportResult.extracted_text_preview}
-                          </pre>
-                        </Card>
-                      )}
                       {fileImportResult.errors.length > 0 && (
                         <Alert
                           type="warning"

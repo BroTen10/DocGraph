@@ -258,7 +258,7 @@ def build_graph(
     _report("读取启用规则", 5, "正在读取启用的规则")
     rules = get_enabled_rules_for_snapshot(db, rule_set_id)
     if not rules:
-        raise ValueError("无启用的规则，请先添加规则")
+        raise ValueError("无已确认且已启用的规则，请先在规则管理中确认并启用规则")
 
     threshold = settings.llm_confidence_threshold
     _report("读取启用规则", 10, f"共 {len(rules)} 条启用规则")

@@ -31,6 +31,7 @@ from .rule_parse_engine import (
     apply_term_normalization,
     apply_text_preprocessing,
 )
+from .rule_import_task import ImportProgress, update_task
 
 logger = logging.getLogger(__name__)
 
@@ -163,9 +164,115 @@ def _split_text(text: str, max_chars: int = _MAX_CHUNK_CHARS) -> list[str]:
     return chunks or [text]
 
 
+def _normalize_text(text: str) -> str:
+    """归一化规则文本：去标点、去空格、小写，用于相似度比对。"""
+    return "".join(ch for ch in text if ch.isalnum()).lower()
+
+
+def _text_similarity(a: str, b: str) -> float:
+    """计算两个归一化文本的相似度（0-1）。使用字符级 Jaccard + 包含关系。"""
+    if not a or not b:
+        return 0.0
+    if a == b:
+        return 1.0
+    if a in b or b in a:
+        return 0.95
+    set_a, set_b = set(a), set(b)
+    if not set_a or not set_b:
+        return 0.0
+    return len(set_a & set_b) / len(set_a | set_b)
+
+
+def _find_similar_rule(
+    new_text: str,
+    new_normed: str,
+    existing_rules: list,
+    threshold: float = 0.75,
+):
+    """在已有规则列表中查找与新规则高度相似的规则。返回第一个相似度 >= threshold 的规则或 None。"""
+    for rule in existing_rules:
+        existing_normed = _normalize_text(rule.rule_text)
+        sim = _text_similarity(new_normed, existing_normed)
+        if sim >= threshold:
+            return rule
+    return None
+
+
+def _merge_into_existing(
+    db,
+    existing_rule,
+    new_rule_text: str,
+    new_confidence: float | None,
+    new_tolerance: dict,
+    new_priority: int,
+    new_defects: list[dict],
+) -> int:
+    """将新规则合并到已有规则中。返回合并的字段数。
+
+    合并策略：
+    - confidence: 取较高值
+    - tolerance: 合并（新值覆盖旧值为空的字段）
+    - defects: 去重合并（按 type + description 去重）
+    - rule_text: 保留更长的（通常更完整）
+    - priority: 保留较小的（更优先）
+    """
+    changes = 0
+
+    # confidence: 取较高值
+    if new_confidence is not None:
+        old_conf = existing_rule.confidence
+        if old_conf is None or new_confidence > old_conf:
+            existing_rule.confidence = new_confidence
+            changes += 1
+
+    # tolerance: 合并
+    old_tol = existing_rule.tolerance or {}
+    for k, v in (new_tolerance or {}).items():
+        if v is not None and old_tol.get(k) is None:
+            old_tol[k] = v
+            changes += 1
+    if changes > 0:
+        existing_rule.tolerance = dict(old_tol)
+
+    # priority: 取较小值
+    if new_priority < (existing_rule.priority or 100):
+        existing_rule.priority = new_priority
+        changes += 1
+
+    # rule_text: 保留更长的
+    if len(new_rule_text) > len(existing_rule.rule_text):
+        existing_rule.rule_text = new_rule_text
+        changes += 1
+
+    # defects: 去重合并
+    old_defects = existing_rule.defects or []
+    old_keys = {(d.get("type"), d.get("description")) for d in old_defects}
+    for d in (new_defects or []):
+        key = (d.get("type"), d.get("description"))
+        if key not in old_keys:
+            old_defects.append(d)
+            old_keys.add(key)
+            changes += 1
+    if changes > 0:
+        existing_rule.defects = old_defects
+        # 重新评估规则健康状态：合并后如果仍有缺陷，保持 pending/disabled
+        has_defects = any(
+            d.get("severity") in ("error", "warning")
+            for d in old_defects
+        )
+        if not has_defects and existing_rule.status != "confirmed":
+            existing_rule.status = "confirmed"
+            existing_rule.enabled = True
+            changes += 1
+
+    db.commit()
+    return changes
+
+
 def import_rules_from_text(
     db: Session, rule_set_id: uuid.UUID, raw_text: str,
     directive: RuleParseDirective | None = None,
+    progress: ImportProgress | None = None,
 ) -> dict[str, Any]:
     """从自然语言规则清单文本批量导入规则。
 
@@ -194,6 +301,9 @@ def import_rules_from_text(
     # 长文本分段解析：避免单次输出超 max_tokens 被截断（JSON 不完整）
     chunks = _split_text(raw_text)
     logger.info("规则导入分段: 共 %d 段, 各段长度=%s", len(chunks), [len(c) for c in chunks])
+    if progress is not None:
+        update_task(progress, status="parsing", total_chunks=len(chunks), parsed_chunks=0,
+                    message=f"正在解析规则（共 {len(chunks)} 段）…")
     raw_rules: list[dict] = []
     all_defects: list[dict] = []  # 收集所有段的 defects
     chunk_errors: list[str] = []
@@ -232,7 +342,14 @@ def import_rules_from_text(
         except (LLMError, ValueError) as e:
             logger.error("规则导入 第 %d/%d 段 LLM 解析失败: %s", idx, len(chunks), e)
             chunk_errors.append(f"第 {idx} 段解析失败: {e}")
+            if progress is not None:
+                update_task(progress, parsed_chunks=idx,
+                            message=f"第 {idx}/{len(chunks)} 段解析失败，已跳过")
             continue
+
+        if progress is not None:
+            update_task(progress, parsed_chunks=idx,
+                        message=f"已解析 {idx}/{len(chunks)} 段")
 
         # 提取 rules
         rules = resp.get("rules", [])
@@ -255,6 +372,11 @@ def import_rules_from_text(
     if not raw_rules:
         detail = f"（共 {len(chunks)} 段，{len(chunk_errors)} 段失败）" if chunk_errors else ""
         raise ValueError(f"LLM 未解析出任何规则{detail}")
+
+    if progress is not None:
+        update_task(progress, status="importing", total_rules=len(raw_rules),
+                    imported_rules=0, import_errors=0,
+                    message=f"正在入库 {len(raw_rules)} 条规则…")
 
     # 应用 Skill 后处理：字段映射、默认值、术语归一化
     if directive:
@@ -295,25 +417,7 @@ def import_rules_from_text(
         new_doc_types.add(doc_type)
         new_check_categories.add(check_category)
 
-        # ----- 同规则集去重：相同 (doc_type, check_category, 归一化 rule_text) 跳过 -----
-        normed = "".join(ch for ch in rule_text if ch.isalnum()).lower()
-        dup = db.execute(
-            select(Rule).where(
-                Rule.rule_set_id == rule_set_id,
-                Rule.doc_type == doc_type,
-                Rule.check_category == check_category,
-                # 简单归一化匹配
-                Rule.rule_text.ilike(f"%{normed[:30]}%"),
-            )
-        ).scalars().first()
-        if dup:
-            logger.info("同集去重跳过: [%s/%s] %s...", doc_type, check_category, rule_text[:40])
-            skipped_detail = f"第 {i} 条：与已有规则 [{doc_type}/{check_category}] 重复（{rule_text[:30]}...），跳过"
-            errors.append(skipped_detail)
-            continue
-        # -----
-
-        # 组装容差
+        # ----- 1. 先提取元数据（包容差/置信度/缺陷）---------
         tol_raw = item.get("tolerance") or {}
         tolerance: dict[str, Any] = {}
         if isinstance(tol_raw, dict):
@@ -332,20 +436,14 @@ def import_rules_from_text(
         except (TypeError, ValueError):
             priority = 100
 
-        # 置信度与状态
         confidence = item.get("confidence")
         try:
             confidence = float(confidence) if confidence is not None else None
         except (TypeError, ValueError):
             confidence = None
-        if confidence is not None:
-            status = "confirmed" if confidence >= settings.llm_confidence_threshold else "pending"
-        else:
-            status = "pending"  # 旧格式无置信度，直接待确认
 
         # 关联该规则的 defects（rule_index 从 0 开始）
         rule_defects = defects_by_rule.get(i - 1, [])
-        # 过滤：保留必要的字段
         clean_defects = []
         for d in rule_defects:
             clean_defects.append({
@@ -354,13 +452,45 @@ def import_rules_from_text(
                 "description": d.get("description", ""),
             })
 
+        # ----- 2. 同规则集去重+智能合并 -----
+        normed = _normalize_text(rule_text)
+        existing_rules = db.execute(
+            select(Rule).where(
+                Rule.rule_set_id == rule_set_id,
+                Rule.doc_type == doc_type,
+                Rule.check_category == check_category,
+            )
+        ).scalars().all()
+        dup_rule = _find_similar_rule(rule_text, normed, existing_rules)
+        if dup_rule:
+            merged_count = _merge_into_existing(db, dup_rule, rule_text, confidence, tolerance, priority, clean_defects)
+            logger.info("同集合并: [%s/%s] %s... -> %s (合并数=%d)",
+                        doc_type, check_category, rule_text[:40], dup_rule.id, merged_count)
+            skipped_detail = f"第 {i} 条：与已有规则 [{doc_type}/{check_category}] 相似，已自动合并（{rule_text[:30]}...）"
+            errors.append(skipped_detail)
+            continue
+
+        # ----- 3. 规则健康状态分类 -----
+        # 无实质缺陷(error/warning) -> 自动确认+启用
+        # 有实质缺陷 -> 待确认+禁用
+        has_real_defect = any(
+            d.get("severity") in ("error", "warning")
+            for d in clean_defects
+        )
+        if has_real_defect:
+            status = "pending"
+            enabled = False
+        else:
+            status = "confirmed"
+            enabled = True
+
         try:
             payload = RuleCreate(
                 doc_type=doc_type,
                 check_category=check_category,
                 rule_text=rule_text,
                 tolerance=tolerance,
-                enabled=True,
+                enabled=enabled,
                 priority=priority,
                 confidence=confidence,
                 status=status,
@@ -368,8 +498,13 @@ def import_rules_from_text(
             )
             rule_out = create_rule(db, rule_set_id, payload)
             imported.append(rule_out.model_dump(mode="json"))
+            if progress is not None:
+                update_task(progress, imported_rules=len(imported),
+                            message=f"已入库 {len(imported)}/{len(raw_rules)} 条")
         except Exception as e:
             errors.append(f"第 {i} 条：入库失败 - {e}")
+            if progress is not None:
+                update_task(progress, import_errors=len(errors))
 
     errors.extend(chunk_errors)
 
@@ -430,6 +565,7 @@ def import_rules_with_skills(
     rule_set_id: uuid.UUID,
     raw_text: str,
     skill_ids: list[uuid.UUID] | None = None,
+    progress: ImportProgress | None = None,
 ) -> dict[str, Any]:
     """从文本导入规则，自动加载并应用 Skill。
 
@@ -464,13 +600,17 @@ def import_rules_with_skills(
         from .rule_parse_engine import compile_directive
         directive = compile_directive(db, rule_set_id)
 
-    result = import_rules_from_text(db, rule_set_id, raw_text, directive=directive)
+    result = import_rules_from_text(db, rule_set_id, raw_text, directive=directive, progress=progress)
 
     # 导入完成后自动触发冲突检测
     if result.get("imported", 0) > 0:
         try:
             from .rule_conflict_detector import run_conflict_detection
-            conflict_result = run_conflict_detection(db, str(rule_set_id))
+            if progress is not None:
+                update_task(progress, status="conflict", message="正在检测规则冲突…", conflict_found=0)
+            conflict_result = run_conflict_detection(db, str(rule_set_id), progress=progress)
+            if progress is not None:
+                update_task(progress, conflict_found=conflict_result.get("total_conflicts", 0))
             if conflict_result.get("total_conflicts", 0) > 0:
                 logger.info(
                     "导入后冲突检测: %d 个冲突, %d 条规则受影响",

@@ -12,6 +12,7 @@ from ..schemas.rule_parse_skill import (
     RuleParseSkillCreate,
     RuleParseSkillOut,
     RuleParseSkillUpdate,
+    SkillLearnRequest,
 )
 from ..services import rule_parse_skill_service
 
@@ -33,8 +34,34 @@ def create_skill(
     payload: RuleParseSkillCreate,
     db: Session = Depends(get_db),
 ) -> RuleParseSkillOut:
-    """为规则集创建自定义 Skill。"""
-    return rule_parse_skill_service.create_skill(db, rule_set_id, payload)
+    """为规则集创建自定义 Skill（内容用 YAML 文本 content_yaml 提交）。"""
+    try:
+        return rule_parse_skill_service.create_skill(db, rule_set_id, payload)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.post("/learn")
+def learn_from_correction(
+    rule_set_id: uuid.UUID,
+    payload: SkillLearnRequest,
+    db: Session = Depends(get_db),
+) -> dict:
+    """将人工修正规则的经验写回 Skill（默认写入『经验修正（自动累积）』）。
+
+    注意：必须注册在 /{skill_id} 之前，否则会被路径参数路由截获。
+    """
+    try:
+        skill, added = rule_parse_skill_service.learn_from_correction(
+            db, rule_set_id, payload
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {
+        "success": True,
+        "skill": skill.model_dump(mode="json"),
+        "added_instructions": added,
+    }
 
 
 @router.get("/{skill_id}", response_model=RuleParseSkillOut)
@@ -56,10 +83,17 @@ def update_skill(
     payload: RuleParseSkillUpdate,
     db: Session = Depends(get_db),
 ) -> RuleParseSkillOut:
-    """更新 Skill。编辑内置默认会自动创建副本。"""
-    result = rule_parse_skill_service.update_skill(
-        db, skill_id, payload, rule_set_id=rule_set_id
-    )
+    """更新 Skill。
+
+    - 仅启用/停用/优先级：就地更新（内置也允许），不递增版本；
+    - 修改内容：自定义就地更新且版本 +1；内置自动创建/更新当前规则集下的副本。
+    """
+    try:
+        result = rule_parse_skill_service.update_skill(
+            db, skill_id, payload, rule_set_id=rule_set_id
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     if result is None:
         raise HTTPException(status_code=404, detail="Skill 不存在")
     return result

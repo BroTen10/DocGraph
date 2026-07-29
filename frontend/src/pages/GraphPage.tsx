@@ -25,7 +25,7 @@ import {
 } from '@ant-design/icons'
 import type { UploadProps } from 'antd'
 import { graphApi, rulesApi } from '../api/client'
-import type { GraphData, GraphEdge, GraphBuildTaskStatus, RuleDocumentImportResponse, Rule, RuleSnapshot } from '../types'
+import type { GraphData, GraphEdge, GraphBuildTaskStatus, RuleImportResponse, ImportTask, Rule, RuleSnapshot } from '../types'
 import GraphView from '../components/GraphView'
 import PageHeader from '../components/PageHeader'
 import EmptyState from '../components/EmptyState'
@@ -77,7 +77,8 @@ export default function GraphPage() {
 
   // 规则文档导入
   const [importing, setImporting] = useState(false)
-  const [importResult, setImportResult] = useState<RuleDocumentImportResponse | null>(null)
+  const [importResult, setImportResult] = useState<RuleImportResponse | null>(null)
+  const [importTask, setImportTask] = useState<ImportTask | null>(null)
 
   // 工作区
   const [rules, setRules] = useState<Rule[]>([])
@@ -225,19 +226,40 @@ export default function GraphPage() {
 
       setImporting(true)
       setImportResult(null)
+      setImportTask(null)
       rulesApi
         .importDocument(currentId, file)
-        .then((result) => {
-          setImportResult(result)
-          message.success(
-            `导入完成：共 ${result.total} 条，成功 ${result.imported} 条，跳过 ${result.skipped} 条`,
-          )
-          loadWorkspace()
+        .then(async (task: ImportTask) => {
+          setImportTask(task)
+          // 轮询任务进度，直到 done / error
+          const poll = async (): Promise<void> => {
+            const t = await rulesApi.getImportTask(task.task_id)
+            setImportTask(t)
+            if (t.status === 'done') {
+              setImportResult(t.result)
+              if (t.result && t.result.imported > 0) {
+                message.success(
+                  `导入完成：共 ${t.result.total} 条，成功 ${t.result.imported} 条，跳过 ${t.result.skipped} 条`,
+                )
+                loadWorkspace()
+              } else {
+                message.warning(`未导入任何规则${t.result ? `，跳过 ${t.result.skipped} 条` : ''}`)
+              }
+              setImporting(false)
+              return
+            }
+            if (t.status === 'error') {
+              message.error('导入失败: ' + (t.error || '未知错误'))
+              setImporting(false)
+              return
+            }
+            await new Promise((r) => setTimeout(r, 1500))
+            return poll()
+          }
+          return poll()
         })
         .catch((e: any) => {
           message.error('导入失败: ' + (e?.response?.data?.detail || e?.message || e))
-        })
-        .finally(() => {
           setImporting(false)
         })
 
