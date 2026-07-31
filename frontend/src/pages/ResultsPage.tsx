@@ -45,6 +45,14 @@ const formatDetailValue = (value: unknown): string => {
   }
 }
 
+/** detail 字段名 → 友好中文标签 */
+const detailLabelMap: Record<string, string> = {
+  skipped_rule_count: '被跳过规则数',
+  merged_count: '被跳过规则数',
+  doc_types: '涉及文档类型',
+  examples: '涉及规则分布',
+}
+
 export default function ResultsPage() {
   const { currentId } = useRuleSet()
   const [searchParams, setSearchParams] = useSearchParams()
@@ -422,7 +430,7 @@ export default function ResultsPage() {
             <Divider orientation="left" plain>证据字段</Divider>
             <Descriptions column={1} size="small" bordered>
               {detailEntries.map(([k, v]) => (
-                <Descriptions.Item label={k} key={k}>
+                <Descriptions.Item label={detailLabelMap[k] || k} key={k}>
                   {formatDetailValue(v)}
                 </Descriptions.Item>
               ))}
@@ -431,8 +439,11 @@ export default function ResultsPage() {
         )}
 
         {!item.doc_id && (
-          <Paragraph type="secondary" style={{ marginTop: 16, textAlign: 'center' }}>
-            当前检查项未绑定文件，无法查看原件对照
+          <Paragraph type="secondary" style={{ marginTop: 16, textAlign: 'center', fontSize: 13 }}>
+            {item.detail?.skipped_rule_count
+              ? `本条为 ${item.detail.skipped_rule_count} 条规则核验项汇总，关联 ${(Array.isArray(item.detail?.doc_types) ? item.detail.doc_types.length : 0)} 类文档`
+              : '当前检查项未绑定文件，无法查看原件对照'
+            }
           </Paragraph>
         )}
       </Drawer>
@@ -463,7 +474,7 @@ export default function ResultsPage() {
     >
       {ocrLoading ? (
         <div style={{ textAlign: 'center', padding: 80 }}>
-          <Spin size="large" tip="加载 OCR 识别结果中..." />
+          <Spin size="large" tip="加载 OCR 识别结果中..."><div style={{ padding: 40 }} /></Spin>
         </div>
       ) : ocrDoc ? (
         <DocumentCompare

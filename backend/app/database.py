@@ -51,6 +51,7 @@ def init_db() -> None:
     from .models import (
         contract,       # noqa: F401
         document,       # noqa: F401
+        document_type,  # noqa: F401
         ocr_task,       # noqa: F401
         review_result,  # noqa: F401
         review_task,    # noqa: F401
@@ -77,8 +78,9 @@ def init_db() -> None:
 
     # 增量迁移：新增列与表（create_all 不处理已有表的列变更）
     _run_migrations(engine)
-    # 种子数据：内置默认 Skill
+    # 种子数据：内置默认 Skill + 文档类型
     _seed_builtin_skill()
+    _seed_doc_types()
 
 
 def _run_migrations(engine) -> None:
@@ -159,3 +161,36 @@ def _seed_builtin_skill() -> None:
         db.add(skill)
         db.commit()
         logger.info("已 seed 内置默认 Skill: %s", skill.name)
+
+
+def _seed_doc_types() -> None:
+    """种子数据：将 constants.py 中的硬编码文档类型写入 document_types 表。
+
+    仅在表为空时写入，不覆盖已有数据（用户自定义的类型不会被冲掉）。
+    """
+    from .models import DocumentType
+    from sqlalchemy import select, func
+
+    with SessionLocal() as db:
+        count = db.execute(select(func.count(DocumentType.id))).scalar()
+        if count and count > 0:
+            logger.info("document_types 表已有 %d 条记录，跳过种子", count)
+            return
+
+    from .constants import (
+        ALL_DOC_TYPES,
+        FIELD_TEMPLATES, STAMP_REQUIREMENTS,
+    )
+
+    with SessionLocal() as db:
+        for idx, name in enumerate(ALL_DOC_TYPES):
+            dt = DocumentType(
+                name=name,
+                key_fields=FIELD_TEMPLATES.get(name, []),
+                stamp_required=STAMP_REQUIREMENTS.get(name),
+                source="seed",
+                status="active",
+            )
+            db.add(dt)
+        db.commit()
+        logger.info("已 seed %d 个内置文档类型", len(ALL_DOC_TYPES))

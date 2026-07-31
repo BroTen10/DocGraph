@@ -19,7 +19,7 @@ export function RuleSetSwitcher() {
 
   // 加载文件类型清单(供"适用文件类型"多选)
   useEffect(() => {
-    constantsApi.docTypes().then((res) => setDocTypes(res.doc_types)).catch(() => {})
+    constantsApi.docTypes().then((res) => setDocTypes(res.doc_types)).catch((e) => console.warn('加载文件类型清单失败:', e))
   }, [])
 
   const handleCreate = async () => {

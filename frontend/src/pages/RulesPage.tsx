@@ -1,21 +1,23 @@
-import { useState, useEffect, useMemo } from 'react'
+import { useState, useEffect, useMemo, useRef } from 'react'
 import type { UploadProps, UploadFile } from 'antd'
 import {
   Card, Row, Col, Table, Tag, Button, Modal, Form, Input, InputNumber, Switch,
-  Select, Space, message, Typography, Tooltip, Popconfirm, Tabs, List, Spin, Alert,
+  Select, Space, message, Typography, Tooltip, Popconfirm, Popover, Tabs, List, Spin, Alert,
   Upload, Drawer, Progress,
 } from 'antd'
-import { PlusOutlined, EditOutlined, DeleteOutlined, ThunderboltOutlined, HistoryOutlined, ImportOutlined, InboxOutlined, FileTextOutlined, SettingOutlined, CheckOutlined, WarningOutlined } from '@ant-design/icons'
-import { rulesApi, graphApi, constantsApi, ruleSetsApi, skillsApi } from '../api/client'
+import { PlusOutlined, EditOutlined, DeleteOutlined, HistoryOutlined, ImportOutlined, InboxOutlined, FileTextOutlined, SettingOutlined, CheckOutlined, WarningOutlined, ArrowRightOutlined } from '@ant-design/icons'
+import { rulesApi, constantsApi, ruleSetsApi, skillsApi } from '../api/client'
 import type { Rule, RuleSet, RuleSnapshot, DocTypeMeta, ConstantsResponse, RuleImportResponse, ImportTask } from '../types'
 import PageHeader from '../components/PageHeader'
 import { useRuleSet } from '../context/RuleSetContext'
 import SkillTab from './SkillTab'
 import dayjs from 'dayjs'
+import { useNavigate } from 'react-router-dom'
 
 const { Text } = Typography
 const { Dragger } = Upload
-const CHECK_CATEGORIES = ['齐套性', '基础判断', '信息准确性', '时间逻辑']
+// 后端单源化 — fallback（后端返回前兜底）
+const FALLBACK_CHECK_CATEGORIES = ['齐套性', '基础判断', '信息准确性', '时间逻辑']
 const FILE_ACCEPT = '.pdf,.xlsx,.xls,.docx,.md,.txt'
 
 // 导入任务状态 → 中文标签
@@ -76,9 +78,10 @@ export default function RulesPage() {
   const [rules, setRules] = useState<Rule[]>([])
   const [snapshots, setSnapshots] = useState<RuleSnapshot[]>([])
   const [docTypes, setDocTypes] = useState<DocTypeMeta[]>([])
+  const [checkCategories, setCheckCategories] = useState<string[]>([])
   const [ruleSet, setRuleSet] = useState<RuleSet | null>(null)  // 当前规则集详情（含 doc_types / check_categories）
   const [loading, setLoading] = useState(false)
-  const [building, setBuilding] = useState(false)
+  const navigate = useNavigate()
   const [deleting, setDeleting] = useState(false)
   const [selectedRowKeys, setSelectedRowKeys] = useState<string[]>([])
   const [modalOpen, setModalOpen] = useState(false)
@@ -97,6 +100,14 @@ export default function RulesPage() {
   const [importError, setImportError] = useState<string | null>(null)
   // 异步导入任务进度（轮询用）
   const [importTask, setImportTask] = useState<ImportTask | null>(null)
+  // 导入轮询取消标志 + 计数:组件卸载或重新触发导入时置 true 终止递归;count 超上限自动退出
+  const importPollRef = useRef<{ cancelled: boolean; count: number }>({ cancelled: false, count: 0 })
+  useEffect(() => {
+    return () => {
+      // 组件卸载时终止正在进行的导入轮询,避免对已卸载组件 setState
+      importPollRef.current.cancelled = true
+    }
+  }, [])
   // 批量确认
   const [confirming, setConfirming] = useState(false)
   // Skill 选择
@@ -144,6 +155,7 @@ export default function RulesPage() {
       setRules(r)
       setSnapshots(s)
       setDocTypes(c.doc_types)
+      setCheckCategories(c.check_categories)
       setRuleSet(rs)
       if (ds) setDefectSummaryRemote(ds)
     } catch (e: any) {
@@ -191,7 +203,7 @@ export default function RulesPage() {
 
   // 动态检查项列表（种子 + 规则集声明 + 实际规则，去重）
   const effectiveCheckCategories = useMemo(() => {
-    const seed: string[] = [...CHECK_CATEGORIES]
+    const seed: string[] = [...(checkCategories.length > 0 ? checkCategories : FALLBACK_CHECK_CATEGORIES)]
     const fromSet: string[] = ruleSet?.check_categories || []
     const fromRules: string[] = [...new Set(rules.map((r) => r.check_category))]
     return [...new Set([...seed, ...fromSet, ...fromRules])]
@@ -233,6 +245,15 @@ export default function RulesPage() {
       tolerance_time: rule.tolerance?.time_days,
       allow_same_day: rule.tolerance?.allow_same_day,
     })
+    setModalOpen(true)
+  }
+
+  /** 在二维表格空格点击，预填���件类型 + 检查项 */
+  /** 在二维表格空格点击，预填文件类型 + 检查项 */
+  const openCreateWithDefaults = (doc_type: string, check_category: string) => {
+    setEditing(null)
+    form.resetFields()
+    form.setFieldsValue({ doc_type, check_category, enabled: true, priority: 100, tolerance: {} })
     setModalOpen(true)
   }
 
@@ -341,18 +362,6 @@ export default function RulesPage() {
     }
   }
 
-  const handleBuild = async (autoAll = false) => {
-    setBuilding(true)
-    try {
-      const resp = await graphApi.build(currentId!, autoAll)
-      message.success(`${resp.message}（节点 ${resp.node_count} / 关系 ${resp.edge_count}）`)
-      await load()
-    } catch (e: any) {
-      message.error('图谱构建失败: ' + (e?.response?.data?.detail || e?.message || e))
-    } finally {
-      setBuilding(false)
-    }
-  }
 
   /** 批量删除规则：传 ids 仅删指定；不传则清空当前规则集全部规则 */
   const handleBatchDelete = async (ids?: string[]) => {
@@ -464,6 +473,14 @@ export default function RulesPage() {
       if (resp.imported > 0) {
         message.success(`导入完成：成功 ${resp.imported} 条，跳过 ${resp.skipped} 条`)
         await load()
+        // 检测新的文档类型
+        const newTypes = (resp as any).new_doc_types
+        if (newTypes && newTypes.length > 0) {
+          message.info(
+            `发现 ${newTypes.length} 个新的文档类型，可在「文档类型」页面查看并补充样例`,
+            6,
+          )
+        }
       } else {
         message.warning(`未导入任何规则，跳过 ${resp.skipped} 条`)
       }
@@ -508,14 +525,37 @@ export default function RulesPage() {
     }
 
     // 阶段 2：轮询进度，直到 done / error
+    // 重置取消标志与计数;MAX_POLL × 1.5s ≈ 5 分钟上限,防止后端卡死时无限轮询;
+    // 组件卸载或重新触发导入时 importPollRef.cancelled 会被置 true 终止递归
+    importPollRef.current = { cancelled: false, count: 0 }
+    const MAX_POLL = 200
     const poll = async (): Promise<void> => {
+      if (importPollRef.current.cancelled) return
+      importPollRef.current.count += 1
+      if (importPollRef.current.count > MAX_POLL) {
+        const msg = '导入超时：任务运行超过 5 分钟仍未完成，请稍后在规则列表查看结果'
+        setImportError(msg)
+        message.warning(msg)
+        setImporting(false)
+        setImportStage(null)
+        return
+      }
       const task = await rulesApi.getImportTask(taskId)
+      if (importPollRef.current.cancelled) return
       setImportTask(task)
       if (task.status === 'done') {
         setFileImportResult(task.result)
         if (task.result && task.result.imported > 0) {
           message.success(`导入完成：成功 ${task.result.imported} 条，跳过 ${task.result.skipped} 条`)
           await load()
+          // 检测新的文档类型
+          const newTypes = (task.result as any).new_doc_types
+          if (newTypes && newTypes.length > 0) {
+            message.info(
+              `发现 ${newTypes.length} 个新的文档类型，可在「文档类型」页面查看并补充样例`,
+              6,
+            )
+          }
         } else {
           message.warning(`未导入任何规则${task.result ? `，跳过 ${task.result.skipped} 条` : ''}`)
         }
@@ -533,6 +573,7 @@ export default function RulesPage() {
       }
       // 仍在进行中，1.5s 后继续
       await new Promise((r) => setTimeout(r, 1500))
+      if (importPollRef.current.cancelled) return
       return poll()
     }
     await poll()
@@ -569,49 +610,150 @@ export default function RulesPage() {
 
   // 二维表格渲染
   const renderMatrix = () => {
+    // 列宽：行头列 168、中间检查项列 96、齐套率 96；总宽 < 容器则不滚，否则横向滚动
+    const headerColW = 168
+    const checkColW = 96
+    const coverageColW = 96
+    const totalW = headerColW + checkColW * effectiveCheckCategories.length + coverageColW
     return (
-      <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
+      <div style={{ width: '100%', overflowX: 'auto' }}>
+      <table style={{ width: totalW, borderCollapse: 'collapse', fontSize: 12, tableLayout: 'fixed' }}>
+        <colgroup>
+          <col style={{ width: headerColW }} />
+          {effectiveCheckCategories.map((c) => <col key={c} style={{ width: checkColW }} />)}
+          <col style={{ width: coverageColW }} />
+        </colgroup>
         <thead>
           <tr>
-            <th style={thStyle}>文件类型 \ 检查项</th>
-            {effectiveCheckCategories.map((c) => <th key={c} style={thStyle}>{c}</th>)}
+            <th style={headerThStyle}>文件类型 \ 检查项</th>
+            {effectiveCheckCategories.map((c) => <th key={c} style={checkThStyle}>{c}</th>)}
+            <th style={coverageThStyle}>齐套率</th>
           </tr>
         </thead>
         <tbody>
-          {effectiveDocTypes.map((dt) => {
-            const meta = docTypes.find((d) => d.name === dt)
+            {effectiveDocTypes.map((dt) => {
+              const meta = docTypes.find((d) => d.name === dt)
+              // 必备/非必备从齐套性规则推导：该文档类型在"齐套性"列下有已确认规则即为必备
+              const isRequired = (matrix[dt]?.['齐套性'] || []).some(
+                (r) => r.enabled && r.status === 'confirmed'
+              )
+              // 计算该行已覆盖列数（指有至少 1 条 confirmed+enabled 规则）
+            const coveredCols = effectiveCheckCategories.filter((cc) => {
+              return (matrix[dt]?.[cc] || []).filter((r) => r.enabled && r.status === 'confirmed').length > 0
+            }).length
+            const totalCols = effectiveCheckCategories.length
+            const coverage = totalCols > 0 ? Math.round((coveredCols / totalCols) * 100) : 0
+            const coverageColor = coverage >= 80 ? 'green' : coverage >= 50 ? 'orange' : 'red'
             return (
             <tr key={dt}>
-              <td style={tdStyle}>
-                <Text strong>{dt}</Text>
-                {meta?.is_required && <Tag color="red" style={{ marginLeft: 4 }}>必备</Tag>}
-                {meta?.is_optional && <Tag color="blue" style={{ marginLeft: 4 }}>非必备</Tag>}
+              <td style={headerTdStyle}>
+                <Tooltip title={
+                  meta ? (
+                    <div style={{ fontSize: 12, lineHeight: 1.8 }}>
+                      <div>关键字段：{meta.key_fields?.length ? meta.key_fields.join('、') : '-'}</div>
+                      <div>业务含义：{meta.business_meaning || '-'}</div>
+                      <div>样例文档：{meta.has_sample ? '已上传' : '未上传'}</div>
+                    </div>
+                  ) : <span style={{ fontSize: 12 }}>未在文档类型中定义</span>
+                }>
+                  <span style={fileNameStyle}>{dt}</span>
+                </Tooltip>
+                <div style={{ marginTop: 2 }}>
+                  {isRequired && <Tag color="red" style={{ marginInlineEnd: 0, fontSize: 10 }}>必备</Tag>}
+                </div>
               </td>
               {effectiveCheckCategories.map((cc) => {
                 const cellRules = matrix[dt]?.[cc] || []
+                const confirmedRules = cellRules.filter((r) => r.enabled && r.status === 'confirmed')
+                const confirmedCount = confirmedRules.length
+                const totalCount = cellRules.length
+                const isEssentialMissing = isRequired && confirmedCount === 0
+                const cellBg: string | undefined = isEssentialMissing ? '#fff1f0' : undefined
                 return (
-                  <td key={cc} style={tdStyle} onClick={() => cellRules.length > 0 && openEdit(cellRules[0])}>
-                    {cellRules.length === 0 ? (
-                      <Text type="secondary">-</Text>
-                    ) : (
-                      <Tooltip title={cellRules.map((r) => r.rule_text).join('\n')}>
-                        <Tag color={cellRules[0].enabled ? 'blue' : 'default'} style={{ cursor: 'pointer' }}>
-                          {cellRules.length} 条
+                  <td key={cc} style={{ ...checkTdStyle, background: cellBg }}>
+                    {totalCount === 0 ? (
+                      <a
+                        style={{ cursor: 'pointer', fontSize: 11, color: isEssentialMissing ? '#ff4d4f' : '#1890ff' }}
+                        onClick={(e) => { e.stopPropagation(); openCreateWithDefaults(dt, cc) }}
+                      >
+                        + {isEssentialMissing ? '必检' : '添加'}
+                      </a>
+                    ) : totalCount === 1 && confirmedCount === 1 ? (
+                      <Tooltip title={cellRules[0].rule_text}>
+                        <Tag color="blue" style={{ cursor: 'pointer' }} onClick={() => openEdit(cellRules[0])}>
+                          1 条
                         </Tag>
                       </Tooltip>
+                    ) : (
+                      <Popover
+                        trigger="click"
+                        placement="right"
+                        title={`${dt} · ${cc}（共 ${totalCount} 条, 生效 ${confirmedCount} 条, 点击编辑）`}
+                        content={
+                          <div style={{ maxWidth: 360, maxHeight: 320, overflowY: 'auto' }}>
+                            {cellRules.map((r, i) => {
+                              const isActive = r.enabled && r.status === 'confirmed'
+                              return (
+                                <div
+                                  key={r.id}
+                                  style={{
+                                    padding: '6px 8px',
+                                    cursor: 'pointer',
+                                    borderBottom: i < totalCount - 1 ? '1px solid #f1f5f9' : 'none',
+                                    fontSize: 12,
+                                  }}
+                                  onClick={() => openEdit(r)}
+                                >
+                                  <Tag
+                                    color={isActive ? 'blue' : r.status === 'confirmed' ? 'default' : 'orange'}
+                                    style={{ marginRight: 6, fontSize: 10 }}
+                                  >
+                                    #{i + 1}
+                                  </Tag>
+                                  <Text type={isActive ? undefined : 'secondary'} style={{ fontSize: 12 }}>
+                                    {r.rule_text}
+                                  </Text>
+                                </div>
+                              )
+                            })}
+                          </div>
+                        }
+                      >
+                        <Tag
+                          color={
+                            confirmedCount === totalCount ? 'blue'
+                            : confirmedCount > 0 ? 'orange'
+                            : 'default'
+                          }
+                          style={{ cursor: 'pointer' }}
+                        >
+                          {confirmedCount} / {totalCount} 条
+                        </Tag>
+                      </Popover>
                     )}
                   </td>
                 )
               })}
+              {/* 齐套率汇总列 */}
+              <td style={coverageTdStyle}>
+                <Tag color={coverageColor} style={{ fontSize: 11 }}>{coverage}%</Tag>
+                <div style={{ fontSize: 10, color: '#999', marginTop: 2 }}>({coveredCols}/{totalCols})</div>
+              </td>
             </tr>
           )})}
         </tbody>
       </table>
+      </div>
     )
   }
 
-  const thStyle: React.CSSProperties = { border: '1px solid #f0f0f0', padding: 8, background: '#fafafa', textAlign: 'center' }
-  const tdStyle: React.CSSProperties = { border: '1px solid #f0f0f0', padding: 8, textAlign: 'center', cursor: 'pointer' }
+  const headerThStyle: React.CSSProperties = { border: '1px solid #f0f0f0', padding: '6px 8px', background: '#fafafa', textAlign: 'left', fontSize: 12, fontWeight: 600 }
+  const checkThStyle: React.CSSProperties = { border: '1px solid #f0f0f0', padding: '6px 8px', background: '#fafafa', textAlign: 'center', fontSize: 12, fontWeight: 600, whiteSpace: 'nowrap' }
+  const coverageThStyle: React.CSSProperties = { border: '1px solid #f0f0f0', padding: '6px 8px', background: '#fafafa', textAlign: 'center', fontSize: 12, fontWeight: 600, whiteSpace: 'nowrap' }
+  const headerTdStyle: React.CSSProperties = { border: '1px solid #f0f0f0', padding: '6px 8px', textAlign: 'left', verticalAlign: 'middle', background: '#fafafa' }
+  const checkTdStyle: React.CSSProperties = { border: '1px solid #f0f0f0', padding: '6px 8px', textAlign: 'center', verticalAlign: 'middle', cursor: 'pointer' }
+  const coverageTdStyle: React.CSSProperties = { border: '1px solid #f0f0f0', padding: '6px 8px', textAlign: 'center', verticalAlign: 'middle' }
+  const fileNameStyle: React.CSSProperties = { display: 'inline-block', maxWidth: 132, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontWeight: 600, fontSize: 12, verticalAlign: 'middle' }
 
   const ruleColumns = [
     { title: '文件类型', dataIndex: 'doc_type', key: 'doc_type', width: 140 },
@@ -737,9 +879,9 @@ export default function RulesPage() {
           <Space>
             <Button icon={<PlusOutlined />} onClick={openCreate}>新增规则</Button>
             <Button icon={<ImportOutlined />} onClick={openImport}>批量导入</Button>
-            <Popconfirm title="确认并启用所有规则后构建图谱？仅已确认且已启用的规则参与构建" onConfirm={() => handleBuild(false)}>
-              <Button type="primary" icon={<ThunderboltOutlined />} loading={building}>构建图谱</Button>
-            </Popconfirm>
+            <Button icon={<ArrowRightOutlined />} onClick={() => navigate('/graph')}>
+              前往构建图谱
+            </Button>
             <Button icon={<WarningOutlined />} loading={conflictDetecting} onClick={() => handleDetectConflicts()}>检测冲突</Button>
             <Button icon={<HistoryOutlined />} onClick={() => load()}>刷新</Button>
             <Popconfirm
@@ -752,6 +894,14 @@ export default function RulesPage() {
             </Popconfirm>
           </Space>
         }
+      />
+
+      <Alert
+        type="info"
+        showIcon
+        style={{ marginBottom: 16 }}
+        message="规则编辑完成后，请前往「知识图谱」页构建并确认图谱"
+        description="本页不再内置「构建图谱」入口，构建动作统一由知识图谱页发起，以保证图谱数据与确认流程的唯一归属。"
       />
 
       <Tabs
@@ -949,7 +1099,7 @@ export default function RulesPage() {
             </Col>
             <Col span={12}>
               <Form.Item name="check_category" label="检查项" rules={[{ required: true }]}>
-                <Select options={CHECK_CATEGORIES.map((c) => ({ value: c, label: c }))} />
+                <Select options={(checkCategories.length > 0 ? checkCategories : FALLBACK_CHECK_CATEGORIES).map((c) => ({ value: c, label: c }))} />
               </Form.Item>
             </Col>
           </Row>
@@ -1033,7 +1183,7 @@ export default function RulesPage() {
                     description={
                       <span style={{ fontSize: 12 }}>
                         可用文件类型：{docTypes.map((d) => d.name).join('、')}<br />
-                        可用检查项：{CHECK_CATEGORIES.join('、')}
+                        可用检查项：{(checkCategories.length > 0 ? checkCategories : FALLBACK_CHECK_CATEGORIES).join('、')}
                       </span>
                     }
                   />
@@ -1125,7 +1275,7 @@ export default function RulesPage() {
                     description={
                       <span style={{ fontSize: 12 }}>
                         支持格式：PDF、Excel(.xlsx/.xls)、Word(.docx)、Markdown(.md)、文本(.txt)<br />
-                        可用文件类型：{docTypes.map((d) => d.name).join('、')} · 可用检查项：{CHECK_CATEGORIES.join('、')}
+                        可用文件类型：{docTypes.map((d) => d.name).join('、')} · 可用检查项：{(checkCategories.length > 0 ? checkCategories : FALLBACK_CHECK_CATEGORIES).join('、')}
                       </span>
                     }
                   />
@@ -1311,7 +1461,7 @@ export default function RulesPage() {
                     <div>
                       {conflictDetecting ? (
                         <div style={{ textAlign: 'center', padding: 40 }}>
-                          <Spin tip="正在检测语义冲突..." />
+                          <Spin tip="正在检测语义冲突..."><div style={{ padding: 20 }} /></Spin>
                         </div>
                       ) : conflictData.length === 0 ? (
                         <Alert type="info" showIcon message="点击「检测冲突」按钮查看详细报告" />

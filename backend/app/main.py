@@ -14,12 +14,12 @@ from __future__ import annotations
 import logging
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Depends
 from fastapi.middleware.cors import CORSMiddleware
 
 from .config import settings
-from .database import init_db
-from .routers import contracts, graph, ocr, reviews, rule_parse_skills, rule_sets, rules
+from .database import get_db, init_db
+from .routers import contracts, doc_types, graph, ocr, reviews, rule_parse_skills, rule_sets, rules
 
 logging.basicConfig(
     level=logging.INFO,
@@ -70,6 +70,7 @@ app.include_router(graph.router)
 app.include_router(reviews.router)
 app.include_router(ocr.router)
 app.include_router(rule_parse_skills.router)
+app.include_router(doc_types.router)
 
 
 @app.get("/api/health")
@@ -79,25 +80,30 @@ def health() -> dict:
 
 
 @app.get("/api/constants/doc-types")
-def list_doc_types() -> dict:
-    """返回支持的文件类型与必备性，供前端二维表格使用。"""
-    from .constants import (
-        ALL_DOC_TYPES,
-        CHECK_CATEGORIES,
-        OPTIONAL_DOC_TYPES,
-        REQUIRED_DOC_TYPES,
-        STAMP_REQUIREMENTS,
-    )
+def list_doc_types(db=Depends(get_db)) -> dict:
+    """返回支持的文件类型与检查项类别，供前端二维表格使用。
+
+    必备/非必备不再由文档类型自身定义，而是由齐套性规则决定。
+    从 document_types 表读取，替代旧的 constants.py 硬编码。
+    """
+    from .models import DocumentType
+    from .constants import CHECK_CATEGORIES
+    from sqlalchemy import select
+
+    rows = db.execute(
+        select(DocumentType).where(DocumentType.status == "active").order_by(DocumentType.name)
+    ).scalars().all()
 
     return {
         "doc_types": [
             {
-                "name": t,
-                "is_required": t in REQUIRED_DOC_TYPES,
-                "is_optional": t in OPTIONAL_DOC_TYPES,
-                "stamp_required": STAMP_REQUIREMENTS.get(t),
+                "name": r.name,
+                "stamp_required": r.stamp_required,
+                "key_fields": r.key_fields or [],
+                "business_meaning": r.business_meaning,
+                "has_sample": r.has_sample if hasattr(r, "has_sample") else False,
             }
-            for t in ALL_DOC_TYPES
+            for r in rows
         ],
         "check_categories": CHECK_CATEGORIES,
     }

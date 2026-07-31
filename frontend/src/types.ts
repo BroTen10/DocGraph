@@ -136,6 +136,7 @@ export interface RuleImportResponse {
   errors: string[]
   conflict_report: ConflictReport | null
   conflict_detected?: number
+  new_doc_types?: string[]
 }
 
 export interface GraphNode {
@@ -159,17 +160,6 @@ export interface GraphData {
   edges: GraphEdge[]
   node_count: number
   edge_count: number
-}
-
-export interface GraphBuildResponse {
-  snapshot_id: string
-  graph_id: string
-  node_count: number
-  edge_count: number
-  rule_count: number
-  auto_confirmed_count: number
-  manual_pending_count: number
-  message: string
 }
 
 /** 异步图谱构建任务状态 */
@@ -300,9 +290,10 @@ export interface ReviewResultByDoc {
 
 export interface DocTypeMeta {
   name: string
-  is_required: boolean
-  is_optional: boolean
   stamp_required: string | null
+  key_fields: string[]
+  business_meaning: string | null
+  has_sample: boolean
 }
 
 export interface ConstantsResponse {
@@ -418,4 +409,62 @@ export interface SkillLearnResponse {
   success: boolean
   skill: RuleParseSkill
   added_instructions: string[]
+}
+
+// ============ 文档类型管理 ============
+
+export interface DocTypeItem {
+  id: string
+  name: string
+  description: string | null
+  key_fields: string[]
+  stamp_required: string | null
+  business_meaning: string | null
+  has_sample: boolean
+  source: string
+  status: string
+  created_at: string | null
+  updated_at: string | null
+}
+
+export interface DocTypeListResponse {
+  doc_types: DocTypeItem[]
+  total: number
+  pending_count: number
+}
+
+export interface DocTypeCreate {
+  name: string
+  description?: string
+  key_fields?: string[]
+  stamp_required?: string | null
+  business_meaning?: string
+  source?: string
+}
+
+export interface DocTypeUpdate {
+  name?: string
+  description?: string
+  key_fields?: string[]
+  stamp_required?: string | null
+  business_meaning?: string
+}
+
+export interface AnalyzeSampleResult {
+  detected_name: string
+  description: string
+  key_fields: string[]
+  stamp_required: string | null
+  business_meaning: string
+}
+
+export interface NewDocTypeInfo {
+  name: string
+  id: string | null
+  is_new: boolean
+}
+
+export interface DetectNewTypesResponse {
+  new_types: NewDocTypeInfo[]
+  total: number
 }

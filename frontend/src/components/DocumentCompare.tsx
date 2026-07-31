@@ -185,7 +185,7 @@ function PdfViewer({
       )}
       {loading && (
         <div style={{ textAlign: 'center', padding: 40 }}>
-          <Spin size="large" tip="加载 PDF 中..." />
+          <Spin size="large" tip="加载 PDF 中..."><div style={{ padding: 40 }} /></Spin>
         </div>
       )}
       <PdfDocument
@@ -288,7 +288,7 @@ function DocxViewer({
     >
       {loading && (
         <div style={{ textAlign: 'center', padding: 40 }}>
-          <Spin size="large" tip="加载 Word 文档中..." />
+          <Spin size="large" tip="加载 Word 文档中..."><div style={{ padding: 40 }} /></Spin>
         </div>
       )}
       {error && (
@@ -443,7 +443,7 @@ export default function DocumentCompare({ doc, fileUrl, height = 600 }: Document
               <FileTextOutlined /> 原始文档：{doc.file_name}
             </span>
           }
-          bodyStyle={{ padding: 0 }}
+          styles={{ body: { padding: 0 } }}
         >
           {doc.file_type === 'pdf' && (
             <PdfViewer fileUrl={fileUrl} onReady={handleDocReady} height={height} />

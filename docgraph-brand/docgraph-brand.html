@@ -1,0 +1,116 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>DocGraph · 品牌标识</title>
+<style>
+  :root{
+    --indigo:#4F46E5; --cyan:#06B6D4; --navy:#0B1020; --bg:#F8FAFC; --line:#E2E8F0;
+  }
+  *{box-sizing:border-box;margin:0;padding:0;}
+  body{
+    font-family:'PingFang SC','Microsoft YaHei','Hiragino Sans GB',system-ui,sans-serif;
+    background:#EEF2F7; color:var(--navy); padding:48px 24px; line-height:1.5;
+  }
+  .sheet{
+    max-width:1080px; margin:0 auto; background:#fff; border-radius:24px;
+    box-shadow:0 24px 60px rgba(11,16,32,.10); overflow:hidden;
+  }
+  header{padding:48px 56px 36px; border-bottom:1px solid var(--line);}
+  header h1{font-size:34px; font-weight:800; letter-spacing:.5px;}
+  header p{margin-top:8px; font-size:17px; color:#475569;}
+  section{padding:40px 56px; border-bottom:1px solid var(--line);}
+  .tag{font-size:13px; font-weight:700; letter-spacing:2px; color:var(--cyan); text-transform:uppercase; margin-bottom:18px;}
+  .card{
+    background:var(--bg); border:1px solid var(--line); border-radius:18px;
+    padding:36px; display:flex; align-items:center; justify-content:center; min-height:200px;
+  }
+  .lockup-card{justify-content:flex-start;}
+  .grid2{display:grid; grid-template-columns:1fr 1fr; gap:24px;}
+  .name-box{background:var(--bg); border:1px solid var(--line); border-radius:18px; padding:28px;}
+  .name-box h2{font-size:48px; font-weight:800; letter-spacing:4px;}
+  .name-box .en{margin-top:6px; font-size:18px; font-weight:600; color:var(--indigo); letter-spacing:2px;}
+  table{width:100%; border-collapse:collapse; margin-top:18px; font-size:15px;}
+  th,td{text-align:left; padding:10px 12px; border-bottom:1px solid var(--line);}
+  th{color:#64748B; font-weight:600; width:64px;}
+  .swatches{display:flex; gap:18px; flex-wrap:wrap;}
+  .sw{width:150px;}
+  .chip{height:84px; border-radius:14px; border:1px solid var(--line);}
+  .sw .meta{margin-top:10px; font-size:13px; color:#475569;}
+  .sw .meta b{display:block; color:var(--navy); font-size:14px; margin-bottom:2px;}
+  .note{font-size:14px; color:#64748B; line-height:1.7;}
+  footer{padding:28px 56px; font-size:13px; color:#94A3B8;}
+  code{background:#F1F5F9; padding:2px 6px; border-radius:6px; font-size:13px;}
+</style>
+</head>
+<body>
+<div class="sheet">
+  <header>
+    <h1>DocGraph · 品牌标识系统</h1>
+    <p>基于知识图谱的自动文档审查智能体 — 中文名「智图审」</p>
+  </header>
+
+  <section>
+    <div class="tag">Logo 01 · 纯图标 Icon</div>
+    <div class="card">
+      <img src="docgraph-icon.svg" width="200" height="200" alt="DocGraph 纯图标">
+    </div>
+    <p class="note" style="margin-top:18px;">
+      文档轮廓 = 审查对象；白色节点连线 = 知识图谱关联；青色对勾徽章 = 已核验。
+      渐变靛蓝→青色传递「可信 + 技术」。建议最小使用尺寸 ≥ 32px。
+    </p>
+  </section>
+
+  <section>
+    <div class="tag">Logo 02 · 组合标识 Lockup</div>
+    <div class="card lockup-card">
+      <img src="docgraph-lockup.svg" width="460" height="132" alt="DocGraph 组合标识">
+    </div>
+    <p class="note" style="margin-top:18px;">
+      图标居左，中文名「智图审」为主视觉，英文 <code>DocGraph</code> 为辅。
+      图标与文字基线对齐，间距固定，禁止随意拉伸文字。
+    </p>
+  </section>
+
+  <section>
+    <div class="tag">命名 Naming</div>
+    <div class="grid2">
+      <div class="name-box">
+        <h2>智图审</h2>
+        <div class="en">DocGraph</div>
+        <table>
+          <tr><th>智</th><td>智能 / AI——呼应母公司「标普智元」的"智"</td></tr>
+          <tr><th>图</th><td>图谱 / 知识图谱（Knowledge Graph）</td></tr>
+          <tr><th>审</th><td>审查 / 审核——产品核心功能</td></tr>
+        </table>
+      </div>
+      <div class="name-box">
+        <p class="note" style="margin-top:0;">
+          <b style="color:var(--navy);">英文沿用 DocGraph</b>：Doc（文档）+ Graph（图谱），与中文「图」直接对应。<br><br>
+          <b style="color:var(--navy);">备选中文名</b><br>
+          · 审图灵——更强调"智能体 / Agent"语义，偏灵动<br>
+          · 图谱审——更直白，弱化"智"<br>
+          · 智审图——把"审"提前，强调审查动作
+        </p>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <div class="tag">色彩 Color</div>
+    <div class="swatches">
+      <div class="sw"><div class="chip" style="background:#4F46E5;"></div><div class="meta"><b>主色 靛蓝</b>#4F46E5</div></div>
+      <div class="sw"><div class="chip" style="background:#06B6D4;"></div><div class="meta"><b>强调 青色</b>#06B6D4</div></div>
+      <div class="sw"><div class="chip" style="background:#0B1020;"></div><div class="meta"><b>文字 深蓝黑</b>#0B1020</div></div>
+      <div class="sw"><div class="chip" style="background:#F8FAFC;"></div><div class="meta"><b>背景 浅灰</b>#F8FAFC</div></div>
+    </div>
+  </section>
+
+  <footer>
+    交付物：docgraph-icon.svg（纯图标） · docgraph-lockup.svg（组合标识） · 本页为品牌说明。
+    画布恢复后可拖入 Ardot 直接编辑。© DocGraph · 标普智元
+  </footer>
+</div>
+</body>
+</html>

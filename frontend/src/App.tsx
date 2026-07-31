@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { Layout, Menu, Avatar, Tooltip, Badge, Result, Button, Spin } from 'antd'
+import { Layout, Menu, Avatar, Tooltip, Result, Button, Spin } from 'antd'
 import { Routes, Route, useLocation, useNavigate, Navigate } from 'react-router-dom'
 import {
   UploadOutlined,
@@ -9,14 +9,15 @@ import {
   CheckCircleOutlined,
   MenuFoldOutlined,
   MenuUnfoldOutlined,
-  BellOutlined,
   UserOutlined,
+  FileTextOutlined,
 } from '@ant-design/icons'
 import UploadPage from './pages/UploadPage'
 import RulesPage from './pages/RulesPage'
 import GraphPage from './pages/GraphPage'
 import ReviewPage from './pages/ReviewPage'
 import ResultsPage from './pages/ResultsPage'
+import DocTypesPage from './pages/DocTypesPage'
 import { RuleSetProvider, useRuleSet } from './context/RuleSetContext'
 import { RuleSetSwitcher } from './components/RuleSetSwitcher'
 
@@ -26,6 +27,7 @@ const { Header, Sider, Content } = Layout
 const menuItems = [
   { key: '/upload', icon: <UploadOutlined />, label: '文档上传' },
   { key: '/rules', icon: <SettingOutlined />, label: '规则管理' },
+  { key: '/doc-types', icon: <FileTextOutlined />, label: '文档类型' },
   { key: '/graph', icon: <ApartmentOutlined />, label: '图谱确认' },
   { key: '/review', icon: <FileSearchOutlined />, label: '审查执行' },
   { key: '/results', icon: <CheckCircleOutlined />, label: '结果展示' },
@@ -207,37 +209,18 @@ function AppInner() {
 
           <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
             <RuleSetSwitcher />
-            <Tooltip title="通知" placement="bottom">
-              <Badge dot size="small">
-                <button
-                  style={{
-                    border: 'none',
-                    background: 'transparent',
-                    cursor: 'pointer',
-                    fontSize: 16,
-                    color: '#475569',
-                    padding: 8,
-                    borderRadius: 8,
-                    display: 'flex',
-                    alignItems: 'center',
-                  }}
-                  onMouseEnter={(e) => (e.currentTarget.style.background = '#f1f5f9')}
-                  onMouseLeave={(e) => (e.currentTarget.style.background = 'transparent')}
-                >
-                  <BellOutlined />
-                </button>
-              </Badge>
-            </Tooltip>
           </div>
         </Header>
 
         <Content style={{ margin: 0, padding: 20, overflow: 'auto' }}>
-          {/* key=currentId:切换规则集时强制重新挂载所有页面,确保数据刷新 */}
-          <div key={`${location.pathname}|${currentId}`} className="page-fade-in">
+          {/* key=currentId:切换规则集时强制重新挂载所有页面,确保数据刷新;
+              切换页面(pathname 变化)时不重挂载,保留页面内状态(编辑表单/勾选/滚动位置) */}
+          <div key={currentId || 'no-ruleset'} className="page-fade-in">
             <Routes>
               <Route path="/" element={<Navigate to="/upload" replace />} />
               <Route path="/upload" element={<UploadPage />} />
               <Route path="/rules" element={<RulesPage />} />
+              <Route path="/doc-types" element={<DocTypesPage />} />
               <Route path="/graph" element={<GraphPage />} />
               <Route path="/review" element={<ReviewPage />} />
               <Route path="/results" element={<ResultsPage />} />

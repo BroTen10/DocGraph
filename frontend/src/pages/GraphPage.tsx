@@ -16,16 +16,15 @@ import { useState, useEffect, useRef, useCallback } from 'react'
 import {
   Card, Row, Col, Button, Space, message, Typography, Empty, Spin, Tag,
   Modal, Form, Input, Statistic, Descriptions, Popconfirm, Alert,
-  Upload, Progress, Timeline, List, Tabs, Badge, Divider, Tooltip,
+  Progress, Timeline, List, Tabs, Badge, Divider, Tooltip,
 } from 'antd'
 import {
   ReloadOutlined, CheckCircleOutlined, DeleteOutlined, EditOutlined,
-  ThunderboltOutlined, UploadOutlined, FileTextOutlined, ClockCircleOutlined,
+  ThunderboltOutlined, FileTextOutlined, ClockCircleOutlined,
   BulbOutlined, NodeIndexOutlined, ApartmentOutlined,
 } from '@ant-design/icons'
-import type { UploadProps } from 'antd'
 import { graphApi, rulesApi } from '../api/client'
-import type { GraphData, GraphEdge, GraphBuildTaskStatus, RuleImportResponse, ImportTask, Rule, RuleSnapshot } from '../types'
+import type { GraphData, GraphEdge, GraphBuildTaskStatus, Rule, RuleSnapshot } from '../types'
 import GraphView from '../components/GraphView'
 import PageHeader from '../components/PageHeader'
 import EmptyState from '../components/EmptyState'
@@ -75,11 +74,6 @@ export default function GraphPage() {
   const [building, setBuilding] = useState(false)
   const pollTimerRef = useRef<ReturnType<typeof setInterval> | null>(null)
 
-  // 规则文档导入
-  const [importing, setImporting] = useState(false)
-  const [importResult, setImportResult] = useState<RuleImportResponse | null>(null)
-  const [importTask, setImportTask] = useState<ImportTask | null>(null)
-
   // 工作区
   const [rules, setRules] = useState<Rule[]>([])
   const [snapshots, setSnapshots] = useState<RuleSnapshot[]>([])
@@ -115,8 +109,8 @@ export default function GraphPage() {
       ])
       setRules(rulesData)
       setSnapshots(snapsData)
-    } catch {
-      // 静默
+    } catch (e) {
+      console.warn('加载工作区(规则/快照)失败:', e)
     }
   }, [currentId])
 
@@ -130,8 +124,8 @@ export default function GraphPage() {
         setBuildTask(running)
         setBuilding(true)
       }
-    } catch {
-      // 静默
+    } catch (e) {
+      console.warn('加载构建任务列表失败:', e)
     }
   }, [])
 
@@ -169,8 +163,8 @@ export default function GraphPage() {
           }
           message.error('图谱构建失败: ' + (status.error || '未知错误'))
         }
-      } catch {
-        // 忽略轮询错误
+      } catch (e) {
+        console.warn('图谱构建轮询失败:', e)
       }
     }
 
@@ -206,66 +200,7 @@ export default function GraphPage() {
     }
   }
 
-  // ============ 规则文档导入 ============
-  const importUploadProps: UploadProps = {
-    name: 'file',
-    multiple: false,
-    showUploadList: false,
-    accept: '.pdf,.xlsx,.xls,.docx,.md,.txt',
-    beforeUpload: (file) => {
-      // 校验文件大小（10MB 限制）
-      const isUnderLimit = (file.size || 0) < 10 * 1024 * 1024
-      if (!isUnderLimit) {
-        message.error('文件大小不能超过 10MB')
-        return false
-      }
-      if (!currentId) {
-        message.error('尚未选择规则集')
-        return false
-      }
-
-      setImporting(true)
-      setImportResult(null)
-      setImportTask(null)
-      rulesApi
-        .importDocument(currentId, file)
-        .then(async (task: ImportTask) => {
-          setImportTask(task)
-          // 轮询任务进度，直到 done / error
-          const poll = async (): Promise<void> => {
-            const t = await rulesApi.getImportTask(task.task_id)
-            setImportTask(t)
-            if (t.status === 'done') {
-              setImportResult(t.result)
-              if (t.result && t.result.imported > 0) {
-                message.success(
-                  `导入完成：共 ${t.result.total} 条，成功 ${t.result.imported} 条，跳过 ${t.result.skipped} 条`,
-                )
-                loadWorkspace()
-              } else {
-                message.warning(`未导入任何规则${t.result ? `，跳过 ${t.result.skipped} 条` : ''}`)
-              }
-              setImporting(false)
-              return
-            }
-            if (t.status === 'error') {
-              message.error('导入失败: ' + (t.error || '未知错误'))
-              setImporting(false)
-              return
-            }
-            await new Promise((r) => setTimeout(r, 1500))
-            return poll()
-          }
-          return poll()
-        })
-        .catch((e: any) => {
-          message.error('导入失败: ' + (e?.response?.data?.detail || e?.message || e))
-          setImporting(false)
-        })
-
-      return false // 阻止自动上传
-    },
-  }
+  // 规则文档导入功能已统一移至 RulesPage(那里有完整进度展示),此处不再提供入口
 
   // ============ 图谱编辑（保留原有功能） ============
   const openEditNode = (nodeName: string) => {
@@ -344,11 +279,6 @@ export default function GraphPage() {
         icon={<ApartmentOutlined />}
         extra={
           <Space>
-            <Upload {...importUploadProps}>
-              <Button icon={<UploadOutlined />} loading={importing}>
-                导入规则文档
-              </Button>
-            </Upload>
             <Button
               type="primary"
               icon={<ThunderboltOutlined />}
@@ -389,12 +319,12 @@ export default function GraphPage() {
                 )}
               </Space>
             }
-            bodyStyle={{ padding: 0 }}
+            styles={{ body: { padding: 0 } }}
             style={{ minHeight: 600 }}
           >
             {loading ? (
               <div style={{ textAlign: 'center', padding: 120 }}>
-                <Spin size="large" tip="加载图谱中..." />
+                <Spin size="large" tip="加载图谱中..."><div style={{ padding: 40 }} /></Spin>
               </div>
             ) : !graph ? (
               <EmptyState
@@ -402,26 +332,19 @@ export default function GraphPage() {
                   <>
                     <div style={{ marginBottom: 4 }}>暂无图谱</div>
                     <Paragraph type="secondary" style={{ margin: 0 }}>
-                      请先导入规则文档或直接构建图谱
+                      请先到「规则管理」页导入规则文档,再回到此处构建图谱
                     </Paragraph>
                   </>
                 }
                 padding={80}
                 action={
-                  <Space>
-                    <Upload {...importUploadProps}>
-                      <Button icon={<UploadOutlined />} type="primary">
-                        导入规则文档
-                      </Button>
-                    </Upload>
-                    <Button
-                      icon={<ThunderboltOutlined />}
-                      loading={building}
-                      onClick={() => handleBuildAsync(false)}
-                    >
-                      构建图谱
-                    </Button>
-                  </Space>
+                  <Button
+                    icon={<ThunderboltOutlined />}
+                    loading={building}
+                    onClick={() => handleBuildAsync(false)}
+                  >
+                    构建图谱
+                  </Button>
                 }
               />
             ) : (
@@ -461,7 +384,7 @@ export default function GraphPage() {
 
         {/* 右侧：任务进度 / 工作区 / 规则导入 */}
         <Col span={8}>
-          <Card bodyStyle={{ padding: 0 }}>
+          <Card styles={{ body: { padding: 0 } }}>
             <Tabs
               activeKey={activeTab}
               onChange={setActiveTab}

@@ -38,7 +38,6 @@ from ..constants import (
     DOC_VAT_INVOICE,
     DOC_WAYBILL,
     DOC_WAREHOUSE_INOUT,
-    REQUIRED_DOC_TYPES,
     STAMP_REQUIREMENTS,
 )
 from ..models import Contract, Document, ReviewResult, ReviewTask, Rule
@@ -332,11 +331,23 @@ def _check_completeness(
     rules_by_key: dict[tuple[str, str], list[Rule]],
     contract: Contract,
 ) -> list[ReviewResult]:
-    """齐套性检查：必备文件是否齐全。多余文件不报错。"""
+    """齐套性检查：从启用的齐套性规则推导必备文件类型，检查是否齐全。多余文件不报错。"""
     results: list[ReviewResult] = []
     present_types = {d.doc_type for d in docs}
 
-    for doc_type in sorted(REQUIRED_DOC_TYPES):
+    # 从���套性规则中提取"必备"文件类型
+    required_types = set()
+    for (doc_type, cat), rules in rules_by_key.items():
+        if cat == CHECK_COMPLETENESS:
+            for rule in rules:
+                if rule.enabled and rule.status == 'confirmed':
+                    required_types.add(doc_type)
+
+    if not required_types:
+        logger.warning("未找到启用的齐套性规则，跳过齐套性检查")
+        return results
+
+    for doc_type in sorted(required_types):
         rule = _find_rule(rules_by_key, doc_type, CHECK_COMPLETENESS)
         if doc_type in present_types:
             results.append(_make_result(rule, None, "pass", detail={"doc_type": doc_type}))
@@ -739,7 +750,14 @@ def _filter_results(items: list[dict]) -> list[dict]:
             continue
         # 合并为摘要项：doc_type 列出涉及的文件类型
         doc_types = sorted({it.get("doc_type") or "" for it in group})
-        examples = [it["issue_desc"] for it in group[:3]]
+        # 按 doc_type 维度统计规则跳过数，而非简单取 issue_desc 前 N 条
+        dt_counts: dict[str, int] = {}
+        for it in group:
+            d = it.get("doc_type") or ""
+            dt_counts[d] = dt_counts.get(d, 0) + 1
+        # 按跳过数量降序排列，取前 5
+        sorted_dts = sorted(dt_counts.items(), key=lambda x: -x[1])
+        examples = [f"{dt}（涉及 {cnt} 条规则）" for dt, cnt in sorted_dts[:5]]
         merged = {
             "id": group[0]["id"],
             "rule_id": None,
@@ -749,9 +767,9 @@ def _filter_results(items: list[dict]) -> list[dict]:
             "doc_id": None,
             "doc_name": None,
             "result": "unverifiable",
-            "issue_desc": f"共 {len(group)} 项字段缺失无法核验，涉及: {'、'.join(dt for dt in doc_types if dt)}",
+            "issue_desc": f"共 {len(group)} 条规则核验项被跳过，涉及: {'、'.join(dt for dt in doc_types if dt)}",
             "detail": {
-                "merged_count": len(group),
+                "skipped_rule_count": len(group),
                 "doc_types": doc_types,
                 "examples": examples,
             },

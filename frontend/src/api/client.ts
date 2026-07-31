@@ -7,7 +7,6 @@ import type {
   ContractDetail,
   ContractUploadResponse,
   DocumentBrief,
-  GraphBuildResponse,
   GraphBuildTaskStatus,
   GraphData,
   ImportTask,
@@ -134,12 +133,6 @@ export const rulesApi = {
 
 // ============ 图谱 ============
 export const graphApi = {
-  build: (ruleSetId: string, auto_confirm_all = false, operator = 'system') =>
-    http
-      .post<GraphBuildResponse>('/rules/build-graph', null, {
-        params: { auto_confirm_all, operator, rule_set_id: ruleSetId },
-      })
-      .then((r) => r.data),
   /** 异步构建图谱（后台线程），返回 task_id */
   buildAsync: (ruleSetId: string, auto_confirm_all = false, operator = 'system') =>
     http
@@ -200,6 +193,47 @@ export const ocrApi = {
 export const constantsApi = {
   docTypes: () => http.get<ConstantsResponse>('/constants/doc-types').then((r) => r.data),
   health: () => http.get<{ status: string }>('/health').then((r) => r.data),
+}
+
+// ============ 文档类型管理 ============
+import type { DocTypeItem, DocTypeListResponse, DocTypeCreate, DocTypeUpdate, AnalyzeSampleResult, DetectNewTypesResponse } from '../types'
+
+export const docTypesApi = {
+  /** 获取文档类型列表 */
+  list: (params?: { status?: string; source?: string }) =>
+    http.get<DocTypeListResponse>('/doc-types', { params }).then((r) => r.data),
+  /** 获取单个文档类型 */
+  get: (id: string) =>
+    http.get<DocTypeItem>(`/doc-types/${id}`).then((r) => r.data),
+  /** 创建文档类型 */
+  create: (data: DocTypeCreate) =>
+    http.post<DocTypeItem>('/doc-types', data).then((r) => r.data),
+  /** 更新文档类型 */
+  update: (id: string, data: DocTypeUpdate) =>
+    http.put<DocTypeItem>(`/doc-types/${id}`, data).then((r) => r.data),
+  /** 删除文档类型 */
+  delete: (id: string) =>
+    http.delete(`/doc-types/${id}`).then((r) => r.data),
+  /** 确认新类型（pending → active） */
+  confirm: (id: string) =>
+    http.post<DocTypeItem>(`/doc-types/${id}/confirm`).then((r) => r.data),
+  /** 丢弃新类型 */
+  reject: (id: string) =>
+    http.post(`/doc-types/${id}/reject`).then((r) => r.data),
+  /** 上传样例文档分析 */
+  analyzeSample: (file: File, docTypeHint?: string) => {
+    const formData = new FormData()
+    formData.append('file', file)
+    const params: Record<string, string> = {}
+    if (docTypeHint) params.doc_type_hint = docTypeHint
+    return http.post<AnalyzeSampleResult>('/doc-types/analyze-sample', formData, {
+      params,
+      headers: { 'Content-Type': 'multipart/form-data' },
+    }).then((r) => r.data)
+  },
+  /** 从规则中检测新文档类型 */
+  detectFromRules: (docTypes: string[]) =>
+    http.post<DetectNewTypesResponse>('/doc-types/detect-from-rules', { rule_doc_types: docTypes }).then((r) => r.data),
 }
 
 // ============ 规则解析 Skill ============
