@@ -70,6 +70,7 @@ _SYSTEM_PROMPT = """你是单证审查规则解析助手。任务：把用户提
 6. 一条自然语言描述拆为一条规则；若用户文本含多条规则，全部解析
 7. 忽略与单证审查无关的内容
 8. confidence 反映你对这条规则确信程度：规则描述非常清楚、无歧义则接近 1.0；含模糊表述（如"部分情况""一般""可能"）则适当降低；完全不确定或不合理则为 0.0
+9. 为减少输出体积，值为 null 的字段省略不输出（客户端自动补全），confidence 字段值为 1.0 时同理省略
 
 ### 缺陷检测指令
 对每条被解析的规则，执行以下检查，将结果填入 `defects` 数组：
@@ -337,7 +338,7 @@ def import_rules_from_text(
                     {"role": "user", "content": user_prompt},
                 ],
                 temperature=0.1,
-                max_tokens=4096,
+                max_tokens=8192,
             )
         except (LLMError, ValueError) as e:
             logger.error("规则导入 第 %d/%d 段 LLM 解析失败: %s", idx, len(chunks), e)
@@ -528,6 +529,44 @@ def import_rules_from_text(
         except Exception:
             logger.warning("更新规则集类型失败（不影响已入库规则）", exc_info=True)
 
+    # 检测新文档类型：将不在document_types表中的类型注册为pending_review
+    new_doc_type_names = set()
+    if new_doc_types:
+        try:
+            from ..models import DocumentType
+            # 查询已有活跃类型名称
+            existing = db.execute(
+                select(DocumentType.name).where(DocumentType.status == "active")
+            ).scalars().all()
+            existing_set = set(existing)
+
+            for name in sorted(new_doc_types):
+                if name in existing_set:
+                    continue
+                # 检查是否已有 pending 记录
+                pending = db.execute(
+                    select(DocumentType).where(
+                        DocumentType.name == name,
+                        DocumentType.status == "pending_review",
+                    )
+                ).scalars().first()
+                if pending:
+                    new_doc_type_names.add(name)
+                    continue
+                # 创建新类型
+                dt = DocumentType(
+                    name=name,
+                    category="other",
+                    source="rule_import",
+                    status="pending_review",
+                )
+                db.add(dt)
+                db.commit()
+                new_doc_type_names.add(name)
+                logger.info("规则导入发现新文档类型（pending_review）: %s", name)
+        except Exception:
+            logger.warning("注册新文档类型失败（不影响已导入规则）", exc_info=True)
+
     # 构建冲突报告
     all_clean_defects = []
     for d in all_defects:
@@ -557,6 +596,7 @@ def import_rules_from_text(
         "rules": imported,
         "errors": errors,
         "conflict_report": conflict_report.model_dump(mode="json") if conflict_report.total_defects > 0 else None,
+        "new_doc_types": list(new_doc_types),
     }
 
 

@@ -36,6 +36,9 @@ export default function UploadPage() {
   const [ocrTriggering, setOcrTriggering] = useState(false) // 批量触发按钮 loading
   const [docOcrLoading, setDocOcrLoading] = useState<Record<string, boolean>>({}) // 单文档触发 loading(按文档粒度,支持并行触发)
   const ocrPollRef = useRef<ReturnType<typeof setInterval> | null>(null)
+  // 当前展示的合同 id,供 OCR 轮询回调对比:仅当用户仍停留在启动轮询的那个合同时才刷新详情,
+  // 避免切到新合同后被旧合同轮询的 setDetail 覆盖(张冠李戴)
+  const currentDetailIdRef = useRef<string | null>(null)
 
   const load = async () => {
     if (!currentId) return
@@ -54,7 +57,7 @@ export default function UploadPage() {
       const c = await constantsApi.docTypes()
       setDocTypes(c.doc_types)
     } catch (e) {
-      // 静默
+      console.warn('加载文件类型清单失败:', e)
     }
   }
 
@@ -118,6 +121,7 @@ export default function UploadPage() {
   }
 
   const viewDetail = async (id: string) => {
+    currentDetailIdRef.current = id
     setDetailLoading(true)
     setOcrTask(null) // 切换合同时清空旧任务
     try {
@@ -129,14 +133,14 @@ export default function UploadPage() {
           const tasks = await ocrApi.listTasks(currentId, id)
           const last = tasks[0]
           if (last && (last.status === 'running' || last.status === 'pending')) {
-            pollOcrTask(last.id)
+            pollOcrTask(last.id, id)
           } else if (last) {
             // 显示历史任务摘要(便于看上次结果)
             const full = await ocrApi.getTask(last.id)
             setOcrTask(full)
           }
-        } catch {
-          // 忽略,任务查询失败不影响详情展示
+        } catch (e) {
+          console.warn('查询 OCR 任务状态失败:', e)
         }
       }
     } catch (e: any) {
@@ -154,7 +158,7 @@ export default function UploadPage() {
     }
   }
 
-  const pollOcrTask = (taskId: string) => {
+  const pollOcrTask = (taskId: string, contractId: string) => {
     stopOcrPoll()
     ocrPollRef.current = setInterval(async () => {
       try {
@@ -162,12 +166,13 @@ export default function UploadPage() {
         setOcrTask(t)
         if (t.status === 'completed' || t.status === 'failed') {
           stopOcrPoll()
-          // 完成后刷新详情(更新文档列表的 ocr_status)
-          if (detail) {
+          // 完成后刷新详情(更新文档列表的 ocr_status):
+          // 仅当用户仍停留在启动轮询的那个合同时才刷新,避免切走后被覆盖
+          if (currentDetailIdRef.current === contractId) {
             try {
-              setDetail(await contractsApi.get(detail.id))
-            } catch {
-              // 忽略
+              setDetail(await contractsApi.get(contractId))
+            } catch (e) {
+              console.warn('OCR 完成后刷新详情失败:', e)
             }
           }
           if (t.status === 'completed') {
@@ -190,7 +195,7 @@ export default function UploadPage() {
       const t = await ocrApi.triggerContract(currentId, detail.id)
       setOcrTask(t)
       message.info(`已触发 OCR,共 ${t.total_count} 个待识别文档`)
-      pollOcrTask(t.id)
+      pollOcrTask(t.id, detail.id)
     } catch (e: any) {
       message.error('触发 OCR 失败: ' + (e?.message || e))
     } finally {
@@ -205,7 +210,7 @@ export default function UploadPage() {
       const t = await ocrApi.triggerDoc(currentId, docId)
       setOcrTask(t)
       message.info(`已触发「${fileName}」OCR 识别`)
-      pollOcrTask(t.id)
+      pollOcrTask(t.id, currentDetailIdRef.current || '')
     } catch (e: any) {
       message.error('触发 OCR 失败: ' + (e?.message || e))
     } finally {
@@ -315,7 +320,7 @@ export default function UploadPage() {
               value={v}
               style={{ width: '100%' }}
               onChange={(val) => handleDocTypeChange(row.id, val)}
-              options={docTypes.map((d) => ({ value: d.name, label: `${d.name}${d.is_required ? '（必备）' : d.is_optional ? '（非必备）' : ''}` }))}
+              options={docTypes.map((d) => ({ value: d.name, label: d.name }))}
             />
             {inferred && inferred !== v && (
               <div style={{ fontSize: 11, color: '#8B5CF6', marginTop: 2, lineHeight: '16px' }}>
@@ -656,7 +661,7 @@ export default function UploadPage() {
       >
         {compareLoading ? (
           <div style={{ textAlign: 'center', padding: 80 }}>
-            <Spin size="large" tip="加载 OCR 识别结果中..." />
+            <Spin size="large" tip="加载 OCR 识别结果中..."><div style={{ padding: 40 }} /></Spin>
           </div>
         ) : compareDoc ? (
           <DocumentCompare

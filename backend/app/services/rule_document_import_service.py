@@ -61,7 +61,7 @@ def _extract_pdf_text(file_path: str) -> str:
                         parts.append(row_text)
             if t.strip():
                 parts.append(t)
-    return "\n".join(parts)
+    return "\n\n".join(parts)
 
 
 def _extract_excel_text(file_path: str) -> str:

@@ -1,12 +1,12 @@
 import { useState, useEffect, useRef } from 'react'
 import {
   Card, Row, Col, Button, Select, message, Typography, Progress, Empty,
-  Tag, List, Space, Statistic, Alert,
+  Tag, List, Space, Statistic, Alert, Modal,
 } from 'antd'
 import { PlayCircleOutlined, ReloadOutlined, FileSearchOutlined } from '@ant-design/icons'
 import { useNavigate } from 'react-router-dom'
 import { contractsApi, reviewsApi } from '../api/client'
-import type { ContractBrief, ReviewTaskSummary } from '../types'
+import type { ContractBrief, ContractDetail, ReviewTaskSummary } from '../types'
 import PageHeader from '../components/PageHeader'
 import EmptyState from '../components/EmptyState'
 import { useRuleSet } from '../context/RuleSetContext'
@@ -23,6 +23,9 @@ export default function ReviewPage() {
   const [task, setTask] = useState<ReviewTaskSummary | null>(null)
   const [history, setHistory] = useState<ReviewTaskSummary[]>([])
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null)
+  // 选中合同的详情(用于展示 OCR 完成度,启动审查前校验)
+  const [contractDetail, setContractDetail] = useState<ContractDetail | null>(null)
+  const [detailLoading, setDetailLoading] = useState(false)
 
   const load = async () => {
     if (!currentId) return
@@ -35,54 +38,103 @@ export default function ReviewPage() {
 
   useEffect(() => {
     load()
+    loadHistory()
     return () => {
       if (pollRef.current) clearInterval(pollRef.current)
     }
   }, [currentId])
 
-  const startReview = async () => {
-    if (!selectedContract) {
-      message.warning('请选择合同')
-      return
-    }
-    setRunning(true)
-    try {
-      const t = await reviewsApi.start(selectedContract)
-      setTask(t)
-      // 轮询进度
-      pollRef.current = setInterval(async () => {
-        try {
-          const cur = await reviewsApi.getStatus(t.id)
-          setTask(cur)
-          if (cur.status === 'completed' || cur.status === 'failed') {
-            if (pollRef.current) clearInterval(pollRef.current)
-            pollRef.current = null
-            setRunning(false)
-            setHistory((h) => [cur, ...h])
-            if (cur.status === 'completed') {
-              message.success('审查完成')
-            } else {
-              message.error('审查失败: ' + (cur.error || ''))
-            }
-          }
-        } catch (e) {
+  // 抽出轮询逻辑,供启动审查和续接历史 running 任务复用
+  const startPolling = (taskId: string) => {
+    if (pollRef.current) clearInterval(pollRef.current)
+    pollRef.current = setInterval(async () => {
+      try {
+        const cur = await reviewsApi.getStatus(taskId)
+        setTask(cur)
+        if (cur.status === 'completed' || cur.status === 'failed') {
           if (pollRef.current) clearInterval(pollRef.current)
           pollRef.current = null
           setRunning(false)
+          setHistory((h) => [cur, ...h])
+          if (cur.status === 'completed') {
+            message.success('审查完成')
+          } else {
+            message.error('审查失败: ' + (cur.error || ''))
+          }
         }
-      }, 2000)
+      } catch (e) {
+        if (pollRef.current) clearInterval(pollRef.current)
+        pollRef.current = null
+        setRunning(false)
+      }
+    }, 2000)
+  }
+
+  // 加载历史审查任务;若有 running/pending 任务自动续接轮询(避免刷新页面后丢失进度)
+  const loadHistory = async () => {
+    if (!currentId) return
+    try {
+      const list = await reviewsApi.list(currentId, { limit: 50 })
+      setHistory(list)
+      const running = list.find((t) => t.status === 'running' || t.status === 'pending')
+      if (running) {
+        setTask(running)
+        setRunning(true)
+        startPolling(running.id)
+      }
+    } catch (e) {
+      console.warn('加载审查历史失败:', e)
+    }
+  }
+
+  // 选择合同时加载详情,展示 OCR 完成度
+  const onSelectContract = async (id: string) => {
+    setSelectedContract(id)
+    setContractDetail(null)
+    setTask(null)
+    setDetailLoading(true)
+    try {
+      setContractDetail(await contractsApi.get(id))
+    } catch (e) {
+      console.warn('加载合同详情失败(OCR 校验将跳过):', e)
+    } finally {
+      setDetailLoading(false)
+    }
+  }
+
+  const doStartReview = async () => {
+    setRunning(true)
+    try {
+      const t = await reviewsApi.start(selectedContract!)
+      setTask(t)
+      startPolling(t.id)
     } catch (e: any) {
       message.error('启动审查失败: ' + (e?.response?.data?.detail || e?.message || e))
       setRunning(false)
     }
   }
 
-  const stageLabel: Record<string, string> = {
-    '初始化': '初始化',
-    'OCR 与字段提取中': 'OCR 与字段提取中',
-    '规则比对中': '规则比对中',
-    '生成报告中': '生成报告中',
-    '完成': '完成',
+  const startReview = async () => {
+    if (!selectedContract) {
+      message.warning('请选择合同')
+      return
+    }
+    // 校验 OCR 完成度:有未识别文档时弹确认,避免用户启动无效审查
+    if (contractDetail) {
+      const docs = contractDetail.documents
+      const notDone = docs.filter((d) => d.ocr_status !== 'done')
+      if (notDone.length > 0) {
+        Modal.confirm({
+          title: '部分文档尚未完成 OCR',
+          content: `该合同共 ${docs.length} 个文档,其中 ${notDone.length} 个未完成 OCR 识别。未识别文档的检查项将无法核验,是否继续?`,
+          okText: '继续审查',
+          cancelText: '取消',
+          onOk: doStartReview,
+        })
+        return
+      }
+    }
+    doStartReview()
   }
 
   const statusColor: Record<string, string> = {
@@ -122,12 +174,24 @@ export default function ReviewPage() {
               style={{ width: '100%', marginTop: 4 }}
               placeholder="请选择已上传的合同"
               value={selectedContract}
-              onChange={setSelectedContract}
+              onChange={onSelectContract}
               options={contracts.map((c) => ({
                 value: c.id,
                 label: `${c.contract_no}（${c.file_count} 个文件，${dayjs(c.upload_time).format('YYYY-MM-DD HH:mm')}）`,
               }))}
             />
+            {detailLoading && <div style={{ marginTop: 8, fontSize: 12, color: '#94a3b8' }}>加载合同详情...</div>}
+            {contractDetail && (
+              <div style={{ marginTop: 8, fontSize: 12 }}>
+                {(() => {
+                  const docs = contractDetail.documents
+                  const done = docs.filter((d) => d.ocr_status === 'done').length
+                  const total = docs.length
+                  const color = done === total ? 'green' : done === 0 ? 'red' : 'orange'
+                  return <Tag color={color}>OCR 完成 {done}/{total}</Tag>
+                })()}
+              </div>
+            )}
           </Col>
           <Col span={12}>
             {task && (

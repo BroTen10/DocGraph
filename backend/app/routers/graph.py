@@ -11,7 +11,6 @@ from sqlalchemy.orm import Session
 
 from ..database import get_db
 from ..schemas.graph import (
-    GraphBuildResponse,
     GraphConfirmRequest,
     GraphData,
 )
@@ -26,33 +25,6 @@ from ..services import (
 from ..services.rule_import_task import ImportProgress
 
 router = APIRouter(prefix="/api/rules", tags=["graph"])
-
-
-@router.post("/build-graph", response_model=GraphBuildResponse)
-def build_graph(
-    rule_set_id: uuid.UUID = Query(..., description="规则集 ID"),
-    auto_confirm_all: bool = False,
-    operator: str = "system",
-    db: Session = Depends(get_db),
-) -> GraphBuildResponse:
-    """一键重建图谱（全量替换，同步），按 rule_set_id 隔离规则与快照。
-
-    Query 参数：
-    - rule_set_id: 规则集 ID
-    - auto_confirm_all: 是否一键自动确认全部（忽略置信度）
-    - operator: 操作人
-    """
-    try:
-        return graph_builder_service.build_graph(
-            db=db,
-            rule_set_id=rule_set_id,
-            auto_confirm_all=auto_confirm_all,
-            operator=operator,
-        )
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"图谱构建失败: {e}")
 
 
 # ============ 异步图谱构建（带进度追踪） ============

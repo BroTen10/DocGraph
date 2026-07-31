@@ -1,0 +1,32 @@
+<svg width="240" height="240" viewBox="0 0 240 240" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="dg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#4F46E5"/>
+      <stop offset="1" stop-color="#06B6D4"/>
+    </linearGradient>
+  </defs>
+  <!-- tile -->
+  <rect x="0" y="0" width="240" height="240" rx="52" fill="url(#dg)"/>
+  <!-- document outline -->
+  <rect x="68" y="46" width="104" height="138" rx="14" fill="none" stroke="#FFFFFF" stroke-width="11"/>
+  <!-- folded corner -->
+  <path d="M150 46 L172 46 L172 68 Z" fill="#FFFFFF"/>
+  <!-- text lines -->
+  <rect x="84" y="62" width="44" height="7" rx="3.5" fill="#FFFFFF" opacity="0.55"/>
+  <rect x="84" y="78" width="58" height="7" rx="3.5" fill="#FFFFFF" opacity="0.55"/>
+  <!-- knowledge-graph edges -->
+  <g stroke="#FFFFFF" stroke-width="7" stroke-linecap="round" fill="none">
+    <line x1="96" y1="96" x2="132" y2="124"/>
+    <line x1="132" y1="124" x2="98" y2="150"/>
+    <line x1="96" y1="96" x2="98" y2="150"/>
+  </g>
+  <!-- knowledge-graph nodes -->
+  <g fill="#FFFFFF">
+    <circle cx="96" cy="96" r="9"/>
+    <circle cx="132" cy="124" r="9"/>
+    <circle cx="98" cy="150" r="9"/>
+  </g>
+  <!-- verified badge -->
+  <circle cx="176" cy="170" r="30" fill="#06B6D4" stroke="#FFFFFF" stroke-width="4"/>
+  <path d="M165 170 L174 179 L190 159" fill="none" stroke="#FFFFFF" stroke-width="9" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>
