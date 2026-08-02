@@ -91,8 +91,8 @@ def _convert_one_rule(
     rule_id_str = f"R{rule_index:03d}"
     user_prompt = _USER_PROMPT_TEMPLATE.format(
         rule_id=rule_id_str,
-        doc_type=rule.doc_type,
-        check_category=rule.check_category,
+        doc_type=rule.doc_type or "",
+        check_category=rule.check_category or "",
         rule_text=rule.rule_text,
         tolerance_json=json.dumps(rule.tolerance or {}, ensure_ascii=False),
     )
@@ -120,6 +120,8 @@ def _convert_one_rule(
         ent.attributes.setdefault("rule_id", rule_id_str)
         ent.attributes.setdefault("doc_type", rule.doc_type)
         ent.attributes.setdefault("check_category", rule.check_category)
+        # 批次 10 Phase D：Field 节点属于本体层
+        ent.attributes.setdefault("layer", "ontology")
         # 批次 8-4：容差统一挂到 Value 节点（tolerance_params 完整声明 + tolerance 标量），
         # 审查时优先取节点属性，关系属性仅作旧图兜底
         ent.attributes.setdefault("tolerance_params", rule.tolerance or {})
@@ -138,6 +140,8 @@ def _convert_one_rule(
         # 批次 7：注入结构化意图元数据（条件/例外），供审查与可视化使用
         rel.attributes.setdefault("condition", (rule.structure or {}).get("condition"))
         rel.attributes.setdefault("exceptions", (rule.structure or {}).get("exceptions") or [])
+        # 批次 10 Phase D：执行层边
+        rel.attributes.setdefault("layer", "execution")
 
     return RuleGraphConvertResult(
         entities=entities,
@@ -199,9 +203,11 @@ def _convert_structured_rule(rule: Rule, rule_index: int) -> RuleGraphConvertRes
 
     src_attrs: dict = {
         "doc_type": src_doc_type, "field": src_field, "rule_id": rule_id_str,
+        "layer": "ontology",
     }
     tgt_attrs: dict = {
         "doc_type": tgt_doc_type, "field": tgt_field, "rule_id": rule_id_str,
+        "layer": "ontology",
     }
     if aggregate:
         src_attrs["aggregate"] = aggregate
@@ -232,6 +238,7 @@ def _convert_structured_rule(rule: Rule, rule_index: int) -> RuleGraphConvertRes
         "tolerance_params": rule.tolerance or {},
         "condition": structure.get("condition") or None,
         "exceptions": structure.get("exceptions") or [],
+        "layer": "execution",
     }
     if aggregate:
         rel_attrs["aggregate"] = aggregate
@@ -265,7 +272,7 @@ def _convert_completeness_rule(rule: Rule, rule_index: int) -> RuleGraphConvertR
     root_ent = EntityData(
         name=_COMPLETENESS_ROOT,
         type="CheckRoot",
-        attributes={"description": "齐套性检查入口", "rule_id": rule_id_str},
+        attributes={"description": "齐套性检查入口", "rule_id": rule_id_str, "layer": "execution"},
     )
     # 文件节点
     doc_ent = EntityData(
@@ -276,6 +283,7 @@ def _convert_completeness_rule(rule: Rule, rule_index: int) -> RuleGraphConvertR
             "rule_id": rule_id_str,
             "rule_text": rule.rule_text,
             "check_category": rule.check_category,
+            "layer": "execution",
         },
     )
     rel = EdgeData(
@@ -287,6 +295,7 @@ def _convert_completeness_rule(rule: Rule, rule_index: int) -> RuleGraphConvertR
             "rule_text": rule.rule_text,
             "doc_type": doc_type,
             "check_category": rule.check_category,
+            "layer": "execution",
         },
     )
     return RuleGraphConvertResult(
@@ -313,12 +322,13 @@ def _convert_stamp_rule(rule: Rule, rule_index: int) -> RuleGraphConvertResult:
             "rule_id": rule_id_str,
             "rule_text": rule.rule_text,
             "check_category": rule.check_category,
+            "layer": "execution",
         },
     )
     root_ent = EntityData(
         name=_STAMP_ROOT,
         type="CheckRoot",
-        attributes={"description": "印章要求检查入口", "rule_id": rule_id_str},
+        attributes={"description": "印章要求检查入口", "rule_id": rule_id_str, "layer": "execution"},
     )
     rel = EdgeData(
         source=doc_type,
@@ -329,6 +339,7 @@ def _convert_stamp_rule(rule: Rule, rule_index: int) -> RuleGraphConvertResult:
             "rule_text": rule.rule_text,
             "doc_type": doc_type,
             "check_category": rule.check_category,
+            "layer": "execution",
         },
     )
     return RuleGraphConvertResult(
@@ -337,6 +348,35 @@ def _convert_stamp_rule(rule: Rule, rule_index: int) -> RuleGraphConvertResult:
         confidence=1.0,
         auto_confirmed=False,
     )
+
+
+def _rule_doc_types(rule: Rule) -> set[str]:
+    """收集规则涉及的文档类型（标签 + scope + 结构断言），用于本体层 APPLIES_TO。"""
+    names: set[str] = set()
+    if rule.doc_type:
+        names.add(rule.doc_type)
+    scope_dt = (rule.scope or {}).get("doc_types")
+    if isinstance(scope_dt, list):
+        names.update(x for x in scope_dt if x and str(x).upper() not in ("ALL", "整批", "全部"))
+    assertion = (rule.structure or {}).get("assertion") or {}
+    for side in ("source", "target"):
+        sdt = str(((assertion.get(side) or {}).get("doc_type")) or "").strip()
+        if sdt:
+            names.add(sdt)
+    return names
+
+
+def _rule_field_refs(rule: Rule) -> list[str]:
+    """规则结构断言涉及的字段节点名（与执行层 _node_name 命名保持一致）。"""
+    refs: list[str] = []
+    assertion = (rule.structure or {}).get("assertion") or {}
+    for side in ("source", "target"):
+        s = assertion.get(side) or {}
+        dt = s.get("doc_type") or rule.doc_type
+        field = str(s.get("field") or "").strip()
+        if dt and field:
+            refs.append(_node_name(dt, field, s.get("aggregate")))
+    return refs
 
 
 def build_graph(
@@ -382,8 +422,123 @@ def build_graph(
     manual_pending_count = 0
     total = len(rules)
 
+    # 批次 10 Phase D：本体层（DocumentType/CheckIntent/Rule 节点 + APPLIES_TO/CHECKS/INVOLVES/HAS_FIELD 边）
+    from sqlalchemy import select as sa_select
+    from ..models import DocumentType as DocTypeModel
+
+    all_doc_type_names: set[str] = set()
+    for r in rules:
+        all_doc_type_names |= _rule_doc_types(r)
+    doc_type_reg: dict[str, Any] = {}
+    if all_doc_type_names:
+        rows = db.execute(
+            sa_select(DocTypeModel).where(DocTypeModel.name.in_(sorted(all_doc_type_names)))
+        ).scalars().all()
+        doc_type_reg = {dt.name: dt for dt in rows}
+
+    ontology_entities: list[EntityData] = []
+    ontology_rels: list[EdgeData] = []
+    doc_nodes: dict[str, str] = {}
+    intent_nodes: dict[str, str] = {}
+
+    def _ensure_doc_node(name: str) -> str:
+        if name in doc_nodes:
+            return doc_nodes[name]
+        node = f"文件类型:{name}"
+        dt = doc_type_reg.get(name)
+        doc_nodes[name] = node
+        ontology_entities.append(
+            EntityData(
+                name=node,
+                type="DocumentType",
+                attributes={
+                    "display_name": name,
+                    "description": dt.description if dt else None,
+                    "key_fields": dt.key_fields if dt else [],
+                    "business_meaning": dt.business_meaning if dt else None,
+                    "stamp_required": dt.stamp_required if dt else None,
+                    "status": dt.status if dt else None,
+                    "category": dt.category if dt else None,
+                    "is_required": dt.is_required if dt else None,
+                    "layer": "ontology",
+                },
+            )
+        )
+        return node
+
+    def _ensure_intent_node(intent: str) -> str:
+        if intent in intent_nodes:
+            return intent_nodes[intent]
+        node = f"检查意图:{intent}"
+        intent_nodes[intent] = node
+        ontology_entities.append(
+            EntityData(
+                name=node,
+                type="CheckIntent",
+                attributes={"display_name": intent, "layer": "ontology"},
+            )
+        )
+        return node
+
     for idx, rule in enumerate(rules, start=1):
+        # ----- 本体层：规则节点与类型/意图/字段关联（与执行层共用同一 R 编号）-----
+        rid = f"R{idx:03d}"
+        rule_node = f"规则:{rid}"
+        ontology_entities.append(
+            EntityData(
+                name=rule_node,
+                type="Rule",
+                attributes={
+                    "display_name": f"规则 {rid}",
+                    "rule_id": rid,
+                    "rule_text": rule.rule_text,
+                    "check_category": rule.check_category,
+                    "doc_type": rule.doc_type,
+                    "intents": rule.intents or [],
+                    "priority": rule.priority,
+                    "layer": "rule",
+                },
+            )
+        )
+        for name in sorted(_rule_doc_types(rule)):
+            ontology_rels.append(
+                EdgeData(
+                    source=rule_node,
+                    target=_ensure_doc_node(name),
+                    type="APPLIES_TO",
+                    attributes={"layer": "ontology", "rule_id": rid},
+                )
+            )
+        rule_intents: set[str] = set(rule.intents or [])
+        if rule.check_category:
+            rule_intents.add(rule.check_category)
+        for intent in sorted(rule_intents):
+            ontology_rels.append(
+                EdgeData(
+                    source=rule_node,
+                    target=_ensure_intent_node(intent),
+                    type="CHECKS",
+                    attributes={"layer": "ontology", "rule_id": rid},
+                )
+            )
+        for fname in _rule_field_refs(rule):
+            ontology_rels.append(
+                EdgeData(
+                    source=rule_node,
+                    target=fname,
+                    type="INVOLVES",
+                    attributes={"layer": "ontology", "rule_id": rid},
+                )
+            )
+
         # 按 check_category 分派：齐套性/印章程序化，其余走 LLM
+        # 批次 10：齐套性/印章需要明确的文件类型；无类型（整批语义）暂跳过，避免节点名为空
+        if rule.check_category == CHECK_COMPLETENESS and not rule.doc_type:
+            logger.warning("跳过齐套性规则（缺文件类型，整批必备语义待后续支持）: %s", rule.id)
+            continue
+        if rule.check_category == CHECK_STAMP and not rule.doc_type:
+            logger.warning("跳过印章规则（缺文件类型）: %s", rule.id)
+            continue
         if rule.check_category == CHECK_COMPLETENESS:
             result = _convert_completeness_rule(rule, idx)
         elif rule.check_category == CHECK_STAMP:
@@ -419,6 +574,22 @@ def build_graph(
                 rel.attributes["confidence"] = result.confidence
             all_entities.extend(result.entities)
             all_relationships.extend(result.relationships)
+
+    # ----- 本体层收尾：DocumentType → Field（HAS_FIELD）并合并入图 -----
+    for ent in all_entities:
+        if ent.type == "Field" and ent.attributes.get("doc_type"):
+            dt_name = str(ent.attributes["doc_type"])
+            if dt_name in doc_nodes:
+                ontology_rels.append(
+                    EdgeData(
+                        source=doc_nodes[dt_name],
+                        target=ent.name,
+                        type="HAS_FIELD",
+                        attributes={"layer": "ontology"},
+                    )
+                )
+    all_entities.extend(ontology_entities)
+    all_relationships.extend(ontology_rels)
 
     # 3. 生成 graph_id（与快照绑定）
     graph_id = f"graph_{datetime.now().strftime('%Y%m%d%H%M%S')}_{uuid.uuid4().hex[:6]}"

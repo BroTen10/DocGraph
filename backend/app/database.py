@@ -88,6 +88,12 @@ def _run_migrations(engine) -> None:
     migrations = [
         "ALTER TABLE rules ADD COLUMN IF NOT EXISTS defects JSONB NOT NULL DEFAULT '[]'::jsonb;",
         "ALTER TABLE rules ADD COLUMN IF NOT EXISTS structure JSONB;",
+        # 批次 10：规则自描述（doc_type/check_category 降级为可选派生标签 + scope/intents/provenance）
+        "ALTER TABLE rules ALTER COLUMN doc_type DROP NOT NULL;",
+        "ALTER TABLE rules ALTER COLUMN check_category DROP NOT NULL;",
+        "ALTER TABLE rules ADD COLUMN IF NOT EXISTS scope JSONB;",
+        "ALTER TABLE rules ADD COLUMN IF NOT EXISTS intents JSONB NOT NULL DEFAULT '[]'::jsonb;",
+        "ALTER TABLE rules ADD COLUMN IF NOT EXISTS provenance JSONB;",
         # 批次 9：结果闭环（问题状态机 + 严重度 + 偏离度 + 图谱实体关联）
         "ALTER TABLE review_results ADD COLUMN IF NOT EXISTS status VARCHAR(16) NOT NULL DEFAULT 'open';",
         "ALTER TABLE review_results ADD COLUMN IF NOT EXISTS status_history JSONB NOT NULL DEFAULT '[]'::jsonb;",
@@ -95,6 +101,9 @@ def _run_migrations(engine) -> None:
         "ALTER TABLE review_results ADD COLUMN IF NOT EXISTS deviation JSONB;",
         "ALTER TABLE review_results ADD COLUMN IF NOT EXISTS graph_source VARCHAR(255);",
         "ALTER TABLE review_results ADD COLUMN IF NOT EXISTS graph_target VARCHAR(255);",
+        # 批次 10 Phase C：双引擎审查——结果来源（graph/llm/legacy）与置信度
+        "ALTER TABLE review_results ADD COLUMN IF NOT EXISTS source VARCHAR(16);",
+        "ALTER TABLE review_results ADD COLUMN IF NOT EXISTS confidence FLOAT;",
         # 存量 pass 结果回填为 closed（无需跟进）
         "UPDATE review_results SET status = 'closed' WHERE result = 'pass' AND status = 'open';",
     ]
@@ -190,12 +199,32 @@ def _seed_doc_types() -> None:
     from .constants import (
         ALL_DOC_TYPES,
         FIELD_TEMPLATES, STAMP_REQUIREMENTS,
+        DOC_FX_CLAIM,
+        DOC_OTHER,
+        DOC_PAY_APPLICATION,
+        OPTIONAL_DOC_TYPES,
+        REQUIRED_DOC_TYPES,
     )
+
+    def _seed_category(name: str) -> tuple[str, bool]:
+        """与文件分类器/齐套性语义对齐的类别推导（批次 10 Phase B）。"""
+        if name in REQUIRED_DOC_TYPES:
+            return "required", True
+        if name in OPTIONAL_DOC_TYPES:
+            return "optional", False
+        if name in (DOC_FX_CLAIM, DOC_PAY_APPLICATION):
+            return "supporting", False
+        if name == DOC_OTHER:
+            return "other", False
+        return "extra", False
 
     with SessionLocal() as db:
         for idx, name in enumerate(ALL_DOC_TYPES):
+            category, is_required = _seed_category(name)
             dt = DocumentType(
                 name=name,
+                category=category,
+                is_required=is_required,
                 key_fields=FIELD_TEMPLATES.get(name, []),
                 stamp_required=STAMP_REQUIREMENTS.get(name),
                 source="seed",

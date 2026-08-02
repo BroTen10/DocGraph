@@ -125,6 +125,8 @@ def _make_result_from_graph(
         deviation=deviation,
         graph_source=source_node,
         graph_target=target_node,
+        # 批次 10 Phase C：双引擎结果来源标记
+        source="graph",
         issue_desc=issue_desc or None,
         detail=detail or {},
         suggestion=suggestion or None,

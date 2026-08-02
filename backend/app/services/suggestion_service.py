@@ -1,17 +1,63 @@
 """修正建议生成服务。
 
-对每条"不通过"问题给出可操作的修正建议。MVP 使用规则化模板，
-未来可扩展为 LLM 生成更自然的建议。
+对每条"不通过"问题给出可操作的修正建议。优先 LLM 生成（以证据链为上下文，批次 10 Phase C），
+失败/异常回退规则化模板。
 """
 
 from __future__ import annotations
 
+import json
+import logging
+
+from ..llm_client import LLMError, get_llm_client
 from ..constants import (
     CHECK_ACCURACY,
     CHECK_COMPLETENESS,
     CHECK_STAMP,
     CHECK_TIME_LOGIC,
 )
+
+logger = logging.getLogger(__name__)
+
+
+def build_suggestion_llm(
+    check_category: str,
+    doc_type: str,
+    issue_desc: str,
+    detail: dict,
+    rule_text: str = "",
+) -> str:
+    """LLM 生成修正建议（以证据链为上下文）。调用失败/低质量时回退模板。"""
+    try:
+        llm = get_llm_client()
+        system_prompt = (
+            "你是贸易单证审查助手。根据一条审查发现的问题与证据，给出可操作的修正建议。"
+            "要求：中文，1-3 句，直接告诉业务人员应该核对/补充/修改什么，不解释推理过程，不臆造证据。"
+        )
+        evidence = json.dumps(detail or {}, ensure_ascii=False)[:1500]
+        user_prompt = f"""规则：{rule_text or '-'}
+检查项：{check_category or '-'}
+涉及文件类型：{doc_type or '-'}
+问题：{issue_desc or '-'}
+证据：{evidence}
+
+请输出 JSON：{{"suggestion": "..."}}"""
+        resp = llm.chat_json(
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            temperature=0.2,
+            max_tokens=512,
+        )
+        suggestion = str(resp.get("suggestion") or "").strip()
+        if suggestion:
+            return suggestion
+    except (LLMError, ValueError, json.JSONDecodeError) as e:
+        logger.warning("LLM 建议生成失败，回退模板: %s", e)
+    except Exception as e:
+        logger.warning("LLM 建议生成异常，回退模板: %s", e)
+    return build_suggestion(check_category, doc_type, issue_desc, detail)
 
 
 def build_suggestion(

@@ -16,6 +16,7 @@ import type {
   DocumentBrief,
   GraphBuildTaskStatus,
   GraphData,
+  GraphOntology,
   ImportTask,
   OcrTask,
   OcrTaskBrief,
@@ -219,6 +220,9 @@ export const graphApi = {
   getLatest: (ruleSetId: string) =>
     http.get<GraphData>('/rules/graph', { params: { rule_set_id: ruleSetId } }).then((r) => r.data),
   get: (graphId: string) => http.get<GraphData>(`/rules/graph/${graphId}`).then((r) => r.data),
+  /** 批次 10 Phase D：查询图谱本体层（文档类型/检查意图/规则） */
+  getOntology: (graphId: string) =>
+    http.get<GraphOntology>('/rules/graph/ontology', { params: { graph_id: graphId } }).then((r) => r.data),
   confirm: (graph_id: string, edits: Array<{ op: string; node_name?: string; source?: string; target?: string; properties?: Record<string, unknown> }>) =>
     http.put<GraphData>('/rules/graph/confirm', { graph_id, edits }).then((r) => r.data),
 }

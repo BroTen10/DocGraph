@@ -27,11 +27,12 @@ class Rule(Base):
         index=True,
         nullable=False,
     )
-    # 文件类型：代理协议 / 委托出口确认单 / 出口报关单 / 运单 / 签收单 /
-    # 出入仓单 / 派车单 / 收款水单 / 付款水单
-    doc_type: Mapped[str] = mapped_column(String(64), index=True, nullable=False)
-    # 检查项类别：齐套性 / 基础判断 / 信息准确性 / 时间逻辑
-    check_category: Mapped[str] = mapped_column(String(32), index=True, nullable=False)
+    # 文件类型（批次 10 起为可选派生标签）：代理协议 / 委托出口确认单 / 出口报关单 / 运单 / 签收单 / ...
+    # 规则明确指向单一文件类型时填写；跨文件/整批规则可为空（用 scope 表达）
+    doc_type: Mapped[str | None] = mapped_column(String(64), index=True, nullable=True)
+    # 检查项类别（批次 10 起为可选派生标签）：齐套性 / 基础判断 / 信息准确性 / 时间逻辑 / ...
+    # 规则核心意图无法归入已知类别时可为空（用 intents 表达）
+    check_category: Mapped[str | None] = mapped_column(String(32), index=True, nullable=True)
     # 自然语言规则文本
     rule_text: Mapped[str] = mapped_column(Text, nullable=False)
     # 容差参数：{"amount_percent":5,"weight_kg":0.5,"time_days":0,"allow_same_day":true}
@@ -56,6 +57,13 @@ class Rule(Base):
     # - exceptions: 例外条款列表 [{text, reason}]
     # 为 null/空表示旧规则，审查走 rule_text 兼容路径
     structure: Mapped[dict | None] = mapped_column(JSONB, nullable=True, default=None)
+    # ----- 批次 10：规则自描述（泛化）-----
+    # 适用范围：{"doc_types": ["付款水单", ...]} 或 "ALL"（整批合同/全部文件）或 None
+    scope: Mapped[dict | None] = mapped_column(JSONB, nullable=True, default=None)
+    # 检查意图标签（派生，可多条），如 ["时间逻辑", "信息准确性"]
+    intents: Mapped[list] = mapped_column(JSONB, default=list, nullable=False)
+    # 来源追溯：{"source_type": "text"|"document", "chunk_index": N, "text": "原文片段"}
+    provenance: Mapped[dict | None] = mapped_column(JSONB, nullable=True, default=None)
     # ----- -----
     updated_at: Mapped[datetime] = mapped_column(
         DateTime, server_default=func.now(), onupdate=func.now(), nullable=False
@@ -68,4 +76,4 @@ class Rule(Base):
     rule_set: Mapped["RuleSet"] = relationship("RuleSet", back_populates="rules")
 
     def __repr__(self) -> str:  # pragma: no cover
-        return f"<Rule [{self.doc_type}/{self.check_category}] status={self.status}>"
+        return f"<Rule [{self.doc_type or '整批/全部'}/{self.check_category or '未分类'}] status={self.status}>"

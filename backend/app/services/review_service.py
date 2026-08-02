@@ -49,8 +49,8 @@ from .field_extraction_service import (
     parse_amount,
     parse_date,
 )
-from .ocr_service import process_document
-from .suggestion_service import build_suggestion
+from .ocr_service import process_document, resolve_field_template
+from .suggestion_service import build_suggestion, build_suggestion_llm
 from . import result_meta
 
 logger = logging.getLogger(__name__)
@@ -195,7 +195,7 @@ def _run_review_pipeline(
         if doc.ocr_status == "done" and doc.extracted_fields:
             # 已处理过，跳过
             continue
-        r = process_document(doc)
+        r = process_document(doc, key_fields=resolve_field_template(db, doc.doc_type))
         if r.get("success"):
             doc.ocr_status = "done"
             doc.ocr_text = r.get("text", "")
@@ -257,6 +257,27 @@ def _run_review_pipeline(
         # 检查4：时间逻辑
         results.extend(_check_time_logic(db, docs, rules_by_key, contract))
 
+    # ============ 阶段2.5：LLM 语义审查（引擎 B，批次 10 Phase C） ============
+    # 覆盖确定性引擎表达不了的定性规则，并对字符串相等失败做语义复核；
+    # 任何异常都不影响确定性结果（护栏）。
+    try:
+        from .llm_review_service import (
+            review_unstructured_rules,
+            semantic_equivalence_fallback,
+        )
+        enabled_rules = _load_enabled_rules(db, contract.rule_set_id)
+        llm_results = review_unstructured_rules(db, contract, docs, enabled_rules)
+        for lr in llm_results:
+            results.append(_make_result_from_llm(lr))
+        semantic_changed = semantic_equivalence_fallback(db, contract, docs, results)
+        if llm_results or semantic_changed:
+            logger.info(
+                "审查任务 %s: LLM 语义审查新增 %d 条结果，语义复核调整 %d 条",
+                task.id, len(llm_results), semantic_changed,
+            )
+    except Exception as e:
+        logger.warning("审查任务 %s: LLM 语义审查失败（不影响确定性结果）: %s", task.id, e, exc_info=True)
+
     # ============ 阶段3：生成建议 + 持久化 ============
     task.stage = "生成报告中"
     task.progress = 90
@@ -265,11 +286,12 @@ def _run_review_pipeline(
     for r in results:
         r.task_id = task.id
         if r.result == "fail" and not r.suggestion:
-            r.suggestion = build_suggestion(
+            r.suggestion = build_suggestion_llm(
                 check_category=r.check_category or "",
                 doc_type=r.doc_type or "",
                 issue_desc=r.issue_desc or "",
                 detail=r.detail or {},
+                rule_text=r.rule_text or "",
             )
         db.add(r)
 
@@ -308,6 +330,7 @@ def _make_result(
     issue_desc: str = "",
     detail: Optional[dict] = None,
     suggestion: str = "",
+    source: str = "legacy",
 ) -> ReviewResult:
     # 批次 9：结果闭环（C1/C2）——问题状态 + 严重度/偏离度
     status = result_meta.default_status(result)
@@ -332,9 +355,43 @@ def _make_result(
         ],
         severity=severity,
         deviation=deviation,
+        source=source,
         issue_desc=issue_desc or None,
         detail=detail or {},
         suggestion=suggestion or None,
+    )
+
+
+def _make_result_from_llm(lr: dict) -> ReviewResult:
+    """LLM 语义审查结果 → ReviewResult（source=llm，携带置信度）。"""
+    rule: Rule = lr["rule"]
+    status = result_meta.default_status(lr["result"])
+    severity, deviation = result_meta.compute_severity(
+        lr["result"], rule.check_category, lr.get("detail") or {}
+    )
+    return ReviewResult(
+        rule_id=rule.id,
+        rule_text=rule.rule_text,
+        doc_type=rule.doc_type,
+        check_category=rule.check_category,
+        doc_id=None,
+        result=lr["result"],
+        status=status,
+        status_history=[
+            {
+                "status": status,
+                "at": datetime.now().isoformat(timespec="seconds"),
+                "by": "system",
+                "note": "LLM 语义审查",
+            }
+        ],
+        severity=severity,
+        deviation=deviation,
+        source="llm",
+        confidence=lr.get("confidence"),
+        issue_desc=lr.get("issue_desc") or None,
+        detail=lr.get("detail") or {},
+        suggestion=lr.get("suggestion") or None,
     )
 
 
@@ -362,6 +419,9 @@ def _check_completeness(
     required_types = set()
     for (doc_type, cat), rules in rules_by_key.items():
         if cat == CHECK_COMPLETENESS:
+            if not doc_type:
+                # 批次 10：整批/无类型规则暂不走旧回退逻辑（图引擎同样跳过）
+                continue
             for rule in rules:
                 if rule.enabled and rule.status == 'confirmed':
                     required_types.add(doc_type)
@@ -807,9 +867,11 @@ def _filter_results(items: list[dict]) -> list[dict]:
             "status_history": group[0].get("status_history") or [],
             "severity": group[0].get("severity") or result_meta.SEVERITY_LOW,
             "deviation": group[0].get("deviation"),
-            "graph_source": group[0].get("graph_source"),
-            "graph_target": group[0].get("graph_target"),
-            "issue_desc": f"共 {len(group)} 条规则核验项被跳过，涉及: {'、'.join(dt for dt in doc_types if dt)}",
+        "graph_source": group[0].get("graph_source"),
+        "graph_target": group[0].get("graph_target"),
+        "source": group[0].get("source"),
+        "confidence": group[0].get("confidence"),
+        "issue_desc": f"共 {len(group)} 条规则核验项被跳过，涉及: {'、'.join(dt for dt in doc_types if dt)}",
             "detail": {
                 "skipped_rule_count": len(group),
                 "doc_types": doc_types,
@@ -858,6 +920,8 @@ def _result_to_item(r: ReviewResult) -> dict:
         "deviation": r.deviation,
         "graph_source": r.graph_source,
         "graph_target": r.graph_target,
+        "source": r.source,
+        "confidence": r.confidence,
         "issue_desc": r.issue_desc,
         "detail": r.detail,
         "suggestion": r.suggestion,

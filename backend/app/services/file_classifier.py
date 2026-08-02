@@ -91,8 +91,16 @@ def get_file_type(filename: str) -> str:
     return _EXT_FILE_TYPE.get(ext, "other")
 
 
-def classify_file(filename: str) -> tuple[str, bool]:
+def classify_file(
+    filename: str,
+    registry: dict[str, bool] | None = None,
+) -> tuple[str, bool]:
     """根据文件名归类业务类型。
+
+    Args:
+        filename: 原始文件名
+        registry: 文档类型注册表（name → is_required），来自 DocumentType 动态清单
+                  （批次 10 Phase B：新类型无需改代码即可被识别）
 
     Returns:
         (doc_type, is_required)
@@ -105,6 +113,9 @@ def classify_file(filename: str) -> tuple[str, bool]:
     for keywords, doc_type in _KEYWORD_RULES:
         for kw in keywords:
             if kw in original:
+                # 注册表优先（动态维护的必备标记），常量兜底
+                if registry is not None and doc_type in registry:
+                    return doc_type, registry[doc_type]
                 return doc_type, doc_type in REQUIRED_DOC_TYPES
 
     # 2. 银行水单模式：含 CNPAY → 付款水单；含 SH → 收款水单
@@ -124,16 +135,26 @@ def classify_file(filename: str) -> tuple[str, bool]:
     if "发票" in original:
         return DOC_SALES_INVOICE, False
 
-    # 5. 未识别
+    # 5. 动态注册表匹配：文件名包含已注册类型名（含新发现的 pending_review 类型）
+    if registry:
+        for name, is_required in registry.items():
+            if name and name in original:
+                logger.debug("文件 %s 按动态注册表归类为 %s", filename, name)
+                return name, is_required
+
+    # 6. 未识别
     logger.debug("文件 %s 未匹配到任何业务类型，归为其他", filename)
     return DOC_OTHER, False
 
 
-def classify_files(filenames: list[str]) -> list[dict]:
+def classify_files(
+    filenames: list[str],
+    registry: dict[str, bool] | None = None,
+) -> list[dict]:
     """批量分类文件。返回 [{file_name, doc_type, is_required, file_type}, ...]。"""
     results = []
     for fname in filenames:
-        doc_type, is_required = classify_file(fname)
+        doc_type, is_required = classify_file(fname, registry=registry)
         results.append(
             {
                 "file_name": fname,

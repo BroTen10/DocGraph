@@ -12,11 +12,11 @@
  * 4. 节点/边选中、编辑、删除（保留原有功能）
  */
 
-import { useState, useEffect, useRef, useCallback } from 'react'
+import { useState, useEffect, useRef, useCallback, useMemo } from 'react'
 import {
   Card, Row, Col, Button, Space, message, Typography, Empty, Spin, Tag,
   Modal, Form, Input, Statistic, Descriptions, Popconfirm, Alert,
-  Progress, Timeline, List, Tabs, Badge, Divider, Tooltip,
+  Progress, Timeline, List, Tabs, Badge, Divider, Tooltip, Segmented,
 } from 'antd'
 import {
   ReloadOutlined, CheckCircleOutlined, DeleteOutlined, EditOutlined,
@@ -25,7 +25,7 @@ import {
 } from '@ant-design/icons'
 import { graphApi, getErrorMessage, isFormValidationError, rulesApi } from '../api/client'
 import type { BadgeProps } from 'antd'
-import type { GraphData, GraphEdge, GraphBuildTaskStatus, Rule, RuleSnapshot } from '../types'
+import type { GraphData, GraphEdge, GraphBuildTaskStatus, GraphNode, GraphOntology, Rule, RuleSnapshot } from '../types'
 import GraphView from '../components/GraphView'
 import PageHeader from '../components/PageHeader'
 import EmptyState from '../components/EmptyState'
@@ -53,7 +53,11 @@ export default function GraphPage() {
   const { currentId } = useRuleSet()
   // 图谱数据
   const [graph, setGraph] = useState<GraphData | null>(null)
+  const [ontology, setOntology] = useState<GraphOntology | null>(null)
   const [loading, setLoading] = useState(false)
+
+  // 批次 10 Phase D：图层过滤（本体 / 规则 / 执行）
+  const [layerFilter, setLayerFilter] = useState<'all' | 'ontology' | 'rule' | 'execution'>('all')
 
   // 选中状态
   const [selectedNodeName, setSelectedNodeName] = useState<string | null>(null)
@@ -83,6 +87,24 @@ export default function GraphPage() {
   // 选中的节点详情
   const selectedNode = graph?.nodes.find((n) => n.name === selectedNodeName) || null
 
+  // 节点/边所属层：本体（DocumentType/CheckIntent/Field）、规则（Rule）、执行（其余）
+  const nodeLayer = (n: GraphNode): 'ontology' | 'rule' | 'execution' =>
+    n.type === 'DocumentType' || n.type === 'CheckIntent' || n.type === 'Field'
+      ? 'ontology'
+      : n.type === 'Rule' ? 'rule' : 'execution'
+  const edgeLayer = (e: GraphEdge): 'ontology' | 'execution' =>
+    ['APPLIES_TO', 'CHECKS', 'INVOLVES', 'HAS_FIELD'].includes(e.type) ? 'ontology' : 'execution'
+
+  const filteredGraph = useMemo<GraphData | null>(() => {
+    if (!graph || layerFilter === 'all') return graph
+    const nodes = graph.nodes.filter((n) => nodeLayer(n) === layerFilter)
+    const names = new Set(nodes.map((n) => n.name))
+    const edges = graph.edges.filter(
+      (e) => edgeLayer(e) === layerFilter && names.has(e.source) && names.has(e.target)
+    )
+    return { ...graph, nodes, edges, node_count: nodes.length, edge_count: edges.length }
+  }, [graph, layerFilter])
+
   // ============ 数据加载 ============
   const loadGraph = useCallback(async () => {
     if (!currentId) return
@@ -90,6 +112,12 @@ export default function GraphPage() {
     try {
       const g = await graphApi.getLatest(currentId)
       setGraph(g)
+      // 批次 10 Phase D：加载本体层概览（旧图无本体节点时返回空清单）
+      try {
+        setOntology(await graphApi.getOntology(g.graph_id))
+      } catch (e) {
+        setOntology(null)
+      }
     } catch (e) {
       if (e && typeof e === 'object' && (e as { response?: { status?: number } }).response?.status === 404) {
         setGraph(null)
@@ -350,14 +378,29 @@ export default function GraphPage() {
               />
             ) : (
               <>
-                <Alert
-                  type="info"
-                  showIcon
-                  style={{ borderRadius: 0, marginBottom: 0 }}
-                  message="点击节点或边查看详情。黄色边框节点为低置信度（需人工确认）。"
-                />
+                <div style={{ padding: '10px 12px', borderBottom: '1px solid #f0f0f0' }}>
+                  <Space style={{ width: '100%', justifyContent: 'space-between' }} wrap>
+                    <Alert
+                      type="info"
+                      showIcon
+                      style={{ marginBottom: 0, padding: '4px 12px', flex: '1 1 auto' }}
+                      message="点击节点或边查看详情。黄色边框节点为低置信度（需人工确认）。"
+                    />
+                    <Segmented
+                      size="small"
+                      value={layerFilter}
+                      onChange={(v) => setLayerFilter(v as typeof layerFilter)}
+                      options={[
+                        { label: '全部', value: 'all' },
+                        { label: '本体', value: 'ontology' },
+                        { label: '规则', value: 'rule' },
+                        { label: '执行', value: 'execution' },
+                      ]}
+                    />
+                  </Space>
+                </div>
                 <GraphView
-                  graph={graph}
+                  graph={filteredGraph}
                   selectedNodeName={selectedNodeName}
                   selectedEdgeKey={selectedEdge ? `${selectedEdge.source}->${selectedEdge.target}` : null}
                   onNodeClick={(name) => {
@@ -433,6 +476,21 @@ export default function GraphPage() {
                       onRefresh={loadWorkspace}
                     />
                   ),
+                },
+                // ============ 本体概览（批次 10 Phase D） ============
+                {
+                  key: 'ontology',
+                  label: (
+                    <span>
+                      <NodeIndexOutlined /> 本体概览
+                      <Badge
+                        count={(ontology?.doc_types.length ?? 0) + (ontology?.check_intents.length ?? 0)}
+                        style={{ marginLeft: 4 }}
+                        size="small"
+                      />
+                    </span>
+                  ),
+                  children: <OntologyPanel ontology={ontology} />,
                 },
                 // ============ 节点/边详情 ============
                 {
@@ -659,8 +717,8 @@ function WorkspacePanel({
                   <List.Item style={{ padding: '4px 0' }}>
                     <div style={{ width: '100%' }}>
                       <div style={{ display: 'flex', gap: 4, marginBottom: 2 }}>
-                        <Tag color="blue" style={{ fontSize: 10 }}>{rule.doc_type}</Tag>
-                        <Tag style={{ fontSize: 10 }}>{rule.check_category}</Tag>
+                        <Tag color="blue" style={{ fontSize: 10 }}>{rule.doc_type || '整批/全部'}</Tag>
+                        <Tag style={{ fontSize: 10 }}>{rule.check_category || '未分类'}</Tag>
                       </div>
                       <Text style={{ fontSize: 12 }}>{rule.rule_text}</Text>
                     </div>
@@ -702,6 +760,116 @@ function WorkspacePanel({
           },
         ]}
       />
+    </div>
+  )
+}
+
+// ============ 子组件：本体概览面板（批次 10 Phase D） ============
+function OntologyPanel({ ontology }: { ontology: GraphOntology | null }) {
+  if (!ontology) {
+    return (
+      <div style={{ padding: 24, textAlign: 'center' }}>
+        <Empty description="暂无本体数据" image={Empty.PRESENTED_IMAGE_SIMPLE} />
+        <Paragraph type="secondary" style={{ marginTop: 8 }}>
+          构建图谱后，此处展示从规则中抽象出的文档类型、检查意图与规则清单
+        </Paragraph>
+      </div>
+    )
+  }
+  const { doc_types, check_intents, rules } = ontology
+  return (
+    <div style={{ padding: 12 }}>
+      {doc_types.length === 0 && check_intents.length === 0 && rules.length === 0 ? (
+        <Empty description="当前图谱尚未包含本体层（旧图需重新构建）" image={Empty.PRESENTED_IMAGE_SIMPLE} />
+      ) : (
+        <Tabs
+          size="small"
+          items={[
+            {
+              key: 'doc_types',
+              label: `文档类型（${doc_types.length}）`,
+              children: (
+                <List
+                  size="small"
+                  dataSource={doc_types}
+                  renderItem={(dt) => {
+                    const p = dt.props || {}
+                    const name = (p.display_name as string) || dt.name
+                    const fields = dt.fields || []
+                    return (
+                      <List.Item style={{ padding: '6px 0' }}>
+                        <div style={{ width: '100%' }}>
+                          <Space size={4} wrap>
+                            <Tag color="cyan" style={{ fontSize: 11 }}>{name}</Tag>
+                            {p.is_required === true && <Tag color="red" style={{ fontSize: 10 }}>必备</Tag>}
+                            {!!p.status && p.status !== 'active' && (
+                              <Tag style={{ fontSize: 10 }}>{p.status === 'pending_review' ? '待确认' : String(p.status)}</Tag>
+                            )}
+                          </Space>
+                          {p.description ? (
+                            <div style={{ fontSize: 12, color: '#666', marginTop: 2 }}>{String(p.description)}</div>
+                          ) : null}
+                          {fields.length > 0 && (
+                            <div style={{ marginTop: 4 }}>
+                              <Text type="secondary" style={{ fontSize: 11 }}>
+                                字段：{fields.map((f) => f.split('|')[0]).join('、')}
+                              </Text>
+                            </div>
+                          )}
+                        </div>
+                      </List.Item>
+                    )
+                  }}
+                  locale={{ emptyText: '暂无文档类型' }}
+                />
+              ),
+            },
+            {
+              key: 'intents',
+              label: `检查意图（${check_intents.length}）`,
+              children: (
+                <List
+                  size="small"
+                  dataSource={check_intents}
+                  renderItem={(it) => {
+                    const p = it.props || {}
+                    const name = (p.display_name as string) || it.name
+                    return (
+                      <List.Item style={{ padding: '6px 0' }}>
+                        <Space>
+                          <Tag color="purple" style={{ fontSize: 11 }}>{name}</Tag>
+                          <Text type="secondary" style={{ fontSize: 11 }}>{it.rule_count} 条规则</Text>
+                        </Space>
+                      </List.Item>
+                    )
+                  }}
+                  locale={{ emptyText: '暂无检查意图' }}
+                />
+              ),
+            },
+            {
+              key: 'rules',
+              label: `规则（${rules.length}）`,
+              children: (
+                <List
+                  size="small"
+                  dataSource={rules}
+                  renderItem={(r) => {
+                    const p = r.props || {}
+                    return (
+                      <List.Item style={{ padding: '6px 0' }}>
+                        <Text style={{ fontSize: 12 }}>{String(p.rule_text || r.name)}</Text>
+                      </List.Item>
+                    )
+                  }}
+                  locale={{ emptyText: '暂无规则' }}
+                  style={{ maxHeight: 380, overflow: 'auto' }}
+                />
+              ),
+            },
+          ]}
+        />
+      )}
     </div>
   )
 }

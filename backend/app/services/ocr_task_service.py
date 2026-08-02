@@ -22,7 +22,7 @@ from sqlalchemy.orm import Session
 from ..database import SessionLocal
 from ..models import Contract, Document, OcrTask
 from .field_extraction_service import normalize_fields
-from .ocr_service import process_document
+from .ocr_service import process_document, resolve_field_template
 
 logger = logging.getLogger(__name__)
 
@@ -120,7 +120,7 @@ def _run_single_doc(task_id: uuid.UUID, doc_id: uuid.UUID) -> None:
         task.stage = f"识别中: {doc.file_name}"
         db.commit()
 
-        r = process_document(doc)
+        r = process_document(doc, key_fields=resolve_field_template(db, doc.doc_type))
         if r.get("success"):
             doc.ocr_status = "done"
             doc.ocr_text = r.get("text", "")
@@ -197,7 +197,7 @@ def _run_batch(task_id: uuid.UUID, doc_ids: list[uuid.UUID]) -> None:
             db.commit()
 
             try:
-                r = process_document(doc)
+                r = process_document(doc, key_fields=resolve_field_template(db, doc.doc_type))
                 if r.get("success"):
                     doc.ocr_status = "done"
                     doc.ocr_text = r.get("text", "")

@@ -154,12 +154,22 @@ class Neo4jClient:
                 check_string_values=False,
             )
         # 写关系（尊重 rel.type，不再硬编码 COMPARE_TO）
+        # 批次 10 Phase D：本体层边（APPLIES_TO/CHECKS/INVOLVES/HAS_FIELD）加入白名单
+        _ALLOWED_REL_TYPES = (
+            "COMPARE_TO",
+            "REQUIRED",
+            "MUST_STAMP",
+            "APPLIES_TO",
+            "CHECKS",
+            "INVOLVES",
+            "HAS_FIELD",
+        )
         for rel in relationships:
             attrs = rel.get("attributes", {}) or {}
             attrs = {**attrs, "graph_id": graph_id}
             rel_type = rel.get("type", "COMPARE_TO")
             # 白名单校验，防止注入
-            if rel_type not in ("COMPARE_TO", "REQUIRED", "MUST_STAMP"):
+            if rel_type not in _ALLOWED_REL_TYPES:
                 rel_type = "COMPARE_TO"
             cypher = (
                 "MATCH (a:RuleEntity {name: $src, graph_id: $graph_id}), "
@@ -178,6 +188,34 @@ class Neo4jClient:
                 check_string_values=False,
             )
         return {"nodes": len(entities), "relationships": len(relationships)}
+
+    def get_ontology(self, graph_id: str) -> dict:
+        """查询图谱本体层（批次 10 Phase D）：
+        文档类型（含 HAS_FIELD 字段清单）、检查意图（含关联规则数）、规则清单。
+        """
+        doc_types = self.execute_read(
+            "MATCH (n:RuleEntity {graph_id: $graph_id, type: 'DocumentType'}) "
+            "OPTIONAL MATCH (n)-[h:HAS_FIELD]->(f:RuleEntity {graph_id: $graph_id, type: 'Field'}) "
+            "RETURN n.name AS name, properties(n) AS props, collect(DISTINCT f.name) AS fields",
+            {"graph_id": graph_id},
+        )
+        check_intents = self.execute_read(
+            "MATCH (n:RuleEntity {graph_id: $graph_id, type: 'CheckIntent'}) "
+            "OPTIONAL MATCH (n)<-[c:CHECKS]-(r:RuleEntity {graph_id: $graph_id, type: 'Rule'}) "
+            "RETURN n.name AS name, properties(n) AS props, count(DISTINCT r.name) AS rule_count",
+            {"graph_id": graph_id},
+        )
+        rules = self.execute_read(
+            "MATCH (n:RuleEntity {graph_id: $graph_id, type: 'Rule'}) "
+            "RETURN n.name AS name, properties(n) AS props",
+            {"graph_id": graph_id},
+        )
+        return {
+            "graph_id": graph_id,
+            "doc_types": doc_types,
+            "check_intents": check_intents,
+            "rules": rules,
+        }
 
     # ---------- 图谱驱动审查查询 ----------
 

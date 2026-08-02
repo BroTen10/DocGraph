@@ -5,7 +5,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 
-from sqlalchemy import DateTime, ForeignKey, String, Text, func
+from sqlalchemy import DateTime, Float, ForeignKey, String, Text, func
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -47,6 +47,11 @@ class ReviewResult(Base):
     # 关联图谱实体（COMPARE_TO 的 source/target 节点名；旧逻辑/齐套性等可为 null）
     graph_source: Mapped[str | None] = mapped_column(String(255), nullable=True)
     graph_target: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    # ----- 批次 10 Phase C：结果来源与置信度（双引擎审查）-----
+    # 来源：graph（图谱确定性引擎）/ llm（LLM 语义审查）/ legacy（旧逻辑 fallback）；旧数据为 null
+    source: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    # LLM 语义审查的置信度 (0-1)；确定性结果与旧数据为 null
+    confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
     # ----- -----
     # 问题描述
     issue_desc: Mapped[str | None] = mapped_column(Text, nullable=True)
