@@ -87,8 +87,11 @@ def detect_conflicts_in_rules(rules: list[Rule]) -> list[dict]:
 
     # 构造 user prompt
     lines = "\n".join(f"{i}. \"{t}\"" for i, t in enumerate(rule_texts))
-    user_prompt = f"""文件类型：{rules[0].doc_type}
-检查项：{rules[0].check_category}
+    # 批次 10：标签可为空，展示时回退
+    doc_label = rules[0].doc_type or "整批/全部"
+    cat_label = rules[0].check_category or "未分类"
+    user_prompt = f"""文件类型：{doc_label}
+检查项：{cat_label}
 
 规则列表：
 {lines}
@@ -106,7 +109,7 @@ def detect_conflicts_in_rules(rules: list[Rule]) -> list[dict]:
             max_tokens=2048,
         )
     except (LLMError, ValueError, json.JSONDecodeError) as e:
-        logger.warning("冲突检测 LLM 解析失败 [%s/%s]: %s", rules[0].doc_type, rules[0].check_category, e)
+        logger.warning("冲突检测 LLM 解析失败 [%s/%s]: %s", doc_label, cat_label, e)
         return []
 
     raw_conflicts = resp.get("conflicts", [])

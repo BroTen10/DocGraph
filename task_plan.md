@@ -4,7 +4,7 @@
 把项目已识别的优化/开发任务整理为可执行清单，按批次逐步实施（图谱审查链路 → OCR 质量 → 规则管理 → LLM 健壮性 → 前端工程 → 收尾卫生），每批完成即验证、记录并汇报。
 
 ## Current Phase
-全部批次（0-9）完成；端到端验收通过（acceptance_run.py 全绿），待用户决策是否提交
+批次 0-9 完成；新增批次 10（泛化规则体系重构）：设计提案完成（docs/泛化规则体系重构设计.md），待用户确认后实施
 
 ## Phases
 
@@ -127,6 +127,38 @@
 - **Status:** complete
 
 **批次 9 验证**：py_compile 全部后端 app 文件通过；批次 9 测试 35 项全过（状态机流转/幂等/非法拒绝、严重度分级 11 类场景含偏离度、证据链规则→字段→文档、图谱/旧逻辑结果对象与序列化、合并摘要状态继承）；批次 8 核心行为回归 9 项全过；前端 tsc -b 通过。新增 PATCH /api/reviews/results/{id}/status 状态流转接口。DB 迁移（6 条 ALTER + 存量 pass 回填 closed）重启自动执行；前端已显示严重度/状态标签，状态流转 UI 按钮留待后续批次。
+
+### 批次 10：泛化规则体系重构（回归最初设计目标）
+> 来源：2026-08-02 用户反馈——当前版本强制"文件类型 × 检查项"必检格人工补齐，泛化能力被锁死；目标应为"任意人类语言规则列表 → LLM 语义拆分 → 图谱保存 → LLM+图谱双引擎审查"。
+> 设计文档：docs/泛化规则体系重构设计.md（已完成，未改代码）
+- [x] 10-1 Phase A：解除规则-格子强绑定
+  - rules 表 doc_type/check_category 改 nullable，新增 scope/intents/provenance（迁移幂等，已实测）
+  - LLM 导入 prompt v2（枚举降级为建议 + ontology 输出），校验放宽（rule_text 与 assertion 至少其一）
+  - 去重改语义级（规则集内按 structure+归一化文本），修复按格子分组导致的重复（实测二次导入 0 新增）
+  - 派生标签兜底：doc_type 从结构断言/scope 推导，check_category 取 intents[0]；rule_text 缺失时由断言生成
+  - 新类型注册修复：DocumentType 模型补齐 category/is_required（存量 schema 漂移导致注册一直静默失败），key_fields 由 ontology.fields 预填
+  - RulesPage 移除"必检"Alert 与红色必检格，矩阵投影化；编辑表单标签可空；空标签展示"整批/全部""未分类"
+- [x] 10-2 Phase B：本体涌现闭环
+  - constants.py 降级为种子/兜底；OCR 字段提取改 DocumentType.key_fields 优先（resolve_field_template，三处调用点接入）
+  - 文件分类器接入动态注册表（DocumentType name→is_required，active+pending_review），新类型无需改代码可识别
+  - 种子数据补齐 category/is_required 对齐（required/optional/supporting/extra/other）
+  - 新规则集零预设（前端创建时默认空，后端 schema 默认 list）
+- [x] 10-3 Phase C：双引擎审查
+  - 新增 llm_review_service：无 structure 定性规则批量审查 + 字符串相等失败语义复核（同义→pass/不同→保持fail/不确定→unverifiable）
+  - review_results 新增 source/confidence 列；图引擎结果标记 source=graph，LLM 结果 source=llm
+  - review pipeline 阶段 2.5 合并引擎 B（异常不影响确定性结果）；低置信护栏（fail≥0.8/pass≥0.6）
+  - suggestion_service 接入 LLM 生成建议（证据链上下文，失败回退模板）
+  - 前端结果页展示来源标签（图谱/LLM/旧逻辑）+ 置信度 tooltip
+- [x] 10-4 Phase D：图谱本体化
+  - 写图新增本体层：DocumentType（文件类型:X）/CheckIntent（检查意图:X）/Rule（规则:Rxxx）节点 + APPLIES_TO/CHECKS/INVOLVES/HAS_FIELD 边（与执行层同 graph_id，R 编号与执行层一致）
+  - 节点/边标注 layer（ontology/rule/execution）；DocumentType 节点属性带描述/字段/业务含义/印章/必备标记
+  - neo4j_client.get_ontology 本体查询接口；新增 GET /api/rules/graph/ontology
+  - GraphPage：图层过滤（全部/本体/规则/执行）+ 本体概览面板（文档类型含字段、检查意图含规则数、规则清单）；GraphView 本体节点配色 + display_name 显示
+- [x] 10-5 Phase E：回归验收
+  - 后端重启加载新代码；回归 acceptance_run.py：30/30 规则灌入、25 文件上传、图谱 125 节点/215 关系、审查 38 条（25 通过/6 不通过/7 无法核验），双引擎来源 graph=22/llm=16，状态闭环正确（pass→closed、fail/unverifiable→open）
+  - 新流程验收（acceptance_phase_e_new.py）：零预设规则集→任意规则文本导入 4/4→自动发现新类型（验收确认单 pending_review + key_fields 预填）→建图本体层（文件类型/检查意图/规则节点）→双引擎审查（graph+llm）→清理
+  - 修复验收暴露的问题：① schemas/rule.py 缺 `import uuid` 且缺 model_rebuild → 导入接口 500（pydantic 前向引用）；② RuleImportResponse 缺 new_doc_types 字段（前端读取不到）；③ 全局规则 scope=ALL 被推导为 doc_type="ALL" 并误注册新类型
+- **Status:** 批次 10 全部完成（10-1~10-5 全绿：回归验收 + 新流程验收通过，数据已清理）
 
 ## Key Questions
 1. ~~历史图谱清理策略~~ → 已答：构建前全清

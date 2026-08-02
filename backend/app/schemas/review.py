@@ -67,6 +67,9 @@ class ReviewResultItem(BaseModel):
     deviation: dict[str, Any] | None = None
     graph_source: str | None = None
     graph_target: str | None = None
+    # 批次 10 Phase C：结果来源（graph/llm/legacy）与置信度
+    source: str | None = None
+    confidence: float | None = None
     issue_desc: str | None = None
     detail: dict[str, Any] = Field(default_factory=dict)
     suggestion: str | None = None

@@ -23,6 +23,7 @@ from ..services import (
     rule_import_task,
 )
 from ..services.rule_import_task import ImportProgress
+from ..neo4j_client import get_neo4j_client
 
 router = APIRouter(prefix="/api/rules", tags=["graph"])
 
@@ -199,6 +200,12 @@ def get_latest_graph(
     if snap is None or not snap.graph_id:
         raise HTTPException(status_code=404, detail="暂无图谱，请先构建")
     return graph_builder_service.get_graph(None, snap.graph_id)
+
+
+@router.get("/graph/ontology")
+def get_graph_ontology(graph_id: str = Query(...)) -> dict:
+    """查询图谱本体层（批次 10 Phase D）：文档类型（含字段）、检查意图（含规则数）、规则清单。"""
+    return get_neo4j_client().get_ontology(graph_id)
 
 
 @router.get("/graph/{graph_id}", response_model=GraphData)

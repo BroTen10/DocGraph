@@ -1,10 +1,14 @@
 """规则批量导入服务：用 LLM 把自然语言规则清单解析为结构化规则并入库。
 
-流程：
+流程（批次 10 v2 契约）：
 1. 接收一段自然语言规则清单文本（可含多条规则）
-2. 调用 DeepSeek LLM 解析为 JSON 数组，每项含 doc_type / check_category / rule_text / tolerance / priority
-3. 校验 doc_type / check_category 在合法枚举内
-4. 批量写入 rules 表，返回导入结果
+2. 调用 LLM 解析为 rules + ontology：
+   - rules 每项含 rule_text / structure / scope（doc_types|ALL）/ intents / tolerance / priority / confidence；
+     doc_type / check_category 为可选派生标签（缺失时由结构断言/scope/intents 推导）
+   - ontology 登记新文件类型/字段/检查意图
+3. 校验放宽：rule_text 与 structure.assertion 至少其一存在
+4. 规则集内语义级去重（按文本相似度 + 结构化断言签名），合并后批量写入 rules 表
+5. 新文档类型注册为 pending_review（key_fields 由 ontology.fields 预填），返回导入结果
 """
 
 from __future__ import annotations
@@ -37,14 +41,15 @@ logger = logging.getLogger(__name__)
 
 
 # ============ LLM 提示词 ============
-_SYSTEM_PROMPT = """你是单证审查规则解析助手。任务：把用户提供的自然语言规则清单，解析为结构化的规则列表。
+_SYSTEM_PROMPT = """你是单证审查规则解析助手。任务：把用户提供的自然语言规则清单，解析为结构化的规则列表，并抽象出规则涉及的文件类型、字段与检查意图（本体）。
 
 输出契约（严格 JSON，不要输出任何其他内容）：
 {
   "rules": [
     {
-      "doc_type": "文件类型（必须是给定枚举之一）",
-      "check_category": "检查项（必须是给定枚举之一）",
+      "doc_type": "主文件类型（可选派生标签，见规则1）",
+      "check_category": "主检查项（可选派生标签，见规则2）",
+      "scope": {"doc_types": ["涉及的多个文件类型"] 或 "ALL"（整批合同/全部文件）或 null, "intents": ["检查意图列表"]},
       "rule_text": "规则文本（简洁、可执行的自然语言描述）",
       "structure": {
         "condition": {"text": "触发条件原文或null", "field": "条件涉及字段名或null", "operator": "等于/包含于等或null", "value": "条件取值或null"},
@@ -65,6 +70,11 @@ _SYSTEM_PROMPT = """你是单证审查规则解析助手。任务：把用户提
       "confidence": 0-1之间的浮点数，代表你对这条规则理解的确定程度
     }
   ],
+  "ontology": {
+    "doc_types": [{"name": "新文件类型名", "description": "简要说明", "aliases": ["别名"]}],
+    "fields": [{"name": "字段名", "doc_type": "所属文件类型", "unit": "单位或null", "currency": "币别或null"}],
+    "check_intents": [{"name": "新检查意图名", "description": "简要说明"}]
+  },
   "defects": [
     {
       "type": "缺陷类型",
@@ -76,17 +86,18 @@ _SYSTEM_PROMPT = """你是单证审查规则解析助手。任务：把用户提
 }
 
 规则：
-1. doc_type **优先**从下方文件类型枚举选择；若规则确实涉及该枚举未覆盖的新文件类型（如特定客户/业务的专用文件），可以提出合理的文件类型名称，保持简洁、无歧义
-2. check_category **优先**从下方检查项枚举选择；若确实需要新的检查类别（如"合规性""格式规范"），可以提出合理的新类别名
-3. rule_text 用简洁中文描述，如"报关单数量应不大于委托单数量"
-4. tolerance 只在规则涉及金额/重量/时间比对时填写，否则字段留 null
-5. priority 默认 100；齐套性规则建议 10，基础判断建议 20，信息准确性建议 30，时间逻辑建议 40
-6. 一条自然语言描述拆为一条规则；若用户文本含多条规则，全部解析
-6.1 structure 为可选字段：规则文本包含"如果/若/除非"等条件表述时填入 condition；规则涉及跨文件字段比对时填入 assertion（source/target 必须来自规则文本，不能臆造）；包含"除…外/例外"表述时填入 exceptions；无法结构化时整个 structure 置 null。若例外条款可归结为"某字段满足某条件即豁免"（如"金额小于5000元时除外"），请在 exceptions 中补充 field/operator/value，执行引擎可程序化豁免；纯文本例外（无法归因到字段）则只填 text
-7. 忽略与单证审查无关的内容
-8. confidence 反映你对这条规则确信程度：规则描述非常清楚、无歧义则接近 1.0；含模糊表述（如"部分情况""一般""可能"）则适当降低；完全不确定或不合理则为 0.0
-9. 为减少输出体积，值为 null 的字段省略不输出（客户端自动补全），confidence 字段值为 1.0 时同理省略；defects 无缺陷时整个数组省略
-10. 紧凑输出（防止长清单被 max_tokens 截断）：rules 数组按"每行一条规则"输出、逗号分隔，不输出多余空行、注释或解释文字；structure/tolerance 仅在有内容时输出
+1. doc_type 是**可选派生标签**：仅当规则明确指向单一文件类型、且该类型与下方"已知文件类型"一致时填写；跨文件比对、整批规则不填 doc_type，改用 scope.doc_types（列表）或 "ALL"。**不要为满足枚举而臆造文件类型**
+2. check_category 同样是**可选派生标签**：仅当规则核心意图能明确归入下方"已知检查项"时填写；否则不填，改在 scope.intents 中给出准确的检查意图名
+3. scope 每个规则都尽量给出（doc_types 列表 / "ALL" / null，intents 至少 1 个）；规则涉及未注册的新文件类型时，**以原文表述为准**提出简洁、无歧义的新类型名，并登记到 ontology.doc_types；新字段登记到 ontology.fields（附所属文件类型）；无法归入已知检查项的新意图登记到 ontology.check_intents
+4. rule_text 用简洁中文描述，如"报关单数量应不大于委托单数量"
+5. tolerance 只在规则涉及金额/重量/时间比对时填写，否则字段留 null
+6. priority 默认 100；齐套性规则建议 10，基础判断建议 20，信息准确性建议 30，时间逻辑建议 40
+7. 一条自然语言描述拆为一条规则；若用户文本含多条规则，全部解析
+7.1 structure 为可选字段：规则文本包含"如果/若/除非"等条件表述时填入 condition；规则涉及跨文件字段比对时填入 assertion（source/target 必须来自规则文本，不能臆造）；包含"除…外/例外"表述时填入 exceptions；无法结构化时整个 structure 置 null。若例外条款可归结为"某字段满足某条件即豁免"（如"金额小于5000元时除外"），请在 exceptions 中补充 field/operator/value，执行引擎可程序化豁免；纯文本例外（无法归因到字段）则只填 text
+8. 忽略与单证审查无关的内容
+9. confidence 反映你对这条规则确信程度：规则描述非常清楚、无歧义则接近 1.0；含模糊表述（如"部分情况""一般""可能"）则适当降低；完全不确定或不合理则为 0.0
+10. 为减少输出体积，值为 null 的字段省略不输出（客户端自动补全），confidence 字段值为 1.0 时同理省略；defects 无缺陷时整个数组省略；ontology 无新概念时省略
+11. 紧凑输出（防止长清单被 max_tokens 截断）：rules 数组按"每行一条规则"输出、逗号分隔，不输出多余空行、注释或解释文字；structure/tolerance 仅在有内容时输出
 
 ### 缺陷检测指令
 对每条被解析的规则，执行以下检查，将结果填入 `defects` 数组：
@@ -109,9 +120,9 @@ severity 说明：
 - warning：可能存在问题的规则，建议用户检查
 - info：仅供参考，不影响规则执行"""
 
-_USER_PROMPT_TEMPLATE = """可用文件类型枚举：{doc_types}
+_USER_PROMPT_TEMPLATE = """已知文件类型（建议复用，不强制；规则出现新类型时以原文为准并提出新名称）：{doc_types}
 
-可用检查项枚举：{check_categories}
+已知检查项（建议复用，不强制；规则出现新意图时以原文为准并提出新名称）：{check_categories}
 
 请解析以下规则清单：
 
@@ -210,19 +221,133 @@ def _text_similarity(a: str, b: str) -> float:
     return len(set_a & set_b) / len(set_a | set_b)
 
 
+def _structure_signature(structure: dict | None) -> tuple | None:
+    """提取结构化断言的特征签名（operator + source/target 的 doc_type/field）。
+    用于跨标签识别同一条规则（批次 10：语义级去重）。"""
+    if not structure:
+        return None
+    assertion = structure.get("assertion") or {}
+    if not assertion:
+        return None
+    src = assertion.get("source") or {}
+    tgt = assertion.get("target") or {}
+    sig = (
+        str(assertion.get("operator") or "").strip(),
+        str(src.get("doc_type") or "").strip(),
+        str(src.get("field") or "").strip(),
+        str(tgt.get("doc_type") or "").strip(),
+        str(tgt.get("field") or "").strip(),
+    )
+    return sig if any(sig) else None
+
+
 def _find_similar_rule(
     new_text: str,
     new_normed: str,
     existing_rules: list,
     threshold: float = 0.75,
+    new_structure: dict | None = None,
 ):
-    """在已有规则列表中查找与新规则高度相似的规则。返回第一个相似度 >= threshold 的规则或 None。"""
+    """在规则集内查找与新规则高度相似的规则（批次 10：不再按格子分组）。
+    匹配策略：
+    1. 文本相似度 >= threshold 直接命中；
+    2. 结构化断言签名一致（operator + 源/目标类型与字段）且文本相似度 >= 0.6 也命中。
+    """
+    new_sig = _structure_signature(new_structure)
     for rule in existing_rules:
         existing_normed = _normalize_text(rule.rule_text)
         sim = _text_similarity(new_normed, existing_normed)
         if sim >= threshold:
             return rule
+        if new_sig:
+            old_sig = _structure_signature(rule.structure)
+            if old_sig and old_sig == new_sig and sim >= 0.6:
+                return rule
     return None
+
+
+def _normalize_scope(raw) -> dict | None:
+    """归一化 LLM 输出的 scope 字段为 {"doc_types": [...] | "ALL"} 与 {"intents": [...]}。"""
+    if raw is None:
+        return None
+    if isinstance(raw, str):
+        s = raw.strip()
+        if not s:
+            return None
+        if s.upper() in ("ALL", "整批", "全部"):
+            return {"doc_types": "ALL"}
+        return {"doc_types": [s]}
+    if isinstance(raw, dict):
+        out: dict = {}
+        dt = raw.get("doc_types")
+        if isinstance(dt, list):
+            raw_names = [str(x).strip() for x in dt if x is not None and str(x).strip()]
+            non_all = [n for n in raw_names if n.upper() not in ("ALL", "整批", "全部")]
+            if not non_all and raw_names:
+                out["doc_types"] = "ALL"  # 整个列表都是全局语义
+            elif non_all:
+                out["doc_types"] = sorted(set(non_all))
+        elif isinstance(dt, str) and dt.strip().upper() in ("ALL", "整批", "全部"):
+            out["doc_types"] = "ALL"
+        its = raw.get("intents")
+        if isinstance(its, list):
+            ints = sorted({str(x).strip() for x in its if x is not None and str(x).strip()})
+            if ints:
+                out["intents"] = ints
+        return out or None
+    return None
+
+
+def _extract_intents(item: dict, scope: dict | None) -> list[str]:
+    """提取检查意图标签：scope.intents + item.intents + check_category（去重保序）。"""
+    intents: list[str] = []
+    scope_intents = (scope or {}).get("intents")
+    if isinstance(scope_intents, list):
+        intents.extend(scope_intents)
+    item_intents = item.get("intents")
+    if isinstance(item_intents, list):
+        for x in item_intents:
+            s = str(x).strip() if x is not None else ""
+            if s and s not in intents:
+                intents.append(s)
+    item_cat = str(item.get("check_category") or "").strip()
+    if item_cat and item_cat not in intents:
+        intents.insert(0, item_cat)
+    return intents
+
+
+def _derive_doc_type(structure: dict | None, scope: dict | None) -> str:
+    """doc_type 缺失时从结构化断言 source 或 scope.doc_types 推导（派生标签兜底）。"""
+    if structure and structure.get("assertion"):
+        src = structure["assertion"].get("source") or {}
+        sdt = str(src.get("doc_type") or "").strip()
+        if sdt:
+            return sdt
+    scope_dt = (scope or {}).get("doc_types")
+    if isinstance(scope_dt, list) and scope_dt:
+        return "" if scope_dt[0].upper() in ("ALL", "整批", "全部") else scope_dt[0]
+    if isinstance(scope_dt, str):
+        return "" if scope_dt.upper() in ("ALL", "整批", "全部") else scope_dt
+    return ""
+
+
+def _merge_ontology(target: dict, source: dict) -> None:
+    """合并各分段的 ontology（doc_types/fields/check_intents 按关键字段去重）。"""
+    if not isinstance(source, dict):
+        return
+    for key, merge_key in (("doc_types", "name"), ("fields", "name"), ("check_intents", "name")):
+        items = source.get(key)
+        if not isinstance(items, list):
+            continue
+        seen = {str(x.get(merge_key)) for x in target.setdefault(key, []) if isinstance(x, dict)}
+        for x in items:
+            if not isinstance(x, dict):
+                continue
+            k = str(x.get(merge_key) or "").strip()
+            if not k or k in seen:
+                continue
+            seen.add(k)
+            target[key].append(x)
 
 
 def _merge_into_existing(
@@ -233,6 +358,10 @@ def _merge_into_existing(
     new_tolerance: dict,
     new_priority: int,
     new_defects: list[dict],
+    new_scope: dict | None = None,
+    new_intents: list[str] | None = None,
+    new_doc_type: str | None = None,
+    new_check_category: str | None = None,
 ) -> int:
     """将新规则合并到已有规则中。返回合并的字段数。
 
@@ -242,8 +371,51 @@ def _merge_into_existing(
     - defects: 去重合并（按 type + description 去重）
     - rule_text: 保留更长的（通常更完整）
     - priority: 保留较小的（更优先）
+    - scope/intents: 并集合并
+    - doc_type/check_category: 旧值为空时补全（批次 10）
     """
     changes = 0
+
+    # 标签补全：旧值为空时用新值
+    if new_doc_type and not existing_rule.doc_type:
+        existing_rule.doc_type = new_doc_type
+        changes += 1
+    if new_check_category and not existing_rule.check_category:
+        existing_rule.check_category = new_check_category
+        changes += 1
+
+    # scope 合并（doc_types 并集 / ALL 优先；intents 并集）
+    if new_scope:
+        old_scope = dict(existing_rule.scope or {})
+        merged_scope = dict(old_scope)
+        new_dt = new_scope.get("doc_types")
+        old_dt = old_scope.get("doc_types")
+        if new_dt == "ALL":
+            merged_scope["doc_types"] = "ALL"
+        elif isinstance(new_dt, list):
+            old_names = old_dt if isinstance(old_dt, list) else []
+            merged_names = sorted(set(old_names) | set(new_dt))
+            if merged_names:
+                merged_scope["doc_types"] = merged_names
+        merged_ints = sorted(
+            set(old_scope.get("intents") or []) | set(new_scope.get("intents") or [])
+        )
+        if merged_ints:
+            merged_scope["intents"] = merged_ints
+        if merged_scope != old_scope:
+            existing_rule.scope = merged_scope
+            changes += 1
+
+    # intents 合并（去重保序）
+    if new_intents:
+        old_ints = list(existing_rule.intents or [])
+        merged_ints = list(old_ints)
+        for x in new_intents:
+            if x and x not in merged_ints:
+                merged_ints.append(x)
+        if merged_ints != old_ints:
+            existing_rule.intents = merged_ints
+            changes += 1
 
     # confidence: 取较高值
     if new_confidence is not None:
@@ -334,6 +506,8 @@ def import_rules_from_text(
     raw_rules: list[dict] = []
     all_defects: list[dict] = []  # 收集所有段的 defects
     chunk_errors: list[str] = []
+    rule_chunks: list[int] = []  # 每条 raw_rule 所属分段（用于 provenance）
+    ontology: dict[str, list] = {"doc_types": [], "fields": [], "check_intents": []}
     for idx, chunk in enumerate(chunks, start=1):
         user_prompt = _USER_PROMPT_TEMPLATE.format(
             doc_types=doc_types_str,
@@ -382,7 +556,14 @@ def import_rules_from_text(
         rules = resp.get("rules", [])
         if isinstance(rules, list):
             offset = len(raw_rules)
-            raw_rules.extend(r for r in rules if isinstance(r, dict))
+            for r in rules:
+                if isinstance(r, dict):
+                    raw_rules.append(r)
+                    rule_chunks.append(idx)
+            # 收集 ontology（新文件类型/字段/检查意图）
+            ont = resp.get("ontology")
+            if isinstance(ont, dict):
+                _merge_ontology(ontology, ont)
             # 提取 defects，修正 rule_index 为全局索引
             defects = resp.get("defects", [])
             if isinstance(defects, list):
@@ -428,21 +609,57 @@ def import_rules_from_text(
         if not isinstance(item, dict):
             errors.append(f"第 {i} 条：非合法对象，跳过")
             continue
-        doc_type = str(item.get("doc_type", "")).strip()
-        check_category = str(item.get("check_category", "")).strip()
+        # ----- 0. 派生标签与规则自描述（批次 10）-----
+        # doc_type / check_category 均为可选派生标签；scope/intents 承载真正的适用范围
+        doc_type_raw = item.get("doc_type")
+        doc_type = str(doc_type_raw).strip() if doc_type_raw is not None else ""
+        check_category_raw = item.get("check_category")
+        check_category = str(check_category_raw).strip() if check_category_raw is not None else ""
         rule_text = str(item.get("rule_text", "")).strip()
-        # 不再做硬枚举校验，仅检查非空；同时收集新类型
+
+        # 结构化审查意图（批次 7）：LLM 可选输出，清洗为 dict 或 None
+        structure: dict[str, Any] | None = None
+        structure_raw = item.get("structure")
+        if isinstance(structure_raw, dict) and structure_raw.get("assertion"):
+            structure = {
+                "condition": structure_raw.get("condition") or None,
+                "assertion": structure_raw.get("assertion"),
+                "exceptions": structure_raw.get("exceptions") or [],
+            }
+
+        # 规则自描述：scope + intents（批次 10）
+        scope = _normalize_scope(item.get("scope"))
+        intents = _extract_intents(item, scope)
+
+        # 校验放宽（批次 10）：不再强制 doc_type/check_category，只要求有可执行内容
+        if not rule_text and not (structure and structure.get("assertion")):
+            errors.append(f"第 {i} 条：规则文本与结构化断言均为空，跳过")
+            continue
+        # rule_text 缺失时用结构化断言生成可读文本（RuleCreate.rule_text 必填）
+        if not rule_text and structure and structure.get("assertion"):
+            a = structure["assertion"]
+            src = a.get("source") or {}
+            tgt = a.get("target") or {}
+            rule_text = (
+                f"{src.get('doc_type') or ''}.{src.get('field') or ''} "
+                f"{a.get('operator') or '等于'} "
+                f"{tgt.get('doc_type') or ''}.{tgt.get('field') or ''}"
+            ).strip()
+
+        # 派生标签兜底：doc_type 缺失时从结构化断言/scope 推导；check_category 缺失时取首个意图
         if not doc_type:
-            errors.append(f"第 {i} 条：文件类型为空，跳过")
-            continue
-        if not check_category:
-            errors.append(f"第 {i} 条：检查项为空，跳过")
-            continue
-        if not rule_text:
-            errors.append(f"第 {i} 条：规则文本为空，跳过")
-            continue
-        new_doc_types.add(doc_type)
-        new_check_categories.add(check_category)
+            doc_type = _derive_doc_type(structure, scope)
+        if not check_category and intents:
+            check_category = intents[0]
+
+        # 收集新发现的类型/意图（含 scope 声明；ontology 声明在循环后并入）
+        if doc_type:
+            new_doc_types.add(doc_type)
+        if check_category:
+            new_check_categories.add(check_category)
+        scope_dt = (scope or {}).get("doc_types")
+        if isinstance(scope_dt, list):
+            new_doc_types.update(x for x in scope_dt if x)
 
         # ----- 1. 先提取元数据（包容差/置信度/缺陷）---------
         tol_raw = item.get("tolerance") or {}
@@ -469,16 +686,6 @@ def import_rules_from_text(
         except (TypeError, ValueError):
             confidence = None
 
-        # 结构化审查意图（批次 7）：LLM 可选输出，清洗为 dict 或 None
-        structure_raw = item.get("structure")
-        structure: dict[str, Any] | None = None
-        if isinstance(structure_raw, dict) and structure_raw.get("assertion"):
-            structure = {
-                "condition": structure_raw.get("condition") or None,
-                "assertion": structure_raw.get("assertion"),
-                "exceptions": structure_raw.get("exceptions") or [],
-            }
-
         # 关联该规则的 defects（rule_index 从 0 开始）
         rule_defects = defects_by_rule.get(i - 1, [])
         clean_defects = []
@@ -489,21 +696,28 @@ def import_rules_from_text(
                 "description": d.get("description", ""),
             })
 
-        # ----- 2. 同规则集去重+智能合并 -----
+        # 来源追溯（批次 10）
+        provenance: dict[str, Any] | None = {
+            "chunk_index": rule_chunks[i - 1] if i - 1 < len(rule_chunks) else None,
+            "text": rule_text[:200],
+        }
+
+        # ----- 2. 规则集内语义去重+智能合并（批次 10：不再按 (doc_type, check_category) 格子分组）-----
         normed = _normalize_text(rule_text)
         existing_rules = db.execute(
-            select(Rule).where(
-                Rule.rule_set_id == rule_set_id,
-                Rule.doc_type == doc_type,
-                Rule.check_category == check_category,
-            )
+            select(Rule).where(Rule.rule_set_id == rule_set_id)
         ).scalars().all()
-        dup_rule = _find_similar_rule(rule_text, normed, existing_rules)
+        dup_rule = _find_similar_rule(rule_text, normed, existing_rules, new_structure=structure)
         if dup_rule:
-            merged_count = _merge_into_existing(db, dup_rule, rule_text, confidence, tolerance, priority, clean_defects)
-            logger.info("同集合并: [%s/%s] %s... -> %s (合并数=%d)",
-                        doc_type, check_category, rule_text[:40], dup_rule.id, merged_count)
-            skipped_detail = f"第 {i} 条：与已有规则 [{doc_type}/{check_category}] 相似，已自动合并（{rule_text[:30]}...）"
+            merged_count = _merge_into_existing(
+                db, dup_rule, rule_text, confidence, tolerance, priority, clean_defects,
+                new_scope=scope, new_intents=intents,
+                new_doc_type=doc_type or None, new_check_category=check_category or None,
+            )
+            label = f"{doc_type or '整批/全部'}/{check_category or '未分类'}"
+            logger.info("同集合并: [%s] %s... -> %s (合并数=%d)",
+                        label, rule_text[:40], dup_rule.id, merged_count)
+            skipped_detail = f"第 {i} 条：与已有规则 [{label}] 相似，已自动合并（{rule_text[:30]}...）"
             errors.append(skipped_detail)
             continue
 
@@ -523,11 +737,14 @@ def import_rules_from_text(
 
         try:
             payload = RuleCreate(
-                doc_type=doc_type,
-                check_category=check_category,
+                doc_type=doc_type or None,
+                check_category=check_category or None,
                 rule_text=rule_text,
                 tolerance=tolerance,
                 structure=structure,
+                scope=scope,
+                intents=intents,
+                provenance=provenance,
                 enabled=enabled,
                 priority=priority,
                 confidence=confidence,
@@ -545,6 +762,14 @@ def import_rules_from_text(
                 update_task(progress, import_errors=len(errors))
 
     errors.extend(chunk_errors)
+
+    # 将 LLM ontology 声明的新文件类型/检查意图并入发现集合（批次 10）
+    for x in ontology.get("doc_types") or []:
+        if isinstance(x, dict) and str(x.get("name") or "").strip():
+            new_doc_types.add(str(x["name"]).strip())
+    for x in ontology.get("check_intents") or []:
+        if isinstance(x, dict) and str(x.get("name") or "").strip():
+            new_check_categories.add(str(x["name"]).strip())
 
     # 更新 rule_set.doc_types / check_categories，合并新发现的类型
     if imported:
@@ -565,6 +790,16 @@ def import_rules_from_text(
                     )
         except Exception:
             logger.warning("更新规则集类型失败（不影响已入库规则）", exc_info=True)
+
+    # 从 ontology.fields 建立 类型→字段 映射，用于预填新类型的 key_fields（批次 10）
+    field_map: dict[str, list[str]] = {}
+    for f in ontology.get("fields") or []:
+        if not isinstance(f, dict):
+            continue
+        fdt = str(f.get("doc_type") or "").strip()
+        fname = str(f.get("name") or "").strip()
+        if fdt and fname and fname not in field_map.setdefault(fdt, []):
+            field_map[fdt].append(fname)
 
     # 检测新文档类型：将不在document_types表中的类型注册为pending_review
     new_doc_type_names = set()
@@ -588,14 +823,22 @@ def import_rules_from_text(
                     )
                 ).scalars().first()
                 if pending:
+                    # 已有 pending 记录：合并补充 key_fields（避免重复创建）
+                    new_fields = field_map.get(name) or []
+                    if new_fields:
+                        cur = list(pending.key_fields or [])
+                        merged = cur + [x for x in new_fields if x not in cur]
+                        if merged != cur:
+                            pending.key_fields = merged
+                            db.commit()
                     new_doc_type_names.add(name)
                     continue
                 # 创建新类型
                 dt = DocumentType(
                     name=name,
-                    category="other",
                     source="rule_import",
                     status="pending_review",
+                    key_fields=field_map.get(name, []),
                 )
                 db.add(dt)
                 db.commit()

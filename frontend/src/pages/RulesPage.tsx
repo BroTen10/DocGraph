@@ -18,6 +18,9 @@ const { Text } = Typography
 const { Dragger } = Upload
 // 后端单源化 — fallback（后端返回前兜底）
 const FALLBACK_CHECK_CATEGORIES = ['齐套性', '基础判断', '信息准确性', '时间逻辑']
+// 批次 10：规则标签可为空，矩阵展示时归入"整批/全部"行与"未分类"列
+const GLOBAL_DOC_TYPE = '整批/全部'
+const UNCATEGORIZED = '未分类'
 
 /** 冲突检测结果分组 */
 type ConflictGroup = {
@@ -190,9 +193,11 @@ export default function RulesPage() {
   const matrix = useMemo(() => {
     const m: Record<string, Record<string, Rule[]>> = {}
     rules.forEach((r) => {
-      if (!m[r.doc_type]) m[r.doc_type] = {}
-      if (!m[r.doc_type][r.check_category]) m[r.doc_type][r.check_category] = []
-      m[r.doc_type][r.check_category].push(r)
+      const dt = r.doc_type || GLOBAL_DOC_TYPE
+      const cc = r.check_category || UNCATEGORIZED
+      if (!m[dt]) m[dt] = {}
+      if (!m[dt][cc]) m[dt][cc] = []
+      m[dt][cc].push(r)
     })
     return m
   }, [rules])
@@ -203,7 +208,7 @@ export default function RulesPage() {
   const effectiveDocTypes = useMemo(() => {
     const seed: string[] = docTypes.map((d) => d.name)
     const fromSet: string[] = ruleSet?.doc_types || []
-    const fromRules: string[] = [...new Set(rules.map((r) => r.doc_type))]
+    const fromRules: string[] = [...new Set(rules.map((r) => r.doc_type || GLOBAL_DOC_TYPE))]
     const merged = [...new Set([...seed, ...fromSet, ...fromRules])]
     // 排序：已声明的种子靠前（保持 seed 相对顺序），新增的放后面
     const seedOrder = new Map(seed.map((n, i) => [n, i]))
@@ -218,25 +223,9 @@ export default function RulesPage() {
   const effectiveCheckCategories = useMemo(() => {
     const seed: string[] = [...(checkCategories.length > 0 ? checkCategories : FALLBACK_CHECK_CATEGORIES)]
     const fromSet: string[] = ruleSet?.check_categories || []
-    const fromRules: string[] = [...new Set(rules.map((r) => r.check_category))]
+    const fromRules: string[] = [...new Set(rules.map((r) => r.check_category || UNCATEGORIZED))]
     return [...new Set([...seed, ...fromSet, ...fromRules])]
   }, [ruleSet, rules])
-
-  // 批次 3-3：必备文档 × 检查项 无已确认启用规则的空格（齐套性报警）
-  const essentialMissingCells = useMemo(() => {
-    const cells: Array<{ doc_type: string; check_category: string }> = []
-    effectiveDocTypes.forEach((dt) => {
-      const isRequired = (matrix[dt]?.[completenessCategory] || []).some(
-        (r) => r.enabled && r.status === 'confirmed'
-      )
-      if (!isRequired) return
-      effectiveCheckCategories.forEach((cc) => {
-        const confirmed = (matrix[dt]?.[cc] || []).filter((r) => r.enabled && r.status === 'confirmed')
-        if (confirmed.length === 0) cells.push({ doc_type: dt, check_category: cc })
-      })
-    })
-    return cells
-  }, [matrix, effectiveDocTypes, effectiveCheckCategories, completenessCategory])
 
   // 计算缺陷统计
   const defectSummary = useMemo(() => {
@@ -360,8 +349,8 @@ export default function RulesPage() {
       if (values.allow_same_day != null) tolerance.allow_same_day = values.allow_same_day
 
       const payload = {
-        doc_type: values.doc_type,
-        check_category: values.check_category,
+        doc_type: values.doc_type ?? null,
+        check_category: values.check_category ?? null,
         rule_text: values.rule_text,
         tolerance,
         enabled: values.enabled,
@@ -701,19 +690,17 @@ export default function RulesPage() {
                 const confirmedRules = cellRules.filter((r) => r.enabled && r.status === 'confirmed')
                 const confirmedCount = confirmedRules.length
                 const totalCount = cellRules.length
-                const isEssentialMissing = isRequired && confirmedCount === 0
-                const cellBg: string | undefined = isEssentialMissing ? '#fff1f0' : undefined
                 return (
                   <td
                     key={cc}
-                    style={{ ...checkTdStyle, background: cellBg }}
+                    style={checkTdStyle}
                     onClick={totalCount === 0 ? () => openCreateWithDefaults(dt, cc) : undefined}
                   >
                     {totalCount === 0 ? (
                       <a
-                        style={{ fontSize: 11, color: isEssentialMissing ? '#ff4d4f' : '#1890ff' }}
+                        style={{ fontSize: 11, color: '#1890ff' }}
                       >
-                        + {isEssentialMissing ? '必检' : '添加'}
+                        + 添加
                       </a>
                     ) : totalCount === 1 && confirmedCount === 1 ? (
                       <Tooltip title={cellRules[0].rule_text}>
@@ -786,7 +773,7 @@ export default function RulesPage() {
 
   // 批次 5-6：错误/警告 Tab 共用缺陷表格渲染（消除重复）
   const renderDefectTable = (severity: 'error' | 'warning', rowPrefix: string) => {
-    const entries: Array<{ ruleId: string; docType: string; checkCategory: string; ruleText: string; type: string; description: string }> = []
+    const entries: Array<{ ruleId: string; docType: string | null; checkCategory: string | null; ruleText: string; type: string; description: string }> = []
     rules.forEach((r) => {
       ;(r.defects || []).filter((d) => d.severity === severity).forEach((d) => {
         entries.push({
@@ -835,8 +822,14 @@ export default function RulesPage() {
   const fileNameStyle: React.CSSProperties = { display: 'inline-block', maxWidth: 132, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontWeight: 600, fontSize: 12, verticalAlign: 'middle' }
 
   const ruleColumns = [
-    { title: '文件类型', dataIndex: 'doc_type', key: 'doc_type', width: 140 },
-    { title: '检查项', dataIndex: 'check_category', key: 'check_category', width: 120 },
+    {
+      title: '文件类型', dataIndex: 'doc_type', key: 'doc_type', width: 140,
+      render: (v: string | null) => v || <Text type="secondary">整批/全部</Text>,
+    },
+    {
+      title: '检查项', dataIndex: 'check_category', key: 'check_category', width: 120,
+      render: (v: string | null) => v || <Text type="secondary">未分类</Text>,
+    },
     { title: '规则文本', dataIndex: 'rule_text', key: 'rule_text', ellipsis: true },
     {
       title: '置信度', key: 'confidence', width: 90,
@@ -982,22 +975,6 @@ export default function RulesPage() {
         message="规则编辑完成后，请前往「知识图谱」页构建并确认图谱"
         description="本页不再内置「构建图谱」入口，构建动作统一由知识图谱页发起，以保证图谱数据与确认流程的唯一归属。"
       />
-
-      {essentialMissingCells.length > 0 && (
-        <Alert
-          type="warning"
-          showIcon
-          style={{ marginBottom: 16 }}
-          message={`${essentialMissingCells.length} 个必备检查格未配置已确认规则`}
-          description={
-            essentialMissingCells
-              .slice(0, 8)
-              .map((c) => `${c.doc_type} × ${c.check_category}`)
-              .join('、') +
-            (essentialMissingCells.length > 8 ? ` 等 ${essentialMissingCells.length} 项，请点击红色「必检」格补充规则` : '，请点击红色「必检」格补充规则')
-          }
-        />
-      )}
 
       <Tabs
         defaultActiveKey="matrix"
@@ -1189,13 +1166,21 @@ export default function RulesPage() {
         <Form form={form} layout="vertical">
           <Row gutter={16}>
             <Col span={12}>
-              <Form.Item name="doc_type" label="文件类型" rules={[{ required: true }]}>
-                <Select options={docTypes.map((d) => ({ value: d.name, label: d.name }))} />
+              <Form.Item name="doc_type" label="文件类型" tooltip="可选：仅规则明确指向单一文件类型时填写；跨文件/整批规则留空">
+                <Select
+                  allowClear
+                  placeholder="不填则视为整批/全部"
+                  options={docTypes.map((d) => ({ value: d.name, label: d.name }))}
+                />
               </Form.Item>
             </Col>
             <Col span={12}>
-              <Form.Item name="check_category" label="检查项" rules={[{ required: true }]}>
-                <Select options={(checkCategories.length > 0 ? checkCategories : FALLBACK_CHECK_CATEGORIES).map((c) => ({ value: c, label: c }))} />
+              <Form.Item name="check_category" label="检查项" tooltip="可选：规则核心意图无法归入已知检查项时留空，解析时自动发现新意图">
+                <Select
+                  allowClear
+                  placeholder="不填则视为未分类"
+                  options={(checkCategories.length > 0 ? checkCategories : FALLBACK_CHECK_CATEGORIES).map((c) => ({ value: c, label: c }))}
+                />
               </Form.Item>
             </Col>
           </Row>
@@ -1278,8 +1263,8 @@ export default function RulesPage() {
                     message="粘贴自然语言规则清单，系统会调用大模型解析为结构化规则并自动入库"
                     description={
                       <span style={{ fontSize: 12 }}>
-                        可用文件类型：{docTypes.map((d) => d.name).join('、')}<br />
-                        可用检查项：{(checkCategories.length > 0 ? checkCategories : FALLBACK_CHECK_CATEGORIES).join('、')}
+                        已知文件类型（建议复用，新类型由解析自动发现并登记）：{docTypes.map((d) => d.name).join('、')}<br />
+                        已知检查项（建议复用，新意图由解析自动发现）：{(checkCategories.length > 0 ? checkCategories : FALLBACK_CHECK_CATEGORIES).join('、')}
                       </span>
                     }
                   />
@@ -1376,7 +1361,7 @@ export default function RulesPage() {
                     description={
                       <span style={{ fontSize: 12 }}>
                         支持格式：PDF、Excel(.xlsx/.xls)、Word(.docx)、Markdown(.md)、文本(.txt)<br />
-                        可用文件类型：{docTypes.map((d) => d.name).join('、')} · 可用检查项：{(checkCategories.length > 0 ? checkCategories : FALLBACK_CHECK_CATEGORIES).join('、')}
+                        已知文件类型（建议复用，新类型由解析自动发现并登记）：{docTypes.map((d) => d.name).join('、')} · 已知检查项（建议复用，新意图由解析自动发现）：{(checkCategories.length > 0 ? checkCategories : FALLBACK_CHECK_CATEGORIES).join('、')}
                       </span>
                     }
                   />
@@ -1519,7 +1504,7 @@ export default function RulesPage() {
                     ]}
                   >
                     <List.Item.Meta
-                      title={<Tag color="blue">{r.doc_type} / {r.check_category}</Tag>}
+                      title={<Tag color="blue">{r.doc_type || GLOBAL_DOC_TYPE} / {r.check_category || UNCATEGORIZED}</Tag>}
                       description={<Text style={{ fontSize: 12 }}>{r.rule_text}</Text>}
                     />
                   </List.Item>

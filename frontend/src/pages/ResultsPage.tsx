@@ -196,6 +196,21 @@ export default function ResultsPage() {
   const severityTag = (s?: string | null) =>
     s && SEVERITY_COLOR[s] ? <Tag color={SEVERITY_COLOR[s]}>{SEVERITY_LABEL[s]}</Tag> : null
 
+  // 批次 10 Phase C：结果来源标签（图谱确定性引擎 / LLM 语义审查 / 旧逻辑）
+  const sourceTag = (s?: string | null, confidence?: number | null) => {
+    if (!s) return null
+    const label: Record<string, string> = { graph: '图谱', llm: 'LLM', legacy: '旧逻辑' }
+    const color: Record<string, string> = { graph: 'blue', llm: 'purple', legacy: 'default' }
+    const tip = confidence != null ? `置信度 ${Math.round(confidence * 100)}%` : label[s] || s
+    return (
+      <Tooltip title={tip}>
+        <Tag color={color[s] || 'default'} style={{ fontSize: 10 }}>
+          {label[s] || s}
+        </Tag>
+      </Tooltip>
+    )
+  }
+
   // 批次 9：问题状态标签（open/confirmed/fixed/closed）
   const statusLabel: Record<string, string> = {
     open: '打开', confirmed: '已确认', fixed: '已修复', closed: '已关闭',
@@ -212,6 +227,7 @@ export default function ResultsPage() {
         <Space size={4} wrap>
           {resultTag(record.result)}
           {severityTag(record.severity)}
+          {sourceTag(record.source, record.confidence)}
         </Space>
       ),
       filters: [
@@ -340,7 +356,15 @@ export default function ResultsPage() {
   // 批次 5-12：按文档维度表格列定义 memo（避免 render 内重建）
   const docColumns = useMemo<ColumnsType<ReviewResultItem>>(
     () => [
-      { title: '结果', dataIndex: 'result', key: 'result', width: 80, render: (v: string) => resultTag(v) },
+      {
+        title: '结果', dataIndex: 'result', key: 'result', width: 120,
+        render: (v: string, record: ReviewResultItem) => (
+          <Space size={4} wrap>
+            {resultTag(v)}
+            {sourceTag(record.source, record.confidence)}
+          </Space>
+        ),
+      },
       { title: '检查项', dataIndex: 'check_category', key: 'check_category', width: 90 },
       {
         title: '问题描述', dataIndex: 'issue_desc', key: 'issue_desc', width: 220,
@@ -404,6 +428,7 @@ export default function ResultsPage() {
           <Space>
             {resultTag(item.result)}
             {severityTag(item.severity)}
+            {sourceTag(item.source, item.confidence)}
             {item.status && statusLabel[item.status] ? (
               <Tag>{statusLabel[item.status]}</Tag>
             ) : null}

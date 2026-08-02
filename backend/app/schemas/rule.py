@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import uuid
 from datetime import datetime
 from typing import Any
 from uuid import UUID
@@ -19,8 +20,9 @@ class DefectItem(BaseModel):
 
 
 class RuleBase(BaseModel):
-    doc_type: str
-    check_category: str
+    # 批次 10 起为可选派生标签：明确指向单一文件类型/检查项时填写，跨文件或整批规则可为空
+    doc_type: str | None = None
+    check_category: str | None = None
     rule_text: str
     tolerance: dict[str, Any] = Field(default_factory=dict)
     enabled: bool = True
@@ -34,6 +36,13 @@ class RuleBase(BaseModel):
     # 结构化审查意图（可选）：{"condition": {...}, "assertion": {...}, "exceptions": [...]}
     # 为 null 表示未结构化（旧规则）
     structure: dict[str, Any] | None = None
+    # 批次 10：规则自描述
+    # 适用范围：{"doc_types": [...]} 或 "ALL" 或 None
+    scope: dict[str, Any] | None = None
+    # 检查意图标签（派生，可多条）
+    intents: list[str] = Field(default_factory=list)
+    # 来源追溯
+    provenance: dict[str, Any] | None = None
 
 
 class RuleCreate(RuleBase):
@@ -51,6 +60,9 @@ class RuleUpdate(BaseModel):
     status: str | None = None
     defects: list[DefectItem] | None = None
     structure: dict[str, Any] | None = None
+    scope: dict[str, Any] | None = None
+    intents: list[str] | None = None
+    provenance: dict[str, Any] | None = None
 
 
 class RuleImportRequest(BaseModel):
@@ -74,6 +86,8 @@ class RuleImportResponse(BaseModel):
     rules: list[dict[str, Any]] = Field(default_factory=list)
     errors: list[str] = Field(default_factory=list)
     conflict_report: ConflictReport | None = None
+    # 批次 10：本次导入新发现的文件类型（前端据此提示用户做样本分析）
+    new_doc_types: list[str] = Field(default_factory=list)
 
 
 class RuleOut(RuleBase):
@@ -88,6 +102,12 @@ class RuleOut(RuleBase):
     confirmed_by: str | None = None
     updated_at: datetime
     created_at: datetime
+
+
+# pydantic v2 + `from __future__ import annotations`：路由请求体 TypeAdapter 需要
+# 在导入期完成前向引用解析，否则首次请求报 "not fully defined"
+for _rule_model in (RuleImportRequest, RuleImportResponse, ConflictReport, RuleCreate, RuleUpdate, RuleOut):
+    _rule_model.model_rebuild()
 
 
 class RuleBatchConfirmRequest(BaseModel):

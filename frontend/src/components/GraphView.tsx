@@ -35,6 +35,9 @@ const NODE_TYPE_COLOR_MAP: Record<string, string> = {
   StampRequirement: '#FF6B35',
   Field: '#1A936F',
   Rule: '#C5283D',
+  // 批次 10 Phase D：本体层节点
+  DocumentType: '#00897B',
+  CheckIntent: '#F4511E',
 }
 
 const DEFAULT_NODE_COLOR = '#9a60b4'
@@ -70,8 +73,10 @@ function useTypeColorMap(nodes: GraphNode[]) {
   }, [typeOrder])
 }
 
-/** 取节点显示名（截断长名） */
-function getDisplayName(name: string, maxLen = 8): string {
+/** 取节点显示名（优先 properties.display_name，截断长名） */
+function getDisplayName(d: { name: string; properties?: Record<string, unknown> }, maxLen = 8): string {
+  const name =
+    (d.properties && typeof d.properties.display_name === 'string' && d.properties.display_name) || d.name
   if (!name) return ''
   return name.length > maxLen ? name.slice(0, maxLen) + '…' : name
 }
@@ -346,7 +351,7 @@ export default function GraphView({
       .attr('font-size', 11)
       .attr('fill', '#303133')
       .style('pointer-events', 'none')
-      .text((d) => getDisplayName(d.name))
+      .text((d) => getDisplayName(d))
 
     // ===== 交互：拖拽（带 3px 阈值） =====
     let dragStart: [number, number] | null = null

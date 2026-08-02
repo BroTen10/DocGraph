@@ -100,8 +100,8 @@ export interface ConflictDetectionResponse {
 
 export interface Rule {
   id: string
-  doc_type: string
-  check_category: string
+  doc_type: string | null
+  check_category: string | null
   rule_text: string
   tolerance: Record<string, unknown>
   enabled: boolean
@@ -114,6 +114,10 @@ export interface Rule {
   confirmed_by: string | null
   updated_at: string
   created_at: string
+  structure?: Record<string, unknown> | null
+  scope?: Record<string, unknown> | null
+  intents?: string[]
+  provenance?: Record<string, unknown> | null
 }
 
 export interface RuleSnapshot {
@@ -160,6 +164,14 @@ export interface GraphData {
   edges: GraphEdge[]
   node_count: number
   edge_count: number
+}
+
+/** 批次 10 Phase D：图谱本体层（文档类型/检查意图/规则） */
+export interface GraphOntology {
+  graph_id: string
+  doc_types: Array<{ name: string; props: Record<string, unknown>; fields: string[] }>
+  check_intents: Array<{ name: string; props: Record<string, unknown>; rule_count: number }>
+  rules: Array<{ name: string; props: Record<string, unknown> }>
 }
 
 /** 异步图谱构建任务状态 */
@@ -273,6 +285,9 @@ export interface ReviewResultItem {
   deviation?: { kind: 'percent' | 'days'; value?: number | null; abs?: number; src?: unknown; tgt?: unknown } | null
   graph_source?: string | null
   graph_target?: string | null
+  /** 批次 10 Phase C：结果来源（graph/llm/legacy）与 LLM 置信度 */
+  source?: string | null
+  confidence?: number | null
   issue_desc: string | null
   detail: Record<string, unknown>
   suggestion: string | null

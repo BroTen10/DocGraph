@@ -339,3 +339,102 @@
 
 ---
 *Update after completing each phase or encountering errors*
+
+### 批次 10：泛化规则体系重构（2026-08-02，设计提案阶段）
+- **Status:** 设计完成，待用户确认（未改产品代码）
+- Actions taken:
+  - 通读 PRD、补充需求集（20260727-20260730）、规则解析控制架构设计、批次 0-9 规划/验收记录
+  - 逐层核查代码：constants.py、models/rule.py+rule_set.py+document_type.py、schemas/rule.py、rule_import_service.py、rule_document_import_service.py、rule_parse_engine.py、graph_builder_service.py、graph_review_service.py、review_service.py、suggestion_service.py、ocr_service.py、routers（rule_sets/doc_types/rules）、frontend RulesPage.tsx
+  - 定位偏离根因：规则被强制归入"文件类型×检查项"格子（表示层）+ 常量枚举硬编码（本体层）+ 审查无 LLM（执行层）+ 必检格 Alert（UI 层）
+  - 产出设计文档 docs/泛化规则体系重构设计.md：规则自描述 / 本体涌现 / 双引擎审查 / 矩阵投影，分 Phase A-E 落地
+- Files created/modified:
+  - docs/泛化规则体系重构设计.md（新增，设计提案）
+  - task_plan.md（批次 10 落盘，pending）
+  - findings.md（偏离根因与目标设计摘要）
+- Risks / notes:
+  - 待用户确认后再进入 Phase A 编码；Phase A 涉及 rules 表迁移，需重启后端生效
+  - 关键取舍：精度 vs 泛化——确定性引擎保持权威，LLM 仅补定性/语义场景且低置信走 unverifiable
+
+### 批次 10-1：Phase A 解除规则-格子强绑定（2026-08-02，已完成）
+- **Status:** complete（py_compile / tsc+vite / DB 冒烟全绿）
+- Actions taken:
+  - 后端：rules 表迁移（doc_type/check_category 可空 + scope/intents/provenance）；schemas/rule.py 同步；models/rule.py 更新
+  - 导入 v2：_SYSTEM_PROMPT/_USER_PROMPT_TEMPLATE 重写（枚举降级为建议 + ontology 输出 + scope/intents）；校验放宽；派生标签兜底；语义级去重（_structure_signature）；_merge_into_existing 扩展
+  - 存量 bug 修复：document_types 模型补齐 category/is_required（真实库有列、ORM 缺失 → 新类型注册一直静默失败）；新类型 key_fields 由 ontology.fields 预填
+  - 兼容处理：graph_builder 跳过无类型齐套/印章规则；review_service 旧回退跳过 None 类型；冲突检测空标签回退
+  - 前端：RulesPage 移除必检 Alert/红色必检格；矩阵投影化（空标签→整批/全部、未分类）；编辑表单标签可选；types.ts/GraphPage 同步
+- Verification:
+  - py_compile 全量通过；npm run build（tsc + vite）通过
+  - DB 冒烟（临时规则集 + mock LLM）：3 条规则（空标签 + 结构-only）入库、标签派生正确、scope/intents/provenance 落库、二次导入 0 新增（语义去重）、新类型 pending_review 注册 + key_fields 预填、规则集类型更新；测试数据已清理（含两次失败运行残留，人工复核清空）
+- Files created/modified:
+  - backend/app/models/rule.py、document_type.py、database.py
+  - backend/app/schemas/rule.py
+  - backend/app/services/rule_import_service.py、rule_conflict_detector.py、graph_builder_service.py、review_service.py
+  - frontend/src/types.ts、pages/RulesPage.tsx、pages/GraphPage.tsx
+  - task_plan.md / findings.md / progress.md
+- Risks / notes:
+  - 迁移已对真实库执行（幂等）；后端进程仍是旧代码，需用户重启 backend 生效（重启时 _run_migrations 会补执行，幂等无副作用）
+  - 无类型整批规则（scope=ALL）暂不参与确定性图谱执行，留待 Phase D/E；LLM 语义审查（Phase C）负责这类规则的执行
+
+### 批次 10-2/10-3：Phase B 本体闭环 + Phase C 双引擎审查（2026-08-02，已完成）
+- **Status:** complete（py_compile / tsc+vite / LLM 审查单测 / 迁移实测全绿）
+- Actions taken:
+  - Phase B：
+    - ocr_service 新增 resolve_field_template（DocumentType.key_fields 优先，constants 兜底），review_service + ocr_task_service 两处调用接入
+    - file_classifier 支持动态注册表（name→is_required），contract_service 上传时从 DocumentType 构建并传入；未识别时按注册类型名子串匹配
+    - database._seed_doc_types 补齐 category/is_required（与真实库取值对齐）
+    - 新规则集零预设确认（前端空数组 + 后端默认 []）
+  - Phase C：
+    - 新增 llm_review_service.py：定性规则批量审查 + 字符串相等失败语义复核，含置信度护栏（fail≥0.8/pass≥0.6，不足→unverifiable）
+    - review_results 迁移新增 source/confidence 列；图引擎结果 source=graph；旧逻辑 source=legacy；LLM source=llm
+    - review_service 阶段 2.5 合并引擎 B，异常不影响确定性结果；_make_result_from_llm 构造结果
+    - suggestion_service.build_suggestion_llm：LLM 生成建议（证据链上下文），失败回退模板
+    - 前端 ResultsPage 来源标签 + 置信度 tooltip；types.ts ReviewResultItem 扩展
+- Verification:
+  - py_compile 全量通过；npm run build（tsc + vite）通过
+  - LLM 审查引擎单测：规则筛选、批量审查归一化、fail 低置信护栏降级、语义兜底三分支（同义→pass/不同→保持fail/不确定→unverifiable）、建议生成 LLM 优先与异常回退，全部通过
+  - 迁移对真实库幂等执行，review_results.source/confidence 列确认存在
+- Files created/modified:
+  - backend/app/services/llm_review_service.py（新增）、suggestion_service.py、ocr_service.py、ocr_task_service.py、file_classifier.py、contract_service.py、review_service.py、graph_review_service.py、database.py、models/review_result.py、schemas/review.py
+  - frontend/src/pages/ResultsPage.tsx、types.ts
+  - task_plan.md / findings.md / progress.md
+- Risks / notes:
+  - 后端需重启生效；LLM 审查仅在存在定性规则或字符串相等失败时调用，成本受控
+  - 语义复核把"字符串不一致"判为同义需要置信≥0.8；无法确认时降级 unverifiable（人工确认），宁可多标不可漏标
+
+### 批次 10-4：Phase D 图谱本体化（2026-08-02，已完成）
+- **Status:** complete（py_compile / tsc+vite / 真实 Neo4j 冒烟全绿）
+- Actions taken:
+  - graph_builder_service：写图增加本体层（DocumentType/CheckIntent/Rule 节点 + APPLIES_TO/CHECKS/INVOLVES/HAS_FIELD 边），节点/边标注 layer，R 编号与执行层一致；DocumentType 节点属性带描述/字段/业务含义/印章/必备标记
+  - neo4j_client：边类型白名单扩展；新增 get_ontology 本体查询
+  - graph.py：新增 GET /api/rules/graph/ontology（声明在 /graph/{graph_id} 之前）
+  - 前端：GraphPage 图层过滤 Segmented + "本体概览"Tab；GraphView 本体节点配色 + display_name 显示
+- Verification:
+  - py_compile 全量通过；npm run build（tsc + vite）通过
+  - 真实 Neo4j 冒烟：临时规则集（1 空标签结构化规则 + 1 齐套性规则）→ 10 节点/11 边；get_ontology 返回正确的文件类型/检查意图/规则节点；APPLIES_TO/CHECKS/INVOLVES/HAS_FIELD/COMPARE_TO/REQUIRED 六类边全部存在；测后图谱与规则集已清理
+- Files created/modified:
+  - backend/app/services/graph_builder_service.py、neo4j_client.py、routers/graph.py
+  - frontend/src/pages/GraphPage.tsx、components/GraphView.tsx、api/client.ts、types.ts
+  - task_plan.md / findings.md / progress.md
+- Risks / notes:
+  - 旧图无本体层，需重新构建图谱后本体概览才有数据（前端已做空态提示）
+  - 本体层与执行层同 graph_id；历史图清理逻辑（clear_graph/clear_all_rule_graphs）无需改动
+
+### 批次 10-5：Phase E 回归验收（2026-08-02，已完成）
+- **Status:** complete（回归验收 + 新流程验收全绿）
+- Actions taken:
+  - 清理并重建后端进程（旧实例存在 uvicorn 双进程/孤儿 worker，代码版本不一致风险，已全杀重启为单实例新代码）
+  - 回归 acceptance_run.py：30/30 规则、25 文件、图谱 125 节点/215 关系、审查 38 条（25/6/7）、双引擎来源 graph=22/llm=16、状态闭环正确、12 条 LLM 建议
+  - 新流程 acceptance_phase_e_new.py（保留为仓库验收脚本）：零预设规则集→任意规则文本→自动发现新类型（验收确认单 pending_review+key_fields）→本体层建图→双引擎审查→清理，全绿
+  - 修复验收暴露的三个问题：schemas/rule.py 缺 import uuid + model_rebuild（import-batch 500）；RuleImportResponse 缺 new_doc_types 字段；scope=ALL 误推导 doc_type="ALL" 误注册类型
+- Verification:
+  - py_compile 全量通过；两次验收期间后端日志无审查异常
+  - 验收数据清理：3 个验收规则集、pending 类型（验收确认单/ALL）、测试上传目录全部删除，DB 无残留
+- Files created/modified:
+  - acceptance_phase_e_new.py（新增，新流程验收脚本，与 acceptance_run.py 并列）
+  - backend/app/schemas/rule.py（import uuid + model_rebuild + new_doc_types）
+  - backend/app/services/rule_import_service.py（scope=ALL 归一化/推导修复）、graph_builder_service.py（过滤 ALL）
+  - task_plan.md / findings.md / progress.md
+- Risks / notes:
+  - 后端已运行新代码（隐藏窗口 + 日志 backend_phaseE.log）；后续如再改代码，热重载会重启 worker，验收脚本需在改动完成后一次跑通
+  - 多值字符串相等不做 LLM 语义兜底为已知设计边界（确定性结果保留，防止 LLM 误判）

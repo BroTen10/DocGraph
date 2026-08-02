@@ -24,6 +24,22 @@ from ..ocr_client import get_ocr_client
 logger = logging.getLogger(__name__)
 
 
+def resolve_field_template(db, doc_type: str) -> list[str]:
+    """字段模板解析（批次 10 Phase B）：DocumentType.key_fields 优先（动态注册/规则导入预填），
+    constants.FIELD_TEMPLATES 兜底。未注册类型返回空（走自由提取兜底）。"""
+    try:
+        from sqlalchemy import select
+        from ..models import DocumentType
+        dt = db.execute(
+            select(DocumentType).where(DocumentType.name == doc_type)
+        ).scalars().first()
+        if dt is not None and dt.key_fields:
+            return list(dt.key_fields)
+    except Exception:
+        logger.warning("解析字段模板失败，回退 constants: %s", doc_type, exc_info=True)
+    return FIELD_TEMPLATES.get(doc_type, [])
+
+
 def _extract_text_pdf(pdf_path: str) -> str:
     """文本型 PDF 直接提取文本。"""
     import pdfplumber
@@ -140,7 +156,10 @@ def _llm_extract_fields_from_text(
         return {"fields": {}, "has_stamp": None, "confidence": 0.0}
 
 
-def process_document(doc: Document) -> dict:
+def process_document(
+    doc: Document,
+    key_fields: list[str] | None = None,
+) -> dict:
     """处理单个文档：根据类型选择 OCR 或文本提取，回写 doc 记录。
 
     Returns:
@@ -157,7 +176,7 @@ def process_document(doc: Document) -> dict:
     if not path.exists():
         return {"success": False, "error": f"文件不存在: {doc.file_path}"}
 
-    field_template = FIELD_TEMPLATES.get(doc.doc_type, [])
+    field_template = key_fields if key_fields is not None else FIELD_TEMPLATES.get(doc.doc_type, [])
     stamp_required = STAMP_REQUIREMENTS.get(doc.doc_type)
 
     try:

@@ -12,7 +12,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 
-from sqlalchemy import DateTime, String, Text, func
+from sqlalchemy import Boolean, DateTime, String, Text, func
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -31,6 +31,11 @@ class DocumentType(Base):
     name: Mapped[str] = mapped_column(String(64), unique=True, nullable=False, index=True)
     # 简短描述
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # 类型类别：required（必备）/ supporting（配套）/ other（其他/多余）
+    # 注：与线上 schema 对齐（历史表结构即含此列，此前 ORM 缺失导致新类型注册静默失败）
+    category: Mapped[str] = mapped_column(String(32), default="other", nullable=False)
+    # 是否必备文件
+    is_required: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     # 关键字段提取模板
     key_fields: Mapped[list] = mapped_column(JSONB, default=list, nullable=False)
     # 用印要求

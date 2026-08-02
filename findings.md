@@ -103,6 +103,22 @@
 - **核心结论**：①审查意图应建模为 条件/断言/例外 + 聚合/角色/Value 结构，而非单条比对边；②多单汇总是一等语义（用户已确认）；③执行层应"声明式规则 + 可解释验证器"，防空满足；④结果需闭环（违规持久化、严重度、证据链）。
 - 产出 11 个可落地模式（R1-R4 / E1-E4 / C1-C3），转化为任务清单批次 7-9。
 
+### 批次 10：泛化规则体系重构——偏离根因与目标设计（2026-08-02，设计提案，未改代码）
+- **用户诉求**：导入任意人类语言规则列表，LLM 语义拆分规则；规则以图谱保存；审查阶段 LLM + 图谱（本体数据）结合审核 OCR 文档。当前版本强制"文件类型 × 检查项"必检格人工补齐，泛化能力被锁死。
+- **偏离根因**：系统把"规则如何展示/编排"（文件类型 × 检查项的格子）当成了"规则是什么"的前提。格子应是规则语义的投影，而非入库前提。
+- **四个偏离点**：
+  1. 表示层：`rule_import_service._SYSTEM_PROMPT` 强制 doc_type/check_category 双必填且"必须是给定枚举之一"；`models/rule.py` 两字段 NOT NULL；为空直接跳过；去重按 (doc_type, check_category) 分组 → 同一规则换标签不复用（历史 220 条重复的根源）。
+  2. 本体层：`constants.py` 硬编码 18 类文件类型/4 类检查项/FIELD_TEMPLATES/STAMP_REQUIREMENTS；OCR 字段提取只读 FIELD_TEMPLATES（`ocr_service.py:160`），未用 DocumentType.key_fields；分类器依赖常量枚举；新规则集创建时预置枚举。
+  3. 执行层：审查 = 纯确定性引擎（graph_review_service + review_service fallback 按格子索引规则），LLM 在审查阶段缺位；无 structure 的定性规则无执行路径；suggestion_service 为模板。
+  4. UI 层：`RulesPage.tsx` essentialMissingCells（~226 行）把"必备文档 × 全部检查项"无已确认规则判为"必检"，置顶 Alert（~986 行）引导逐格补规则。
+- **目标设计三支点**：
+  1. 规则自描述：structure 转正为核心，doc_type/check_category 降级为派生标签（nullable）；新增 scope/intents/provenance。
+  2. 本体涌现：LLM 导入输出 ontology（doc_types/fields/check_intents），注册 DocumentType pending_review → analyze-sample → active；枚举降级为"已知类型建议"；新规则集零预设。
+  3. 双引擎审查：确定性引擎（数值/日期/聚合/齐套/印章）保持权威；新增 llm_review_service 处理无 structure 定性规则与语义兜底；低置信 → unverifiable + 人工确认。
+  - 前端：矩阵只读投影，空格显示"规则未提及"，删除必检强制。
+- **已有资产可直接复用**：DocumentType 动态注册（pending_review/confirm/reject/analyze-sample）、structure 字段与意图链执行器（批次 7-9）、三态/严重度/证据链（批次 8-9）、Skill 解析控制（批次 3/4）、OCR 自由提取兜底（07-28 已实现）。
+- **落地顺序**：Phase A 解除绑定（后端迁移 + prompt v2 + 前端矩阵投影）→ Phase B 本体闭环（OCR/分类器接 DocumentType）→ Phase C 双引擎审查 → Phase D 图谱本体化（可选）→ Phase E 回归验收。详见 docs/泛化规则体系重构设计.md。
+
 ## Technical Decisions
 | Decision | Rationale |
 |----------|-----------|
@@ -112,6 +128,57 @@
 | 多单汇总为主（1-3） | 用户决策：分批付款场景下多单汇总比对 |
 | 清理测试规则集2 重复（6-4） | 用户决策 |
 | 研究结论落地批次 7-9 | 意图结构升级 / 执行引擎升级 / 结果闭环 |
+
+### 批次 10-1（Phase A）落地：解除规则-格子强绑定（2026-08-02，已完成）
+- **迁移**：`rules` 表 `doc_type`/`check_category` DROP NOT NULL；新增 `scope`/`intents`/`provenance` JSONB（幂等，已对真实库实测）。
+- **LLM 导入契约 v2**：`rule_import_service._SYSTEM_PROMPT` 重写——`doc_type`/`check_category` 降级为可选派生标签；枚举从"必须"降为"已知类型建议"；新增 `scope`（doc_types 列表/"ALL"）与 `intents`；新增顶层 `ontology`（doc_types/fields/check_intents）输出；校验放宽为"rule_text 与 structure.assertion 至少其一"。
+- **派生标签兜底**：doc_type 缺失时从结构断言 source 或 scope.doc_types 推导；check_category 缺失时取 intents[0]；rule_text 缺失时由断言生成可读文本。
+- **语义级去重**：`_find_similar_rule` 改为规则集内全量匹配（不再按 (doc_type, check_category) 分组）；新增 `_structure_signature`（operator + 源/目标类型与字段），结构签名一致 + 文本相似 ≥0.6 即命中；`_merge_into_existing` 增加 scope/intents 并集合并与标签补全。实测二次导入 0 新增。
+- **新类型注册修复（存量 bug）**：真实库 `document_types` 表含 `category`(NOT NULL)/`is_required`(NOT NULL) 列，但 ORM 模型缺失 → 规则导入/手工建类型一直 `TypeError/NotNullViolation` 并被 except 吞掉（"注册新文档类型失败"）。修复：`models/document_type.py` 补齐两列（default other/False）；`rule_import_service` 移除无效的 `category="other"` 参数；新类型 `key_fields` 由 ontology.fields 预填，已有 pending 记录时合并字段。
+- **前端**：`RulesPage.tsx` 删除 `essentialMissingCells` 必检 Alert 与红色"必检"格（空格显示"+ 添加"，仅便利入口）；矩阵行/列对空标签归入"整批/全部"/"未分类"；编辑表单标签可选（allowClear）；列表/图谱页空标签回退展示；`types.ts` Rule 接口 doc_type/check_category 改 `string | null` 并新增 scope/intents/provenance。
+- **兼容**：图引擎对无类型的齐套性/印章规则跳过并告警（整批必备语义留待 Phase D/E）；旧审查回退 `_check_completeness` 跳过 None 类型；冲突检测 prompt 对空标签回退展示。
+- **验证**：py_compile 全量通过；`npm run build`（tsc+vite）通过；DB 冒烟（临时规则集 + mock LLM）：3 条规则（含空标签、结构-only）全部入库、标签正确派生、scope/intents/provenance 落库、语义去重生效、新类型 pending_review 注册 + key_fields 预填、规则集类型清单更新，测后已清理（残留已人工复核清空）。
+
+### 批次 10-2/10-3（Phase B/C）落地：本体闭环 + 双引擎审查（2026-08-02，已完成）
+- **Phase B 本体涌现闭环**：
+  - `ocr_service.resolve_field_template(db, doc_type)`：DocumentType.key_fields 优先、constants.FIELD_TEMPLATES 兜底；三处调用点（review_service/ocr_task_service×2）接入 → 新类型 key_fields（规则导入预填或 analyze-sample 回填）即刻生效于 OCR 字段提取。
+  - `file_classifier.classify_file(filename, registry)`：注册表（DocumentType active+pending_review 的 name→is_required）优先于常量；文件名含注册类型名即可归类（未识别兜底）；`contract_service` 上传时构建注册表传入。
+  - `database._seed_doc_types`：补齐 category/is_required（required/optional/supporting/extra/other），与真实库现有取值对齐。
+  - 新规则集零预设确认：前端创建传空数组、后端 schema 默认 `[]`。
+- **Phase C 双引擎审查**：
+  - 新增 `llm_review_service.py`（引擎 B）：
+    - `review_unstructured_rules`：批量审查确定性引擎未覆盖的定性规则（无 structure.assertion、无类型整批齐套/印章），输入=规则文本+scope/intents+合同+文档 OCR 字段摘要；护栏：fail 需置信≥0.8、pass 需≥0.6，不足降级 unverifiable 待人工确认。
+    - `semantic_equivalence_fallback`：对确定性"字符串相等"失败（单项、非数值/日期）做 LLM 语义复核——同义（≥0.8）→pass、确实不同→保持 fail 增强证据、无法确认→unverifiable（reason=llm_uncertain_semantic）。
+  - `review_results` 新增 `source`（graph/llm/legacy）/`confidence` 列（迁移幂等实测）；图引擎结果 source=graph；`_result_to_item`/`_filter_results` 透传。
+  - `_run_review_pipeline` 阶段 2.5 合并引擎 B，异常不影响确定性结果；建议生成接入 LLM（`suggestion_service.build_suggestion_llm`，失败回退模板）。
+  - 前端 `ResultsPage`：结果来源标签（图谱/LLM/旧逻辑）+ 置信度 tooltip（规则视图、文档视图、详情抽屉）。
+- **验证**：py_compile 全量通过；`npm run build` 通过；LLM 审查引擎单测全过（筛选/批量审查/护栏降级/语义兜底三分支/建议生成与回退）；迁移对真实库幂等执行并确认列存在。
+
+### 批次 10-4（Phase D）落地：图谱本体化（2026-08-02，已完成）
+- **本体层写入**（graph_builder_service）：
+  - 新节点类型：DocumentType（`文件类型:X`，属性含 display_name/description/key_fields/business_meaning/stamp_required/status/category/is_required）、CheckIntent（`检查意图:X`）、Rule（`规则:Rxxx`，属性含 rule_text/intents/check_category/doc_type/priority）。
+  - 新边类型：Rule→DocumentType `APPLIES_TO`、Rule→CheckIntent `CHECKS`、Rule→Field `INVOLVES`、DocumentType→Field `HAS_FIELD`；与执行层共用 graph_id，R 编号与执行层一致（同一循环内生成，被跳过的规则也建 Rule 节点）。
+  - 节点/边标注 `layer`（ontology/rule/execution）；既有转换器补 layer 标注。
+  - 命名空间规避：本体节点用 `文件类型:`/`检查意图:`/`规则:` 前缀，避免与执行层 RequiredDoc/StampRequirement 同名节点 MERGE 冲突。
+- **查询接口**：neo4j_client.get_ontology（DocumentType 含 HAS_FIELD 字段清单、CheckIntent 含规则计数、Rule 清单）；router `GET /api/rules/graph/ontology?graph_id=`（声明在 `/graph/{graph_id}` 之前避免路由吞参）。
+- **前端**（GraphPage/GraphView）：
+  - 图层过滤 Segmented（全部/本体/规则/执行），filteredGraph 按节点层 + 边层过滤后传给 GraphView。
+  - 右侧新增"本体概览"Tab：文档类型（必备/待确认标记 + 字段清单）、检查意图（规则数）、规则清单。
+  - GraphView 增加 DocumentType/CheckIntent 配色；节点显示名优先 properties.display_name（规则/类型显示可读名）。
+- **验证**：真实 Neo4j 冒烟——临时规则集（1 结构化空标签规则 + 1 齐套性规则）构建出 10 节点/11 边；get_ontology 返回 文件类型:付款水单/收款水单、检查意图:时间逻辑/齐套性、规则:R001/R002；边类型含 APPLIES_TO/CHECKS/INVOLVES/HAS_FIELD/COMPARE_TO/REQUIRED；测后图谱与规则集已清理。
+
+### 批次 10-5（Phase E）落地：回归验收（2026-08-02，已完成）
+- **回归验收（acceptance_run.py，真实 LLM/OCR/Neo4j）**：
+  - 30/30 规则灌入并确认；25 文件上传分类正确；图谱构建 125 节点/215 关系（含本体层）；审查 38 条结果 = 25 pass / 6 fail / 7 unverifiable。
+  - 双引擎来源：graph=22、llm=16（LLM 定性审查含证据与置信度）；fail 均为图谱确定性结果；LLM 低置信（0.5）全部降级 unverifiable（护栏生效）。
+  - 状态闭环正确：pass→closed（25）、fail/unverifiable→open（13）；12 条结果带 LLM 修正建议。
+  - 已知语义局限：多值字符串相等（如多张水单收款方列表 vs 协议方合并串）不做 LLM 语义兜底（`_is_string_mismatch_item` 限定单项比对），确定性结果保留，与旧版行为一致。
+- **新流程验收（acceptance_phase_e_new.py）**：零预设规则集 → 任意规则文本导入 4/4 → 自动发现新文件类型（验收确认单注册 pending_review + key_fields 预填）→ 规则自描述（scope/intents/structure）→ 建图本体层（文件类型/检查意图/规则节点）→ 小合同上传 → 双引擎审查（graph+llm）→ 清理。全绿。
+- **验收暴露并修复的问题**：
+  1. `schemas/rule.py` 使用 `uuid.UUID` 但仅 `from uuid import UUID`，且缺 `model_rebuild()` → import-batch 首次请求 500（PydanticUserError not fully defined）。修复：补 `import uuid` + 模块尾部对路由模型显式 `model_rebuild()`。
+  2. `RuleImportResponse` 缺 `new_doc_types` 字段 → 响应被 pydantic 剥离，前端"发现新类型"提示一直拿不到数据。修复：补 `new_doc_types: list[str] = []`。
+  3. 全局规则 scope=ALL 被 `_derive_doc_type` 推导为 doc_type="ALL" 并误注册为 DocumentType；本体层出现 `文件类型:ALL` 节点。修复：`_normalize_scope` 将 ["ALL"] 归一为 "ALL"、`_derive_doc_type` 对 ALL 返回空、`graph_builder._rule_doc_types` 过滤 ALL。
+- **环境**：后端已重启加载新代码（旧实例存在双进程/孤儿 worker 干扰，已清理重建）；验收产生的规则集/类型/上传目录已全部清理，无残留。
 
 ## Issues Encountered
 | Issue | Resolution |

@@ -14,7 +14,7 @@ from sqlalchemy.orm import Session
 
 from ..config import settings
 from ..constants import REQUIRED_DOC_TYPES
-from ..models import Contract, Document
+from ..models import Contract, Document, DocumentType
 from ..schemas.contract import (
     ContractBrief,
     ContractDetail,
@@ -39,6 +39,17 @@ def _safe_filename(filename: str) -> str:
     return out.strip() or f"file_{uuid.uuid4().hex[:8]}"
 
 
+def _load_doc_type_registry(db: Session) -> dict[str, bool]:
+    """从 DocumentType 动态清单构建 name → is_required 注册表（active + pending_review）。
+    批次 10 Phase B：新发现的类型无需改代码即可参与文件分类。"""
+    rows = db.execute(
+        select(DocumentType.name, DocumentType.is_required).where(
+            DocumentType.status.in_(("active", "pending_review"))
+        )
+    ).all()
+    return {name: bool(is_required) for name, is_required in rows}
+
+
 def _contract_upload_dir(contract_no: str) -> Path:
     """合同文件存储目录：uploads/{contract_no}/"""
     root = settings.ensure_upload_root()
@@ -61,6 +72,9 @@ async def upload_contract_folder(
     if not files:
         raise ValueError("未接收到任何文件")
 
+    # 动态文档类型注册表（批次 10 Phase B）
+    registry = _load_doc_type_registry(db)
+
     # 1. 第一遍：保存文件 + 收集文件名用于合同号识别
     saved: list[tuple[str, Path, str, bool]] = []  # (orig_name, path, doc_type, is_required)
     contract_candidates: list[str] = []
@@ -73,7 +87,7 @@ async def upload_contract_folder(
         tmp_path = tmp_dir / f"{uuid.uuid4().hex}_{safe_name}"
         content = await f.read()
         tmp_path.write_bytes(content)
-        doc_type, is_required = classify_file(orig_name)
+        doc_type, is_required = classify_file(orig_name, registry=registry)
         # 从文件名提取合同号
         contract_candidates.extend(extract_contract_numbers(orig_name))
         saved.append((orig_name, tmp_path, doc_type, is_required))
