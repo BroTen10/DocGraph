@@ -23,7 +23,8 @@ import {
   ThunderboltOutlined, FileTextOutlined, ClockCircleOutlined,
   BulbOutlined, NodeIndexOutlined, ApartmentOutlined,
 } from '@ant-design/icons'
-import { graphApi, rulesApi } from '../api/client'
+import { graphApi, getErrorMessage, isFormValidationError, rulesApi } from '../api/client'
+import type { BadgeProps } from 'antd'
 import type { GraphData, GraphEdge, GraphBuildTaskStatus, Rule, RuleSnapshot } from '../types'
 import GraphView from '../components/GraphView'
 import PageHeader from '../components/PageHeader'
@@ -33,8 +34,8 @@ import dayjs from 'dayjs'
 
 const { Text, Paragraph } = Typography
 
-/** 构建任务状态颜色 */
-const BUILD_STATUS_COLOR: Record<string, string> = {
+/** 构建任务状态颜色（antd Badge 预设状态色） */
+const BUILD_STATUS_COLOR: Record<string, NonNullable<BadgeProps['status']>> = {
   running: 'processing',
   completed: 'success',
   failed: 'error',
@@ -89,11 +90,11 @@ export default function GraphPage() {
     try {
       const g = await graphApi.getLatest(currentId)
       setGraph(g)
-    } catch (e: any) {
-      if (e?.response?.status === 404) {
+    } catch (e) {
+      if (e && typeof e === 'object' && (e as { response?: { status?: number } }).response?.status === 404) {
         setGraph(null)
       } else {
-        message.error('加载图谱失败: ' + (e?.message || e))
+        message.error('加载图谱失败: ' + getErrorMessage(e))
       }
     } finally {
       setLoading(false)
@@ -194,9 +195,9 @@ export default function GraphPage() {
       const resp = await graphApi.buildAsync(currentId!, autoConfirmAll)
       message.info('图谱构建已启动，进度请看右侧面板')
       startPolling(resp.task_id)
-    } catch (e: any) {
+    } catch (e) {
       setBuilding(false)
-      message.error('启动构建失败: ' + (e?.response?.data?.detail || e?.message || e))
+      message.error('启动构建失败: ' + getErrorMessage(e))
     }
   }
 
@@ -233,13 +234,13 @@ export default function GraphPage() {
         editTarget.kind === 'node'
           ? { op: 'update_node', node_name: editTarget.name, properties: props }
           : { op: 'update_edge', source: editTarget.source, target: editTarget.target, properties: props }
-      const updated = await graphApi.confirm(graph.graph_id, [op as any])
+      const updated = await graphApi.confirm(graph.graph_id, [op])
       setGraph(updated)
       setEditOpen(false)
       message.success('已更新并写入 Neo4j')
-    } catch (e: any) {
-      if (e?.errorFields) return
-      message.error('保存失败: ' + (e?.message || e))
+    } catch (e) {
+      if (isFormValidationError(e)) return
+      message.error('保存失败: ' + getErrorMessage(e))
     }
   }
 
@@ -255,8 +256,8 @@ export default function GraphPage() {
       setSelectedNodeName(null)
       setSelectedEdge(null)
       message.success('已删除')
-    } catch (e: any) {
-      message.error('删除失败: ' + (e?.message || e))
+    } catch (e) {
+      message.error('删除失败: ' + getErrorMessage(e))
     }
   }
 
@@ -265,8 +266,8 @@ export default function GraphPage() {
     try {
       await graphApi.confirm(graph.graph_id, [])
       message.success('已确认生效')
-    } catch (e: any) {
-      message.error('确认失败: ' + (e?.message || e))
+    } catch (e) {
+      message.error('确认失败: ' + getErrorMessage(e))
     }
   }
 
@@ -517,7 +518,7 @@ function BuildProgressPanel({
             </Col>
             <Col span={12}>
               <div style={{ fontSize: 12, color: '#999', marginBottom: 4 }}>状态</div>
-              <Badge status={BUILD_STATUS_COLOR[buildTask.status] as any} text={buildTask.stage} />
+              <Badge status={BUILD_STATUS_COLOR[buildTask.status]} text={buildTask.stage} />
             </Col>
           </Row>
 
@@ -606,7 +607,7 @@ function BuildProgressPanel({
                 <div style={{ width: '100%' }}>
                   <div style={{ display: 'flex', justifyContent: 'space-between' }}>
                     <Badge
-                      status={BUILD_STATUS_COLOR[task.status] as any}
+                      status={BUILD_STATUS_COLOR[task.status]}
                       text={
                         <Text style={{ fontSize: 12 }}>
                           {task.stage}

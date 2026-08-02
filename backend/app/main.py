@@ -53,10 +53,10 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# CORS：允许前端独立部署跨域
+# CORS：白名单来源（批次 6-2 收紧，不再放开 *）；同源部署可留空
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # MVP 阶段放开，生产应限制
+    allow_origins=settings.cors_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -87,7 +87,7 @@ def list_doc_types(db=Depends(get_db)) -> dict:
     从 document_types 表读取，替代旧的 constants.py 硬编码。
     """
     from .models import DocumentType
-    from .constants import CHECK_CATEGORIES
+    from .constants import CHECK_CATEGORIES, CHECK_COMPLETENESS
     from sqlalchemy import select
 
     rows = db.execute(
@@ -106,4 +106,6 @@ def list_doc_types(db=Depends(get_db)) -> dict:
             for r in rows
         ],
         "check_categories": CHECK_CATEGORIES,
+        # 批次 3-5：齐套性检查项名称由后端单源下发，前端不再硬编码 '齐套性'
+        "completeness_category": CHECK_COMPLETENESS,
     }

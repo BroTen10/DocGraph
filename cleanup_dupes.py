@@ -1,14 +1,14 @@
 """清理规则集内的三元组重复：保留每组第 1 条，删除其余。
 用法: backend/.venv/Scripts/python.exe cleanup_dupes.py <rule_set_id>
 
-API BASE: http://localhost:8801
+API BASE: http://localhost:8800
 """
 
 import json, sys, uuid
 from collections import defaultdict
 from urllib.request import Request, urlopen
 
-BASE = "http://localhost:8801"
+BASE = "http://localhost:8800"
 
 def api(method, path, data=None):
     url = BASE + path

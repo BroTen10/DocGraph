@@ -9,7 +9,7 @@ import {
   InboxOutlined,
 } from '@ant-design/icons'
 import type { ColumnsType } from 'antd/es/table'
-import { docTypesApi } from '../api/client'
+import { docTypesApi, getErrorMessage } from '../api/client'
 import type { DocTypeItem, DocTypeCreate, DocTypeUpdate, AnalyzeSampleResult } from '../types'
 
 const { Title, Text, Paragraph } = Typography
@@ -51,8 +51,8 @@ export default function DocTypesPage() {
       const res = await docTypesApi.list({ status: activeTab === 'pending' ? 'pending_review' : 'active' })
       setDocTypes(res.doc_types)
       setPendingCount(res.pending_count)
-    } catch (e: any) {
-      message.error('加载文档类型失败: ' + (e?.message || ''))
+    } catch (e) {
+      message.error('加载文档类型失败: ' + getErrorMessage(e, ''))
     }
     setLoading(false)
   }, [activeTab])
@@ -78,8 +78,8 @@ export default function DocTypesPage() {
       setCreateOpen(false)
       form.resetFields()
       loadData()
-    } catch (e: any) {
-      message.error('创建失败: ' + (e?.response?.data?.detail || e?.message || ''))
+    } catch (e) {
+      message.error('创建失败: ' + getErrorMessage(e, ''))
     }
   }
 
@@ -92,8 +92,8 @@ export default function DocTypesPage() {
       setEditingType(null)
       editForm.resetFields()
       loadData()
-    } catch (e: any) {
-      message.error('更新失败: ' + (e?.response?.data?.detail || e?.message || ''))
+    } catch (e) {
+      message.error('更新失败: ' + getErrorMessage(e, ''))
     }
   }
 
@@ -106,8 +106,8 @@ export default function DocTypesPage() {
           await docTypesApi.delete(item.id)
           message.success('已删除')
           loadData()
-        } catch (e: any) {
-          message.error('删除失败: ' + (e?.message || ''))
+    } catch (e) {
+      message.error('删除失败: ' + getErrorMessage(e, ''))
         }
       },
     })
@@ -118,8 +118,8 @@ export default function DocTypesPage() {
       await docTypesApi.confirm(item.id)
       message.success(`「${item.name}」已确认并激活`)
       loadData()
-    } catch (e: any) {
-      message.error('确认失败: ' + (e?.message || ''))
+    } catch (e) {
+      message.error('确认失败: ' + getErrorMessage(e, ''))
     }
   }
 
@@ -132,8 +132,8 @@ export default function DocTypesPage() {
           await docTypesApi.reject(item.id)
           message.success('已丢弃')
           loadData()
-        } catch (e: any) {
-          message.error('操作失败: ' + (e?.message || ''))
+    } catch (e) {
+      message.error('操作失败: ' + getErrorMessage(e, ''))
         }
       },
     })
@@ -158,8 +158,8 @@ export default function DocTypesPage() {
     try {
       const result = await docTypesApi.analyzeSample(analyzeFile, analyzeTargetName || undefined)
       setAnalyzeResult(result)
-    } catch (e: any) {
-      message.error('分析失败: ' + (e?.message || ''))
+    } catch (e) {
+      message.error('分析失败: ' + getErrorMessage(e, ''))
       setAnalyzeResult({
         detected_name: analyzeTargetName || '未知类型',
         description: '',
@@ -213,8 +213,8 @@ export default function DocTypesPage() {
       setAnalyzeTargetName(null)
       setAnalyzeTargetStatus(null)
       loadData()
-    } catch (e: any) {
-      message.error('保存失败: ' + (e?.message || ''))
+    } catch (e) {
+      message.error('保存失败: ' + getErrorMessage(e, ''))
     }
   }
 

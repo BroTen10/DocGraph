@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import logging
 import threading
+import json
 from typing import Any, Optional
 
 from neo4j import Driver, GraphDatabase, ManagedTransaction
@@ -64,10 +65,19 @@ class Neo4jClient:
             result = session.run(query, **params)
             return [r.data() for r in result]
 
-    def execute_write(self, query: str, params: Optional[dict] = None) -> list[dict]:
-        """执行写查询（CREATE/MERGE/DELETE/SET）。"""
+    def execute_write(
+        self,
+        query: str,
+        params: Optional[dict] = None,
+        check_string_values: bool = True,
+    ) -> list[dict]:
+        """执行写查询（CREATE/MERGE/DELETE/SET）。
+
+        check_string_values=False 用于业务内容（规则文本/描述）写入图谱属性：
+        查询全部参数化，值内容不构成注入，宽松校验避免误伤合法业务数据。
+        """
         params = params or {}
-        valid, err = validate_cypher_params(params)
+        valid, err = validate_cypher_params(params, check_string_values=check_string_values)
         if not valid:
             raise ValueError(f"Cypher 参数校验失败: {err}")
 
@@ -79,6 +89,20 @@ class Neo4jClient:
             return session.execute_write(_tx_fn)
 
     # ---------- 规则图谱专用 ----------
+    @staticmethod
+    def _sanitize_props(props: dict) -> dict:
+        """Neo4j 属性仅支持标量/数组：嵌套 dict/list 序列化为 JSON 字符串。
+        （批次 8 验收暴露：tolerance_params/condition/exceptions 等嵌套结构直接写入会报
+        'Property values can only be of primitive types'，读取侧在 graph_review_service 反序列化。）
+        """
+        out: dict = {}
+        for k, v in props.items():
+            if isinstance(v, (dict, list)):
+                out[k] = json.dumps(v, ensure_ascii=False)
+            else:
+                out[k] = v
+        return out
+
     def clear_graph(self, graph_id: str) -> int:
         """全量清除指定 graph_id 的所有节点和关系。返回删除节点数。"""
         # 先删关系再删节点
@@ -123,8 +147,11 @@ class Neo4jClient:
                     "name": ent["name"],
                     "graph_id": graph_id,
                     "type": ent.get("type", "Field"),
-                    "attrs": {k: v for k, v in attrs.items() if k not in ("name", "graph_id")},
+                    "attrs": self._sanitize_props(
+                        {k: v for k, v in attrs.items() if k not in ("name", "graph_id")}
+                    ),
                 },
+                check_string_values=False,
             )
         # 写关系（尊重 rel.type，不再硬编码 COMPARE_TO）
         for rel in relationships:
@@ -146,8 +173,9 @@ class Neo4jClient:
                     "src": rel["source"],
                     "tgt": rel["target"],
                     "graph_id": graph_id,
-                    "attrs": attrs,
+                    "attrs": self._sanitize_props(attrs),
                 },
+                check_string_values=False,
             )
         return {"nodes": len(entities), "relationships": len(relationships)}
 
@@ -223,7 +251,7 @@ class Neo4jClient:
         self.execute_write(
             "MATCH (n:RuleEntity {name: $name, graph_id: $graph_id}) "
             "SET n += $props",
-            {"name": node_name, "graph_id": graph_id, "props": properties},
+            {"name": node_name, "graph_id": graph_id, "props": self._sanitize_props(properties)},
         )
 
     def update_edge_properties(
@@ -233,7 +261,7 @@ class Neo4jClient:
             "MATCH (a:RuleEntity {name: $src, graph_id: $graph_id})"
             "-[r]->(b:RuleEntity {name: $tgt, graph_id: $graph_id}) "
             "SET r += $props",
-            {"src": source, "tgt": target, "graph_id": graph_id, "props": properties},
+            {"src": source, "tgt": target, "graph_id": graph_id, "props": self._sanitize_props(properties)},
         )
 
     def delete_node(self, graph_id: str, node_name: str) -> None:

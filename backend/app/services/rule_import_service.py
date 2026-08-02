@@ -46,6 +46,20 @@ _SYSTEM_PROMPT = """你是单证审查规则解析助手。任务：把用户提
       "doc_type": "文件类型（必须是给定枚举之一）",
       "check_category": "检查项（必须是给定枚举之一）",
       "rule_text": "规则文本（简洁、可执行的自然语言描述）",
+      "structure": {
+        "condition": {"text": "触发条件原文或null", "field": "条件涉及字段名或null", "operator": "等于/包含于等或null", "value": "条件取值或null"},
+        "assertion": {
+          "source": {"doc_type": "源文件类型", "field": "源字段名", "aggregate": "SUM|ANY|ALL|null（多单汇总语义，分批付款场景用 SUM）", "role": "字段角色（委托方/收款方/收货方等或null）"},
+          "operator": "等于|不大于|不小于|时间早于|时间不晚于|总额等于|包含于",
+          "target": {"doc_type": "目标文件类型", "field": "目标字段名", "aggregate": "同上", "role": "同上"},
+          "currency": "币别（CNY/USD等，原文未涉及填null）",
+          "unit": "单位（件/吨/箱等，原文未涉及填null）"
+        },
+        "exceptions": [{"text": "例外条款原文", "reason": "例外原因或null",
+                        "field": "例外判据涉及的字段名或null（如金额/文件类型）",
+                        "operator": "等于/不等于/小于/大于/包含/包含于等或null",
+                        "value": "例外判据取值或null（如5000）"}]
+      },
       "tolerance": {"amount_percent": 数字或null, "weight_kg": 数字或null, "time_days": 数字或null, "allow_same_day": 布尔或null},
       "priority": 数字（越小越先，默认100）,
       "confidence": 0-1之间的浮点数，代表你对这条规则理解的确定程度
@@ -68,9 +82,11 @@ _SYSTEM_PROMPT = """你是单证审查规则解析助手。任务：把用户提
 4. tolerance 只在规则涉及金额/重量/时间比对时填写，否则字段留 null
 5. priority 默认 100；齐套性规则建议 10，基础判断建议 20，信息准确性建议 30，时间逻辑建议 40
 6. 一条自然语言描述拆为一条规则；若用户文本含多条规则，全部解析
+6.1 structure 为可选字段：规则文本包含"如果/若/除非"等条件表述时填入 condition；规则涉及跨文件字段比对时填入 assertion（source/target 必须来自规则文本，不能臆造）；包含"除…外/例外"表述时填入 exceptions；无法结构化时整个 structure 置 null。若例外条款可归结为"某字段满足某条件即豁免"（如"金额小于5000元时除外"），请在 exceptions 中补充 field/operator/value，执行引擎可程序化豁免；纯文本例外（无法归因到字段）则只填 text
 7. 忽略与单证审查无关的内容
 8. confidence 反映你对这条规则确信程度：规则描述非常清楚、无歧义则接近 1.0；含模糊表述（如"部分情况""一般""可能"）则适当降低；完全不确定或不合理则为 0.0
-9. 为减少输出体积，值为 null 的字段省略不输出（客户端自动补全），confidence 字段值为 1.0 时同理省略
+9. 为减少输出体积，值为 null 的字段省略不输出（客户端自动补全），confidence 字段值为 1.0 时同理省略；defects 无缺陷时整个数组省略
+10. 紧凑输出（防止长清单被 max_tokens 截断）：rules 数组按"每行一条规则"输出、逗号分隔，不输出多余空行、注释或解释文字；structure/tolerance 仅在有内容时输出
 
 ### 缺陷检测指令
 对每条被解析的规则，执行以下检查，将结果填入 `defects` 数组：
@@ -148,13 +164,23 @@ def _split_text(text: str, max_chars: int = _MAX_CHUNK_CHARS) -> list[str]:
                     if not line:
                         continue
                     if len(line) > max_chars:
-                        for i in range(0, len(line), max_chars):
-                            seg = line[i : i + max_chars]
-                            if len(buf) + len(seg) + 1 <= max_chars:
-                                buf = (buf + "\n" + seg) if buf else seg
-                            else:
-                                flush()
-                                buf = seg
+                        # 批次 4-1：表格行超长时优先按单元格分隔符 '|' 切（不切断单元格内容）
+                        cells = [s.strip() for s in line.split("|") if s.strip()]
+                        if len(cells) > 1 and all(len(c) <= max_chars for c in cells):
+                            for seg in cells:
+                                if len(buf) + len(seg) + 1 <= max_chars:
+                                    buf = (buf + "\n" + seg) if buf else seg
+                                else:
+                                    flush()
+                                    buf = seg
+                        else:
+                            for i in range(0, len(line), max_chars):
+                                seg = line[i : i + max_chars]
+                                if len(buf) + len(seg) + 1 <= max_chars:
+                                    buf = (buf + "\n" + seg) if buf else seg
+                                else:
+                                    flush()
+                                    buf = seg
                         continue
                     if len(buf) + len(line) + 1 <= max_chars:
                         buf = (buf + "\n" + line) if buf else line
@@ -443,6 +469,16 @@ def import_rules_from_text(
         except (TypeError, ValueError):
             confidence = None
 
+        # 结构化审查意图（批次 7）：LLM 可选输出，清洗为 dict 或 None
+        structure_raw = item.get("structure")
+        structure: dict[str, Any] | None = None
+        if isinstance(structure_raw, dict) and structure_raw.get("assertion"):
+            structure = {
+                "condition": structure_raw.get("condition") or None,
+                "assertion": structure_raw.get("assertion"),
+                "exceptions": structure_raw.get("exceptions") or [],
+            }
+
         # 关联该规则的 defects（rule_index 从 0 开始）
         rule_defects = defects_by_rule.get(i - 1, [])
         clean_defects = []
@@ -491,6 +527,7 @@ def import_rules_from_text(
                 check_category=check_category,
                 rule_text=rule_text,
                 tolerance=tolerance,
+                structure=structure,
                 enabled=enabled,
                 priority=priority,
                 confidence=confidence,
@@ -621,15 +658,20 @@ def import_rules_with_skills(
         同 import_rules_from_text 的返回
     """
     if skill_ids:
-        # 指定了具体的 Skill 列表，只加载这些
+        # 指定了具体的 Skill 列表，只加载这些（批次 3-6：停用/不存在的 Skill 显式报错，杜绝静默丢弃）
         from ..models import RuleParseSkill
         from sqlalchemy import select
+        requested = list(dict.fromkeys(skill_ids))
         skills = db.execute(
-            select(RuleParseSkill).where(
-                RuleParseSkill.id.in_(skill_ids),
-                RuleParseSkill.enabled.is_(True),
-            )
+            select(RuleParseSkill).where(RuleParseSkill.id.in_(requested))
         ).scalars().all()
+        by_id = {s.id: s for s in skills}
+        missing = [sid for sid in requested if sid not in by_id]
+        if missing:
+            raise ValueError(f"指定的 Skill 不存在: {missing}")
+        disabled = [s.name for s in skills if not s.enabled]
+        if disabled:
+            raise ValueError(f"以下 Skill 已停用，无法用于本次导入: {'、'.join(disabled)}")
 
         directive = RuleParseDirective()
         from .rule_parse_engine import _merge_content

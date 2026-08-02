@@ -35,6 +35,19 @@ class ReviewResult(Base):
     )
     # 结果：pass / fail / unverifiable
     result: Mapped[str] = mapped_column(String(16), nullable=False, index=True)
+    # ----- 批次 9（C1/C2）：问题闭环与严重度 -----
+    # 问题状态机：open / confirmed / fixed / closed（pass 默认 closed，fail/unverifiable 默认 open）
+    status: Mapped[str] = mapped_column(String(16), default="open", nullable=False, index=True)
+    # 状态流转审计历史：[{"status": "...", "at": "...", "by": "...", "note": "..."}]
+    status_history: Mapped[list] = mapped_column(JSONB, default=list, nullable=False)
+    # 严重度分级：high / medium / low（pass 为 null）
+    severity: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    # 偏离度：{"kind": "percent"|"days", "value": ..., "src": ..., "tgt": ...}
+    deviation: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    # 关联图谱实体（COMPARE_TO 的 source/target 节点名；旧逻辑/齐套性等可为 null）
+    graph_source: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    graph_target: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    # ----- -----
     # 问题描述
     issue_desc: Mapped[str | None] = mapped_column(Text, nullable=True)
     # 详细差异（字段、期望值、实际值）

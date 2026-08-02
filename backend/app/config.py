@@ -24,6 +24,14 @@ class Settings(BaseSettings):
     app_debug: bool = True
     upload_root: str = "./uploads"
     max_file_size_mb: int = 50
+    # CORS 白名单（逗号分隔的前端地址）。生产收紧为明确来源，不再允许 *；
+    # 同源部署（前端由后端静态托管）时留空即可，无需跨域。
+    cors_origins_raw: str = "http://localhost:5173,http://127.0.0.1:5173,http://localhost:3000,http://localhost:8800"
+
+    @property
+    def cors_origins(self) -> list[str]:
+        return [o.strip() for o in self.cors_origins_raw.split(",") if o.strip()]
+
     # 启动时是否重建数据库（DROP SCHEMA + 清空 Neo4j）。
     # 默认 False：仅幂等 create_all，不丢数据。
     # 仅在 schema 破坏性变更或需要干净环境时临时置 True。

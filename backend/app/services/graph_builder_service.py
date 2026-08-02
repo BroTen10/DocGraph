@@ -26,6 +26,7 @@ import uuid
 from datetime import datetime
 from typing import Optional
 
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ..config import settings
@@ -119,10 +120,24 @@ def _convert_one_rule(
         ent.attributes.setdefault("rule_id", rule_id_str)
         ent.attributes.setdefault("doc_type", rule.doc_type)
         ent.attributes.setdefault("check_category", rule.check_category)
+        # 批次 8-4：容差统一挂到 Value 节点（tolerance_params 完整声明 + tolerance 标量），
+        # 审查时优先取节点属性，关系属性仅作旧图兜底
+        ent.attributes.setdefault("tolerance_params", rule.tolerance or {})
+        ent.attributes.setdefault(
+            "tolerance",
+            (rule.structure or {}).get("assertion", {}).get("tolerance", 0) or 0,
+        )
     for rel in rels:
         rel.attributes.setdefault("rule_id", rule_id_str)
         rel.attributes.setdefault("doc_type", rule.doc_type)
         rel.attributes.setdefault("check_category", rule.check_category)
+        # 结果解释性：LLM 路径同样注入 rule_text，供审查结果与证据链展示（验收暴露缺失）
+        rel.attributes.setdefault("rule_text", rule.rule_text)
+        # 1-4：注入规则声明的完整容差参数，供审查时统一取用（amount_percent/weight_kg 等）
+        rel.attributes.setdefault("tolerance_params", rule.tolerance or {})
+        # 批次 7：注入结构化意图元数据（条件/例外），供审查与可视化使用
+        rel.attributes.setdefault("condition", (rule.structure or {}).get("condition"))
+        rel.attributes.setdefault("exceptions", (rule.structure or {}).get("exceptions") or [])
 
     return RuleGraphConvertResult(
         entities=entities,
@@ -139,6 +154,103 @@ def _convert_one_rule(
 _COMPLETENESS_ROOT = "齐套性检查"
 # 虚拟节点：表示"印章要求"这一动作，作为 MUST_STAMP 关系的 target
 _STAMP_ROOT = "印章要求"
+
+
+def _node_name(doc_type: str, field: str, aggregate: Optional[str] = None) -> str:
+    """字段节点名。聚合语义以 |SUM|ANY|ALL 后缀显式编码（批次 7-2）。"""
+    name = f"{doc_type}.{field}"
+    if aggregate and aggregate.upper() in ("SUM", "ANY", "ALL"):
+        name += f"|{aggregate.upper()}"
+    return name
+
+
+def _convert_structured_rule(rule: Rule, rule_index: int) -> RuleGraphConvertResult:
+    """结构化规则程序化转换（批次 7）：从 rule.structure.assertion 生成图谱。
+
+    不再依赖 LLM 转图谱：断言结构（源/算子/目标/聚合/角色/币别/单位）由规则导入时
+    LLM 解析产出，此处确定性映射为 Field 节点 + COMPARE_TO 边，置信度恒 1.0。
+    无 structure 的旧规则仍走 LLM 转换路径。
+    """
+    rule_id_str = f"R{rule_index:03d}"
+    structure = rule.structure or {}
+    assertion = structure.get("assertion") or {}
+    source = assertion.get("source") or {}
+    target = assertion.get("target") or {}
+
+    src_doc_type = source.get("doc_type") or rule.doc_type
+    tgt_doc_type = target.get("doc_type") or rule.doc_type
+    src_field = (source.get("field") or "").strip()
+    tgt_field = (target.get("field") or "").strip()
+    if not src_field or not tgt_field:
+        raise ValueError(f"规则 {rule_id_str} structure.assertion 缺少 source/target 字段")
+
+    operator = str(assertion.get("operator") or "等于").strip()
+    # aggregate 允许声明在 assertion 顶层或 source/target 内（两处均可）
+    aggregate = str(
+        assertion.get("aggregate") or source.get("aggregate") or target.get("aggregate") or ""
+    ).strip().upper() or None
+    currency = assertion.get("currency") or None
+    unit = assertion.get("unit") or None
+    src_role = source.get("role") or None
+    tgt_role = target.get("role") or None
+
+    src_name = _node_name(src_doc_type, src_field, aggregate)
+    tgt_name = _node_name(tgt_doc_type, tgt_field, aggregate)
+
+    src_attrs: dict = {
+        "doc_type": src_doc_type, "field": src_field, "rule_id": rule_id_str,
+    }
+    tgt_attrs: dict = {
+        "doc_type": tgt_doc_type, "field": tgt_field, "rule_id": rule_id_str,
+    }
+    if aggregate:
+        src_attrs["aggregate"] = aggregate
+        tgt_attrs["aggregate"] = aggregate
+    if src_role:
+        src_attrs["role"] = src_role
+    if tgt_role:
+        tgt_attrs["role"] = tgt_role
+    if currency:
+        src_attrs["currency"] = currency
+        tgt_attrs["currency"] = currency
+    if unit:
+        src_attrs["unit"] = unit
+        tgt_attrs["unit"] = unit
+    # 批次 8-4：容差挂到 Value 节点（完整参数 + 标量），审查时节点优先、关系兜底
+    src_attrs["tolerance_params"] = rule.tolerance or {}
+    tgt_attrs["tolerance_params"] = rule.tolerance or {}
+    src_attrs["tolerance"] = assertion.get("tolerance", 0) or 0
+    tgt_attrs["tolerance"] = assertion.get("tolerance", 0) or 0
+
+    rel_attrs: dict = {
+        "rule_id": rule_id_str,
+        "rule_text": rule.rule_text,
+        "doc_type": rule.doc_type,
+        "check_category": rule.check_category,
+        "operator": operator,
+        "tolerance": assertion.get("tolerance", 0) or 0,
+        "tolerance_params": rule.tolerance or {},
+        "condition": structure.get("condition") or None,
+        "exceptions": structure.get("exceptions") or [],
+    }
+    if aggregate:
+        rel_attrs["aggregate"] = aggregate
+    if currency:
+        rel_attrs["currency"] = currency
+    if unit:
+        rel_attrs["unit"] = unit
+
+    return RuleGraphConvertResult(
+        entities=[
+            EntityData(name=src_name, type="Field", attributes=src_attrs),
+            EntityData(name=tgt_name, type="Field", attributes=tgt_attrs),
+        ],
+        relationships=[
+            EdgeData(source=src_name, target=tgt_name, type="COMPARE_TO", attributes=rel_attrs),
+        ],
+        confidence=1.0,  # 程序化生成，置信度满分
+        auto_confirmed=False,
+    )
 
 
 def _convert_completeness_rule(rule: Rule, rule_index: int) -> RuleGraphConvertResult:
@@ -276,6 +388,14 @@ def build_graph(
             result = _convert_completeness_rule(rule, idx)
         elif rule.check_category == CHECK_STAMP:
             result = _convert_stamp_rule(rule, idx)
+        elif (rule.structure or {}).get("assertion"):
+            # 批次 7：有结构化断言的规则程序化转图谱（确定性，不调 LLM）
+            _report(
+                "结构化规则转换",
+                10 + int((idx - 1) / total * 70),
+                f"正在转换规则 {idx}/{total}：[{rule.doc_type}] {rule.rule_text[:40]}...",
+            )
+            result = _convert_structured_rule(rule, idx)
         else:
             _report(
                 "LLM 转换规则",
@@ -346,6 +466,26 @@ def build_graph(
     db.add(snapshot)
     db.commit()
     db.refresh(snapshot)
+
+    # 1-1：构建前全清——写入成功并保存快照后，清理该规则集的历史图谱。
+    # 先写后清：若新图写入失败，旧图仍可用（可回滚），避免构建中途失败丢数据。
+    old_graph_ids = [
+        gid
+        for gid in db.execute(
+            select(RuleSnapshot.graph_id)
+            .where(
+                RuleSnapshot.rule_set_id == rule_set_id,
+                RuleSnapshot.graph_id.isnot(None),
+            )
+        ).scalars().all()
+        if gid and gid != graph_id
+    ]
+    for old_gid in old_graph_ids:
+        try:
+            removed = neo4j.clear_graph(old_gid)
+            logger.info("已清理旧图谱 %s（%d 节点）", old_gid, removed)
+        except Exception as e:
+            logger.warning("清理旧图谱 %s 失败: %s", old_gid, e)
 
     return GraphBuildResponse(
         snapshot_id=snapshot.id,

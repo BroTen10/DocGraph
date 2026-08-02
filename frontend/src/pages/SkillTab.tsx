@@ -1,10 +1,11 @@
 import { useState, useEffect } from 'react'
+import { load as yamlLoad } from 'js-yaml'
 import {
   Table, Tag, Button, Modal, Form, Input, Space, message, Typography, Tooltip,
   Popconfirm, Switch, Alert,
 } from 'antd'
 import { PlusOutlined, EditOutlined, DeleteOutlined, ReloadOutlined, WarningOutlined } from '@ant-design/icons'
-import { skillsApi } from '../api/client'
+import { skillsApi, getErrorDetail, getErrorMessage } from '../api/client'
 import type { RuleParseSkill, RuleParseSkillCreate, RuleParseSkillUpdate } from '../types'
 
 const { Text } = Typography
@@ -159,8 +160,8 @@ export default function SkillTab({ ruleSetId }: Props) {
     try {
       const data = await skillsApi.list(ruleSetId)
       setSkills(data)
-    } catch (e: any) {
-      message.error('加载 Skill 失败: ' + (e?.message || e))
+    } catch (e) {
+      message.error('加载 Skill 失败: ' + getErrorMessage(e))
     } finally {
       setLoading(false)
     }
@@ -192,6 +193,19 @@ export default function SkillTab({ ruleSetId }: Props) {
       message.warning('请填写 Skill 名称')
       return
     }
+    // 批次 5-4：前端 YAML 预校验，语法错误直接拦截，避免后端往返
+    if (!yamlText.trim()) {
+      setYamlError('Skill 内容不能为空')
+      return
+    }
+    try {
+      yamlLoad(yamlText)
+    } catch (yamlErr) {
+      const msg = yamlErr instanceof Error ? yamlErr.message.replace(/^YAMLException:\s*/, '') : String(yamlErr)
+      setYamlError(`YAML 语法错误：${msg}`)
+      message.error('YAML 语法错误，请修正后保存')
+      return
+    }
     setYamlError('')
     setSaving(true)
     try {
@@ -217,12 +231,12 @@ export default function SkillTab({ ruleSetId }: Props) {
       }
       setModalOpen(false)
       await load()
-    } catch (e: any) {
-      const detail = e?.response?.data?.detail
+    } catch (e) {
+      const detail = getErrorDetail(e)
       if (typeof detail === 'string' && detail.includes('YAML')) {
         setYamlError(detail)
       } else {
-        message.error('保存失败: ' + (detail || e?.message || e))
+        message.error('保存失败: ' + getErrorMessage(e))
       }
     } finally {
       setSaving(false)
@@ -234,8 +248,8 @@ export default function SkillTab({ ruleSetId }: Props) {
       await skillsApi.delete(ruleSetId, skill.id)
       message.success('已删除')
       await load()
-    } catch (e: any) {
-      message.error('删除失败: ' + (e?.response?.data?.detail || e?.message || e))
+    } catch (e) {
+      message.error('删除失败: ' + getErrorMessage(e))
     }
   }
 
@@ -244,8 +258,8 @@ export default function SkillTab({ ruleSetId }: Props) {
       await skillsApi.update(ruleSetId, skill.id, { enabled })
       message.success(`「${skill.name}」已${enabled ? '启用' : '停用'}`)
       await load()
-    } catch (e: any) {
-      message.error('更新失败: ' + (e?.response?.data?.detail || e?.message || e))
+    } catch (e) {
+      message.error('更新失败: ' + getErrorMessage(e))
     }
   }
 

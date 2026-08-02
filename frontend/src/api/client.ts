@@ -1,11 +1,18 @@
 /** API 客户端：封装所有后端调用。所有数据查询均带 rule_set_id 做隔离。 */
 
-import axios from 'axios'
+import axios, { AxiosError, InternalAxiosRequestConfig } from 'axios'
 import type {
+  AnalyzeSampleResult,
+  ConflictDetectionResponse,
   ConstantsResponse,
   ContractBrief,
   ContractDetail,
   ContractUploadResponse,
+  DetectNewTypesResponse,
+  DocTypeCreate,
+  DocTypeItem,
+  DocTypeListResponse,
+  DocTypeUpdate,
   DocumentBrief,
   GraphBuildTaskStatus,
   GraphData,
@@ -14,6 +21,9 @@ import type {
   OcrTaskBrief,
   ReviewResultByDoc,
   ReviewResultByRule,
+  RuleParseSkill,
+  RuleParseSkillCreate,
+  RuleParseSkillUpdate,
   ReviewTaskListItem,
   ReviewTaskSummary,
   Rule,
@@ -22,13 +32,69 @@ import type {
   RuleSetCreate,
   RuleSetUpdate,
   RuleSnapshot,
+  SkillLearnRequest,
+  SkillLearnResponse,
 } from '../types'
 
 const http = axios.create({
   baseURL: '/api',
-  // 文档导入已改为异步任务模式，上传请求本身很快返回 task_id；此处仅兜底长链路。
-  timeout: 600000, // 10 分钟兜底
+  // 批次 5-15：默认超时收紧到 2 分钟；上传/解析类长链路按调用覆盖（见各上传函数）
+  timeout: 120000,
 })
+
+/** 批次 5-15：GET 请求超时/网络错误自动重试一次（幂等安全；POST 不重试防重复提交） */
+const retriedGet = new WeakSet<InternalAxiosRequestConfig>()
+http.interceptors.response.use(
+  (resp) => resp,
+  async (error: AxiosError) => {
+    const cfg = error.config
+    const isGet = (cfg?.method ?? '').toLowerCase() === 'get'
+    if (
+      cfg &&
+      !retriedGet.has(cfg) &&
+      isGet &&
+      !error.response &&
+      (error.code === 'ECONNABORTED' || error.code === 'ERR_NETWORK' || error.code === 'ETIMEDOUT')
+    ) {
+      retriedGet.add(cfg)
+      await new Promise((r) => setTimeout(r, 600))
+      return http.request(cfg)
+    }
+    return Promise.reject(error)
+  },
+)
+
+/** 批次 5-15：上传/解析类长链路超时（单位 ms） */
+const LONG_TIMEOUT = 600000
+
+/** 从任意异常中提取用户可读消息（后端 FastAPI 错误结构优先）。批次 5-9。 */
+export function getErrorMessage(e: unknown, fallback = '操作失败'): string {
+  if (e && typeof e === 'object') {
+    const maybe = e as {
+      response?: { data?: { detail?: unknown } }
+      message?: unknown
+      error?: unknown
+    }
+    if (maybe.response?.data?.detail) return String(maybe.response.data.detail)
+    if (typeof maybe.message === 'string') return maybe.message
+    if (typeof maybe.error === 'string') return maybe.error
+  }
+  if (typeof e === 'string') return e
+  return fallback
+}
+
+/** 提取后端返回的 detail 字段（原始值），供需要按内容判断的调用方使用。 */
+export function getErrorDetail(e: unknown): unknown {
+  if (e && typeof e === 'object') {
+    return (e as { response?: { data?: { detail?: unknown } } }).response?.data?.detail
+  }
+  return undefined
+}
+
+/** 判断是否为 antd Form 校验错误（含 errorFields）。 */
+export function isFormValidationError(e: unknown): boolean {
+  return !!e && typeof e === 'object' && Array.isArray((e as { errorFields?: unknown }).errorFields)
+}
 
 // ============ 规则集 ============
 export const ruleSetsApi = {
@@ -44,13 +110,15 @@ export const ruleSetsApi = {
 
 // ============ 合同 ============
 export const contractsApi = {
-  upload: (ruleSetId: string, files: File[]) => {
+  upload: (ruleSetId: string, files: File[], signal?: AbortSignal) => {
     const form = new FormData()
     files.forEach((f) => form.append('files', f))
     return http
       .post<ContractUploadResponse>('/contracts/upload', form, {
         params: { rule_set_id: ruleSetId },
         headers: { 'Content-Type': 'multipart/form-data' },
+        timeout: LONG_TIMEOUT,
+        signal,
       })
       .then((r) => r.data)
   },
@@ -80,10 +148,10 @@ export const rulesApi = {
       .post<RuleImportResponse>('/rules/import-batch', { raw_text, skill_ids: skill_ids || [] }, { params: { rule_set_id: ruleSetId } })
       .then((r) => r.data),
   /** 从上传的规则描述文档（PDF/EXCEL/WORD/MD）导入规则（异步任务模式，返回 task_id） */
-  importDocument: (ruleSetId: string, file: File, skill_ids?: string[]) => {
+  importDocument: (ruleSetId: string, file: File, skill_ids?: string[], signal?: AbortSignal) => {
     const form = new FormData()
     form.append('file', file)
-    const params: Record<string, any> = { rule_set_id: ruleSetId }
+    const params: Record<string, string> = { rule_set_id: ruleSetId }
     if (skill_ids && skill_ids.length) {
       params.skill_ids = skill_ids.join(',')
     }
@@ -91,6 +159,8 @@ export const rulesApi = {
       .post<ImportTask>('/rules/import-document', form, {
         params,
         headers: { 'Content-Type': 'multipart/form-data' },
+        timeout: LONG_TIMEOUT,
+        signal,
       })
       .then((r) => r.data)
   },
@@ -123,7 +193,7 @@ export const rulesApi = {
   getSnapshot: (id: string) => http.get<RuleSnapshot>(`/rules/snapshots/${id}`).then((r) => r.data),
   /** 语义冲突检测 */
   detectConflicts: (ruleSetId: string) =>
-    http.post<import('../types').ConflictDetectionResponse>('/rules/detect-conflicts', null, { params: { rule_set_id: ruleSetId } }).then((r) => r.data),
+    http.post<ConflictDetectionResponse>('/rules/detect-conflicts', null, { params: { rule_set_id: ruleSetId } }).then((r) => r.data),
   /** 缺陷概览统计 */
   getDefectSummary: (ruleSetId: string) =>
     http.get<{ total_rules: number; healthy: number; conflict: number; error: number; warning: number; info: number }>(
@@ -195,9 +265,6 @@ export const constantsApi = {
   health: () => http.get<{ status: string }>('/health').then((r) => r.data),
 }
 
-// ============ 文档类型管理 ============
-import type { DocTypeItem, DocTypeListResponse, DocTypeCreate, DocTypeUpdate, AnalyzeSampleResult, DetectNewTypesResponse } from '../types'
-
 export const docTypesApi = {
   /** 获取文档类型列表 */
   list: (params?: { status?: string; source?: string }) =>
@@ -221,7 +288,7 @@ export const docTypesApi = {
   reject: (id: string) =>
     http.post(`/doc-types/${id}/reject`).then((r) => r.data),
   /** 上传样例文档分析 */
-  analyzeSample: (file: File, docTypeHint?: string) => {
+  analyzeSample: (file: File, docTypeHint?: string, signal?: AbortSignal) => {
     const formData = new FormData()
     formData.append('file', file)
     const params: Record<string, string> = {}
@@ -229,6 +296,8 @@ export const docTypesApi = {
     return http.post<AnalyzeSampleResult>('/doc-types/analyze-sample', formData, {
       params,
       headers: { 'Content-Type': 'multipart/form-data' },
+      timeout: LONG_TIMEOUT,
+      signal,
     }).then((r) => r.data)
   },
   /** 从规则中检测新文档类型 */
@@ -239,16 +308,16 @@ export const docTypesApi = {
 // ============ 规则解析 Skill ============
 export const skillsApi = {
   list: (ruleSetId: string) =>
-    http.get<import('../types').RuleParseSkill[]>(`/rule-sets/${ruleSetId}/skills`).then((r) => r.data),
-  create: (ruleSetId: string, data: import('../types').RuleParseSkillCreate) =>
-    http.post<import('../types').RuleParseSkill>(`/rule-sets/${ruleSetId}/skills`, data).then((r) => r.data),
+    http.get<RuleParseSkill[]>(`/rule-sets/${ruleSetId}/skills`).then((r) => r.data),
+  create: (ruleSetId: string, data: RuleParseSkillCreate) =>
+    http.post<RuleParseSkill>(`/rule-sets/${ruleSetId}/skills`, data).then((r) => r.data),
   get: (ruleSetId: string, skillId: string) =>
-    http.get<import('../types').RuleParseSkill>(`/rule-sets/${ruleSetId}/skills/${skillId}`).then((r) => r.data),
-  update: (ruleSetId: string, skillId: string, data: import('../types').RuleParseSkillUpdate) =>
-    http.put<import('../types').RuleParseSkill>(`/rule-sets/${ruleSetId}/skills/${skillId}`, data).then((r) => r.data),
+    http.get<RuleParseSkill>(`/rule-sets/${ruleSetId}/skills/${skillId}`).then((r) => r.data),
+  update: (ruleSetId: string, skillId: string, data: RuleParseSkillUpdate) =>
+    http.put<RuleParseSkill>(`/rule-sets/${ruleSetId}/skills/${skillId}`, data).then((r) => r.data),
   delete: (ruleSetId: string, skillId: string) =>
     http.delete(`/rule-sets/${ruleSetId}/skills/${skillId}`).then((r) => r.data),
   /** 将人工修正规则的经验写回 Skill */
-  learn: (ruleSetId: string, data: import('../types').SkillLearnRequest) =>
-    http.post<import('../types').SkillLearnResponse>(`/rule-sets/${ruleSetId}/skills/learn`, data).then((r) => r.data),
+  learn: (ruleSetId: string, data: SkillLearnRequest) =>
+    http.post<SkillLearnResponse>(`/rule-sets/${ruleSetId}/skills/learn`, data).then((r) => r.data),
 }

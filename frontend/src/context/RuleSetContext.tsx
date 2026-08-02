@@ -24,6 +24,8 @@ interface RuleSetContextValue {
   currentId: string | null
   /** 是否正在加载规则集列表 */
   loading: boolean
+  /** 批次 5-11：加载失败时的错误消息（null 表示无错误），用于区分加载中/失败 */
+  error: string | null
   /** 切换当前规则集 */
   switchTo: (id: string) => void
   /** 创建新规则集并自动切换到新集 */
@@ -38,9 +40,11 @@ export function RuleSetProvider({ children }: { children: ReactNode }) {
   const [ruleSets, setRuleSets] = useState<RuleSet[]>([])
   const [currentId, setCurrentId] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
+  const [error, setError] = useState<string | null>(null)
 
   const refresh = useCallback(async () => {
     setLoading(true)
+    setError(null)
     try {
       const list = await ruleSetsApi.list()
       setRuleSets(list)
@@ -65,6 +69,7 @@ export function RuleSetProvider({ children }: { children: ReactNode }) {
       }
       setCurrentId(nextId)
     } catch (e) {
+      setError(e instanceof Error ? e.message : String(e))
       console.error('加载规则集列表失败:', e)
       message.error('加载规则集列表失败')
     } finally {
@@ -105,11 +110,12 @@ export function RuleSetProvider({ children }: { children: ReactNode }) {
       current,
       currentId,
       loading,
+      error,
       switchTo,
       create,
       refresh,
     }),
-    [ruleSets, current, currentId, loading, switchTo, create, refresh],
+    [ruleSets, current, currentId, loading, error, switchTo, create, refresh],
   )
 
   return <RuleSetContext.Provider value={value}>{children}</RuleSetContext.Provider>

@@ -178,3 +178,11 @@ mark.doc-highlight-mark {
 .ant-skeleton-content .ant-skeleton-paragraph > li {
   border-radius: 4px;
 }
+
+/* ===== 审查结果行状态底色（原 ResultsPage 内联 style，批次 5-3 收敛到全局样式） ===== */
+.row-fail {
+  background: #fff1f0 !important;
+}
+.row-unverifiable {
+  background: #fffbe6 !important;
+}

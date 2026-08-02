@@ -31,6 +31,9 @@ class RuleBase(BaseModel):
     status: str = "pending"
     # LLM 检测到的缺陷列表
     defects: list[DefectItem] = Field(default_factory=list)
+    # 结构化审查意图（可选）：{"condition": {...}, "assertion": {...}, "exceptions": [...]}
+    # 为 null 表示未结构化（旧规则）
+    structure: dict[str, Any] | None = None
 
 
 class RuleCreate(RuleBase):
@@ -47,6 +50,7 @@ class RuleUpdate(BaseModel):
     confidence: float | None = None
     status: str | None = None
     defects: list[DefectItem] | None = None
+    structure: dict[str, Any] | None = None
 
 
 class RuleImportRequest(BaseModel):

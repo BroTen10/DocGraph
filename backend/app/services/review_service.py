@@ -44,12 +44,14 @@ from ..models import Contract, Document, ReviewResult, ReviewTask, Rule
 from .contract_normalizer import extract_contract_numbers, normalize_contract_no
 from .field_extraction_service import (
     aggregate_amount,
+    cross_validate_contract_no,
     normalize_fields,
     parse_amount,
     parse_date,
 )
 from .ocr_service import process_document
 from .suggestion_service import build_suggestion
+from . import result_meta
 
 logger = logging.getLogger(__name__)
 
@@ -127,6 +129,7 @@ def start_review(
     # 创建任务
     task = ReviewTask(
         contract_id=contract_id,
+        snapshot_id=snapshot_id,
         status="running",
         progress=0,
         stage="初始化",
@@ -150,7 +153,7 @@ def start_review(
                 logger.error("后台审查任务 %s: 任务或合同不存在", task_id)
                 return
             docs = list(thread_contract.documents)
-            _run_review_pipeline(thread_db, thread_task, thread_contract, docs)
+            _run_review_pipeline(thread_db, thread_task, thread_contract, docs, snapshot_id)
             thread_db.commit()
         except Exception as e:
             logger.error("审查任务 %s 失败: %s", task_id, e, exc_info=True)
@@ -177,6 +180,7 @@ def _run_review_pipeline(
     task: ReviewTask,
     contract: Contract,
     docs: list[Document],
+    snapshot_id: Optional[uuid.UUID] = None,
 ) -> None:
     """执行审查管线。"""
     total = len(docs)
@@ -197,8 +201,11 @@ def _run_review_pipeline(
             doc.ocr_text = r.get("text", "")
             doc.has_stamp = r.get("has_stamp")
             doc.ocr_confidence = r.get("confidence", 0.0)
-            # 规范化字段
-            doc.extracted_fields = normalize_fields(doc.doc_type, r.get("fields", {}))
+            # 规范化字段 + 文件名 ground truth 交叉校验（防 OCR 合同号末位误识假阳性）
+            doc.extracted_fields = cross_validate_contract_no(
+                doc.file_name,
+                normalize_fields(doc.doc_type, r.get("fields", {})),
+            )
             doc.extracted_at = datetime.now()
         else:
             doc.ocr_status = "failed"
@@ -217,7 +224,7 @@ def _run_review_pipeline(
     graph_used = False
     try:
         from .graph_review_service import run_graph_review_with_contract
-        results_from_graph = run_graph_review_with_contract(db, contract, docs)
+        results_from_graph = run_graph_review_with_contract(db, contract, docs, snapshot_id=snapshot_id)
         if results_from_graph:
             graph_used = True
             logger.info("审查任务 %s: 使用图谱驱动，生成 %d 条结果", task.id, len(results_from_graph))
@@ -302,6 +309,11 @@ def _make_result(
     detail: Optional[dict] = None,
     suggestion: str = "",
 ) -> ReviewResult:
+    # 批次 9：结果闭环（C1/C2）——问题状态 + 严重度/偏离度
+    status = result_meta.default_status(result)
+    severity, deviation = result_meta.compute_severity(
+        result, rule.check_category if rule else None, detail or {}
+    )
     return ReviewResult(
         rule_id=rule.id if rule else None,
         rule_text=rule.rule_text if rule else None,
@@ -309,6 +321,17 @@ def _make_result(
         check_category=rule.check_category if rule else None,
         doc_id=doc.id if doc else None,
         result=result,
+        status=status,
+        status_history=[
+            {
+                "status": status,
+                "at": datetime.now().isoformat(timespec="seconds"),
+                "by": "system",
+                "note": "审查生成",
+            }
+        ],
+        severity=severity,
+        deviation=deviation,
         issue_desc=issue_desc or None,
         detail=detail or {},
         suggestion=suggestion or None,
@@ -691,8 +714,10 @@ def _check_time_logic(
 
 # ============ 结果过滤 ============
 
-# "字段无法提取"类 unverifiable 的典型模式
-_UNEXTRACTABLE_PATTERN = re.compile(r"字段无法提取|日期字段无法提取|日期无法解析|字段无法解析")
+# "数据缺失/无法核验"类 unverifiable 的典型模式（批次 8-3：字段级缺失统一并入摘要）
+_UNEXTRACTABLE_PATTERN = re.compile(
+    r"字段无法提取|日期字段无法提取|日期无法解析|字段无法解析|字段数据缺失|日期字段数据缺失|条件字段缺失|币别无法核验"
+)
 
 
 def _dedup_key(item: dict) -> tuple:
@@ -758,6 +783,17 @@ def _filter_results(items: list[dict]) -> list[dict]:
         # 按跳过数量降序排列，取前 5
         sorted_dts = sorted(dt_counts.items(), key=lambda x: -x[1])
         examples = [f"{dt}（涉及 {cnt} 条规则）" for dt, cnt in sorted_dts[:5]]
+        # 8-3：聚合字段级缺失清单（按 doc_type+field+reason 去重并合并 doc_files）
+        missing_by_key: dict[tuple, dict] = {}
+        for it in group:
+            for mf in (it.get("detail") or {}).get("missing_fields") or []:
+                key = (mf.get("doc_type"), mf.get("field"), mf.get("reason"))
+                if key not in missing_by_key:
+                    missing_by_key[key] = dict(mf)
+                else:
+                    existing = missing_by_key[key]
+                    files = set(existing.get("doc_files") or []) | set(mf.get("doc_files") or [])
+                    existing["doc_files"] = sorted(files)
         merged = {
             "id": group[0]["id"],
             "rule_id": None,
@@ -767,11 +803,18 @@ def _filter_results(items: list[dict]) -> list[dict]:
             "doc_id": None,
             "doc_name": None,
             "result": "unverifiable",
+            "status": group[0].get("status") or "open",
+            "status_history": group[0].get("status_history") or [],
+            "severity": group[0].get("severity") or result_meta.SEVERITY_LOW,
+            "deviation": group[0].get("deviation"),
+            "graph_source": group[0].get("graph_source"),
+            "graph_target": group[0].get("graph_target"),
             "issue_desc": f"共 {len(group)} 条规则核验项被跳过，涉及: {'、'.join(dt for dt in doc_types if dt)}",
             "detail": {
                 "skipped_rule_count": len(group),
                 "doc_types": doc_types,
                 "examples": examples,
+                "missing_fields": [missing_by_key[k] for k in missing_by_key],
             },
             "suggestion": "请补充上传相关文件或确认文件 OCR 质量后重新审查",
         }
@@ -798,6 +841,29 @@ def get_task_status(db: Session, task_id: uuid.UUID) -> Optional[ReviewTask]:
     return db.get(ReviewTask, task_id)
 
 
+def _result_to_item(r: ReviewResult) -> dict:
+    """ReviewResult → 结果条目 dict（含批次 9 新增字段：status/severity/deviation/图谱实体）。"""
+    return {
+        "id": str(r.id),
+        "rule_id": str(r.rule_id) if r.rule_id else None,
+        "rule_text": r.rule_text,
+        "doc_type": r.doc_type,
+        "check_category": r.check_category,
+        "doc_id": str(r.doc_id) if r.doc_id else None,
+        "doc_name": r.document.file_name if r.document else None,
+        "result": r.result,
+        "status": r.status,
+        "status_history": r.status_history or [],
+        "severity": r.severity,
+        "deviation": r.deviation,
+        "graph_source": r.graph_source,
+        "graph_target": r.graph_target,
+        "issue_desc": r.issue_desc,
+        "detail": r.detail,
+        "suggestion": r.suggestion,
+    }
+
+
 def get_results_by_rule(db: Session, task_id: uuid.UUID) -> dict:
     """按规则维度视图：所有结果列表 + 汇总。"""
     from sqlalchemy import select
@@ -813,24 +879,7 @@ def get_results_by_rule(db: Session, task_id: uuid.UUID) -> dict:
     )
     results = list(db.execute(stmt).scalars().all())
 
-    items = []
-    for r in results:
-        doc_name = r.document.file_name if r.document else None
-        items.append(
-            {
-                "id": str(r.id),
-                "rule_id": str(r.rule_id) if r.rule_id else None,
-                "rule_text": r.rule_text,
-                "doc_type": r.doc_type,
-                "check_category": r.check_category,
-                "doc_id": str(r.doc_id) if r.doc_id else None,
-                "doc_name": doc_name,
-                "result": r.result,
-                "issue_desc": r.issue_desc,
-                "detail": r.detail,
-                "suggestion": r.suggestion,
-            }
-        )
+    items = [_result_to_item(r) for r in results]
 
     # 过滤：去重 + 合并 unverifiable 字段缺失噪声
     items = _filter_results(items)
@@ -855,23 +904,7 @@ def get_results_by_doc(db: Session, task_id: uuid.UUID) -> dict:
     results = list(db.execute(stmt).scalars().all())
 
     # 先构造全部 items 列表，便于统一过滤
-    all_items: list[dict] = []
-    for r in results:
-        doc_id_str = str(r.doc_id) if r.doc_id else None
-        item = {
-            "id": str(r.id),
-            "rule_id": str(r.rule_id) if r.rule_id else None,
-            "rule_text": r.rule_text,
-            "doc_type": r.doc_type,
-            "check_category": r.check_category,
-            "doc_id": doc_id_str,
-            "doc_name": r.document.file_name if r.document else None,
-            "result": r.result,
-            "issue_desc": r.issue_desc,
-            "detail": r.detail,
-            "suggestion": r.suggestion,
-        }
-        all_items.append(item)
+    all_items = [_result_to_item(r) for r in results]
 
     # 过滤：去重 + 合并 unverifiable 字段缺失噪声
     filtered_items = _filter_results(all_items)
@@ -910,3 +943,36 @@ def get_results_by_doc(db: Session, task_id: uuid.UUID) -> dict:
         docs_list.insert(0, {"file_name": None, "doc_type": None, "results": no_doc_results})
 
     return {"task_id": str(task_id), "docs": docs_list, "summary": summary}
+
+
+def update_result_status(
+    db: Session,
+    result_id: uuid.UUID,
+    status: str,
+    note: Optional[str] = None,
+    by: str = "user",
+) -> ReviewResult:
+    """问题状态流转（9-1，C1）：open/confirmed/fixed/closed + 审计历史。
+    Raises:
+        ValueError: 结果不存在或状态流转非法。
+    """
+    result = db.get(ReviewResult, result_id)
+    if result is None:
+        raise ValueError(f"审查结果不存在: {result_id}")
+    if not result_meta.can_transition(result.status, status):
+        raise ValueError(f"非法状态流转: {result.status} → {status}")
+    history = list(result.status_history or [])
+    history.append(
+        {
+            "status": status,
+            "at": datetime.now().isoformat(timespec="seconds"),
+            "by": by,
+            "note": note,
+        }
+    )
+    result.status = status
+    result.status_history = history
+    db.add(result)
+    db.commit()
+    db.refresh(result)
+    return result
