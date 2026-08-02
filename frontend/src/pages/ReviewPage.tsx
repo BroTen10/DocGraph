@@ -5,7 +5,7 @@ import {
 } from 'antd'
 import { PlayCircleOutlined, ReloadOutlined, FileSearchOutlined } from '@ant-design/icons'
 import { useNavigate } from 'react-router-dom'
-import { contractsApi, reviewsApi } from '../api/client'
+import { contractsApi, getErrorMessage, reviewsApi } from '../api/client'
 import type { ContractBrief, ContractDetail, ReviewTaskSummary } from '../types'
 import PageHeader from '../components/PageHeader'
 import EmptyState from '../components/EmptyState'
@@ -31,8 +31,8 @@ export default function ReviewPage() {
     if (!currentId) return
     try {
       setContracts(await contractsApi.list(currentId))
-    } catch (e: any) {
-      message.error('加载合同失败: ' + (e?.message || e))
+    } catch (e) {
+      message.error('加载合同失败: ' + getErrorMessage(e))
     }
   }
 
@@ -108,8 +108,8 @@ export default function ReviewPage() {
       const t = await reviewsApi.start(selectedContract!)
       setTask(t)
       startPolling(t.id)
-    } catch (e: any) {
-      message.error('启动审查失败: ' + (e?.response?.data?.detail || e?.message || e))
+    } catch (e) {
+      message.error('启动审查失败: ' + getErrorMessage(e))
       setRunning(false)
     }
   }

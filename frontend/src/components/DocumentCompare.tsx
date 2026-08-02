@@ -309,6 +309,11 @@ export default function DocumentCompare({ doc, fileUrl, height = 600 }: Document
   const [highlightTarget, setHighlightTarget] = useState<string | null>(null)
   const docContainerRef = useRef<HTMLElement | null>(null)
 
+  // 批次 5-14：切换文档时清除上一次的高亮目标，避免旧高亮残留
+  useEffect(() => {
+    setHighlightTarget(null)
+  }, [doc, fileUrl])
+
   const handleDocReady = useCallback((container: HTMLElement | null) => {
     docContainerRef.current = container
   }, [])

@@ -266,6 +266,13 @@ export interface ReviewResultItem {
   doc_id: string | null
   doc_name: string | null
   result: 'pass' | 'fail' | 'unverifiable'
+  /** 批次 9：问题状态机（open/confirmed/fixed/closed）、严重度（high/medium/low）、偏离度、图谱实体关联 */
+  status?: string
+  status_history?: Array<{ status: string; at: string; by?: string | null; note?: string | null }>
+  severity?: 'high' | 'medium' | 'low' | null
+  deviation?: { kind: 'percent' | 'days'; value?: number | null; abs?: number; src?: unknown; tgt?: unknown } | null
+  graph_source?: string | null
+  graph_target?: string | null
   issue_desc: string | null
   detail: Record<string, unknown>
   suggestion: string | null
@@ -299,6 +306,8 @@ export interface DocTypeMeta {
 export interface ConstantsResponse {
   doc_types: DocTypeMeta[]
   check_categories: string[]
+  /** 批次 3-5：齐套性检查项名称由后端单源下发 */
+  completeness_category?: string
 }
 
 /** OCR 任务:单文档或合同级批量 */
@@ -349,6 +358,19 @@ export const RESULT_LABEL: Record<string, string> = {
   pass: '通过',
   fail: '不通过',
   unverifiable: '无法核验',
+}
+
+/** 批次 9：问题严重度颜色与文案。 */
+export const SEVERITY_COLOR: Record<string, string> = {
+  high: 'red',
+  medium: 'orange',
+  low: 'blue',
+}
+
+export const SEVERITY_LABEL: Record<string, string> = {
+  high: '高',
+  medium: '中',
+  low: '低',
 }
 
 // ============ 规则解析 Skill 类型 ============

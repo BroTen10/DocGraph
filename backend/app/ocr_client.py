@@ -79,7 +79,15 @@ class OCRClient:
 
         if field_template:
             # 已知文档类型：按模板提取 + 额外推断类型作为辅助信息
-            fields_hint = "请重点提取以下字段：" + "、".join(field_template) + "。"
+            fields_hint = (
+                "请提取以下字段，字段名严格使用模板名称：" + "、".join(field_template) + "。"
+                "提取规则："
+                "①金额/价税类字段返回纯数字值（保留小数，如 5239994.43），币别另行判断；"
+                "②日期类字段统一为 YYYY-MM-DD；"
+                "③数量/重量类返回纯数字；"
+                "④模板中的每个字段都必须出现在 fields 中，确实无法识别时值为 null 并加入 low_confidence_fields；"
+                "⑤合同号类字段逐位核对，特别注意末位数字，禁止缺位/错位。"
+            )
             infer_hint = "额外从文档内容和布局推断当前文件的业务类型名称，填入 inferred_doc_type。"
         else:
             # 未知文档类型：自由推断类型 + 自由提取结构化信息

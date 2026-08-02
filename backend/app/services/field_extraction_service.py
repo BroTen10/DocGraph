@@ -153,6 +153,41 @@ def normalize_fields(doc_type: str, fields: dict) -> dict:
     return out
 
 
+def cross_validate_contract_no(file_name: str, fields: dict) -> dict:
+    """文件名 ground truth 与 OCR 提取的合同号交叉校验（批次 2-2）。
+
+    验收发现：OCR 对长数字串（如 24HCSP012260253）末位误识，产生"合同号不一致"假阳性。
+    文件名由用户命名，含合同号时可信度更高：
+    - 文件名能提取到合同号 → 作为 ground truth
+    - OCR 合同号归一化后与文件名不一致 → 用文件名覆盖，并记录 OCR 原始值供追溯
+    - 文件名无合同号 → 原样返回
+    """
+    fn_candidates = extract_contract_numbers(file_name)
+    if not fn_candidates:
+        return fields
+    fn_canonical, fn_aliases = normalize_contract_no(fn_candidates)
+    if not fn_canonical:
+        return fields
+
+    out: dict[str, Any] = dict(fields)
+    contract_keys = [k for k in out if "合同" in k and "号" in k]
+    if not contract_keys:
+        return out
+
+    for k in contract_keys:
+        v = out.get(k)
+        ocr_candidates = extract_contract_numbers(str(v)) if v else []
+        ocr_canonical, _ = (
+            normalize_contract_no(ocr_candidates) if ocr_candidates else (None, [])
+        )
+        if ocr_canonical and ocr_canonical not in fn_aliases:
+            # OCR 合同号与文件名不一致 → 以文件名为准（防末位误识）
+            out[k] = fn_canonical
+            out[f"{k}__ocr_raw"] = v
+            out[f"{k}__source"] = "filename_override"
+    return out
+
+
 def aggregate_amount(doc_type: str, docs: list[dict]) -> Optional[float]:
     """聚合同类型多张单据的金额（一对多总额比对用）。
 

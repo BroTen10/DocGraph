@@ -116,6 +116,14 @@ class LLMClient:
         try:
             return json.loads(json_str)
         except json.JSONDecodeError as e:
+            # 批次 4-2：截断 JSON 容错修复（max_tokens 截断导致末尾不完整）
+            repaired = _repair_truncated_json(json_str)
+            if repaired is not None:
+                logger.warning(
+                    "JSON 截断修复成功（%d → %d 字符），已降级保留完整部分",
+                    len(json_str), len(repaired),
+                )
+                return json.loads(repaired)
             logger.error("JSON 解析失败: %s\n原始内容前 200 字: %r", e, resp[:200])
             raise LLMError(f"模型返回的不是有效 JSON: {e}", "invalid_response") from e
 
@@ -158,6 +166,101 @@ def _extract_json(text: str) -> str:
                 if depth == 0:
                     return text[: i + 1]
     return text
+
+
+def _repair_truncated_json(text: str) -> Optional[str]:
+    """修复被 max_tokens 截断的 JSON（批次 4-2）。
+
+    策略（按优先级，优先保留完整数据）：
+    1. 回退到最后一个完整的 '}' / ']'（丢弃被截断的尾部不完整元素）
+    2. 闭合末尾未闭合的字符串 + 补齐缺失的右括号/花括号
+    3. 仅补齐括号（字符串完整但缺闭合符的场景）
+    返回修复后的 JSON 字符串；无法修复返回 None。
+    """
+    s = text.strip()
+    if not s:
+        return None
+    candidates: list[str] = []
+    cut = _last_closing_index(s)
+    if cut >= 0:
+        candidates.append(_balance_brackets(_close_trailing_string(s[: cut + 1])))
+    candidates.append(_balance_brackets(_close_trailing_string(s)))
+    candidates.append(_balance_brackets(s))
+    for candidate in candidates:
+        if not candidate:
+            continue
+        try:
+            json.loads(candidate)
+            return candidate
+        except json.JSONDecodeError:
+            continue
+    return None
+
+
+def _last_closing_index(s: str) -> int:
+    """返回字符串外最后一个 '}' 或 ']' 的索引；无则 -1（感知引号与转义）。"""
+    last = -1
+    in_str = False
+    escape = False
+    for i, c in enumerate(s):
+        if escape:
+            escape = False
+            continue
+        if c == "\\":
+            escape = True
+            continue
+        if c == '"':
+            in_str = not in_str
+            continue
+        if not in_str and c in "}]":
+            last = i
+    return last
+
+
+def _close_trailing_string(s: str) -> str:
+    """若末尾处于未闭合的字符串内，补一个双引号；同时去掉尾部残留逗号。"""
+    out = s.rstrip()
+    while out.endswith(","):
+        out = out[:-1].rstrip()
+    in_str = False
+    escape = False
+    for c in out:
+        if escape:
+            escape = False
+            continue
+        if c == "\\":
+            escape = True
+            continue
+        if c == '"':
+            in_str = not in_str
+    return out + '"' if in_str else out
+
+
+def _balance_brackets(s: str) -> str:
+    """补齐缺失的右括号/花括号（感知字符串，忽略引号内的括号）。"""
+    stack: list[str] = []
+    in_str = False
+    escape = False
+    for c in s:
+        if escape:
+            escape = False
+            continue
+        if c == "\\":
+            escape = True
+            continue
+        if c == '"':
+            in_str = not in_str
+            continue
+        if in_str:
+            continue
+        if c == "{":
+            stack.append("}")
+        elif c == "[":
+            stack.append("]")
+        elif c in "}]":
+            if stack and stack[-1] == c:
+                stack.pop()
+    return s + "".join(reversed(stack))
 
 
 _global_llm: Optional[LLMClient] = None

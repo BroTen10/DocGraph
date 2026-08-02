@@ -48,8 +48,11 @@ def _post_multipart(url, files):
 
 # 1. 创建规则集
 def create_ruleset():
+    # 唯一名 + 不抢占默认规则集：脚本幂等可重跑（名称重复会被后端 400 拒绝）
+    import time as _time
+    name = f"验收-出口代理-24HCSP012260253-{_time.strftime('%Y%m%d%H%M%S')}"
     rs = _post_json(f"{BASE}/api/rule-sets",
-                     {"name": "验收-出口代理-24HCSP012260253", "description": "PRD 9.1 功能验收", "is_default": True})
+                     {"name": name, "description": "PRD 9.1 功能验收", "is_default": False})
     log("规则集:", rs["id"], rs["name"])
     return rs["id"]
 
@@ -90,12 +93,51 @@ def upload(rule_set_id):
     with open(os.path.join(OUT, "01_upload.json"), "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
     log("上传 contract_id:", data.get("contract_id"))
-    return data["contract_id"]
+    # 返回完整响应：main 同时使用 contract_id 与 classified
+    return data
 
 
-# 4. 启动审查
-def start_review(contract_id):
-    t = _post_json(f"{BASE}/api/reviews/start", {"contract_id": str(contract_id), "snapshot_id": None})
+# 4. 确认全部规则（pending → confirmed + enabled，图谱构建要求）
+def confirm_all_rules(rule_set_id):
+    log("确认全部规则（pending → confirmed + enabled）...")
+    resp = _post_json(f"{BASE}/api/rules/confirm?rule_set_id={rule_set_id}", {"ids": None})
+    log("规则确认:", resp)
+    return resp
+
+
+# 4.5 构建图谱（异步）+ 轮询
+def build_graph(rule_set_id, auto_confirm_all=True):
+    log("构建图谱（异步，auto_confirm_all=%s）..." % auto_confirm_all)
+    resp = _post_json(
+        f"{BASE}/api/rules/build-graph-async?rule_set_id={rule_set_id}&auto_confirm_all={str(auto_confirm_all).lower()}",
+        {},
+    )
+    task_id = resp.get("task_id")
+    log("图谱构建任务:", task_id)
+    url = f"{BASE}/api/rules/build-graph-status/{task_id}"
+    start = time.time()
+    last = None
+    while time.time() - start < 1800:
+        t = _get_json(url)
+        st = f"{t.get('progress')}% | {t.get('stage')}"
+        if st != last:
+            log(f"  图谱构建 {st} | {t.get('status')}")
+            last = st
+        if t.get("status") in ("completed", "failed"):
+            if t.get("status") == "failed":
+                raise RuntimeError(f"图谱构建失败: {t.get('error')}")
+            log("图谱构建完成:", "节点", t.get("node_count"), "关系", t.get("edge_count"))
+            return t
+        time.sleep(5)
+    raise TimeoutError("图谱构建超时")
+
+
+# 5. 启动审查（可指定快照 → 图谱驱动）
+def start_review(contract_id, snapshot_id=None):
+    body = {"contract_id": str(contract_id)}
+    if snapshot_id:
+        body["snapshot_id"] = str(snapshot_id)
+    t = _post_json(f"{BASE}/api/reviews/start", body)
     log("审查任务:", t["id"], "status=", t.get("status"))
     return t["id"]
 
@@ -131,9 +173,22 @@ def fetch_results(task_id):
 def main():
     rs_id = create_ruleset()
     seed_rules(rs_id)
-    cid = upload(rs_id)
-    task_id = start_review(cid)
+    confirm_all_rules(rs_id)
+    up = upload(rs_id)
+    cid = up["contract_id"]
+
+    # 图谱路径验收（批次 2-3）：构建图谱 → 带快照审查
+    gtask = build_graph(rs_id)
+    snapshot_id = gtask.get("snapshot_id")
+    log("图谱快照:", snapshot_id, "| graph_id:", gtask.get("graph_id"))
+
+    # 精确计时（批次 2-4）
+    t0 = time.time()
+    task_id = start_review(cid, snapshot_id)
     task = poll(task_id)
+    elapsed = time.time() - t0
+    log(f"审查耗时: {elapsed:.1f}s（含 OCR；图谱驱动 snapshot={snapshot_id}）")
+
     log("最终:", task.get("status"), task.get("error"))
     if task.get("status") == "failed":
         return

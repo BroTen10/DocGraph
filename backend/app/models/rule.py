@@ -49,6 +49,13 @@ class Rule(Base):
     confirmed_by: Mapped[str | None] = mapped_column(String(64), nullable=True, default=None)
     # LLM 检测到的缺陷列表：[{"type":"ambiguous_reference","severity":"warning","description":"..."}]
     defects: Mapped[list] = mapped_column(JSONB, default=list, nullable=False)
+    # 结构化审查意图（批次 7）：复合规则 Clause 化
+    # {"condition": {...}, "assertion": {...}, "exceptions": [...]}
+    # - condition: 触发条件（如"如果为国内运输"）
+    # - assertion: 核心断言 {source/target: {doc_type, field, aggregate, role}, operator, tolerance, currency, unit}
+    # - exceptions: 例外条款列表 [{text, reason}]
+    # 为 null/空表示旧规则，审查走 rule_text 兼容路径
+    structure: Mapped[dict | None] = mapped_column(JSONB, nullable=True, default=None)
     # ----- -----
     updated_at: Mapped[datetime] = mapped_column(
         DateTime, server_default=func.now(), onupdate=func.now(), nullable=False

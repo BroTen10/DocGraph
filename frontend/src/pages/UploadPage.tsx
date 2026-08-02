@@ -5,7 +5,7 @@ import {
 } from 'antd'
 import { InboxOutlined, DeleteOutlined, ReloadOutlined, EditOutlined, FileSearchOutlined, UploadOutlined, ThunderboltOutlined, ReloadOutlined as ReRunIcon } from '@ant-design/icons'
 import type { UploadProps } from 'antd'
-import { contractsApi, constantsApi, ocrApi } from '../api/client'
+import { contractsApi, constantsApi, getErrorMessage, ocrApi } from '../api/client'
 import type { ContractBrief, ContractDetail, ContractUploadResponse, DocTypeMeta, DocumentBrief, OcrTask } from '../types'
 import DocumentCompare from '../components/DocumentCompare'
 import PageHeader from '../components/PageHeader'
@@ -45,8 +45,8 @@ export default function UploadPage() {
     setLoading(true)
     try {
       setContracts(await contractsApi.list(currentId))
-    } catch (e: any) {
-      message.error('加载合同列表失败: ' + (e?.message || e))
+    } catch (e) {
+      message.error('加载合同列表失败: ' + getErrorMessage(e))
     } finally {
       setLoading(false)
     }
@@ -86,7 +86,7 @@ export default function UploadPage() {
     },
     onRemove: (file) => {
       pendingFilesRef.current = pendingFilesRef.current.filter(
-        (f) => !(f.name === file.name && f.size === file.size && f.lastModified === (file as any).lastModified),
+        (f) => !(f.name === file.name && f.size === file.size && f.lastModified === file.lastModified),
       )
       setPendingFileNames(pendingFilesRef.current.map((f) => f.name))
     },
@@ -113,8 +113,8 @@ export default function UploadPage() {
       if (resp.contract_id) {
         viewDetail(resp.contract_id)
       }
-    } catch (e: any) {
-      message.error('上传失败: ' + (e?.response?.data?.detail || e?.message || e))
+    } catch (e) {
+      message.error('上传失败: ' + getErrorMessage(e))
     } finally {
       setUploading(false)
     }
@@ -143,8 +143,8 @@ export default function UploadPage() {
           console.warn('查询 OCR 任务状态失败:', e)
         }
       }
-    } catch (e: any) {
-      message.error('加载详情失败: ' + (e?.message || e))
+    } catch (e) {
+      message.error('加载详情失败: ' + getErrorMessage(e))
     } finally {
       setDetailLoading(false)
     }
@@ -196,8 +196,8 @@ export default function UploadPage() {
       setOcrTask(t)
       message.info(`已触发 OCR,共 ${t.total_count} 个待识别文档`)
       pollOcrTask(t.id, detail.id)
-    } catch (e: any) {
-      message.error('触发 OCR 失败: ' + (e?.message || e))
+    } catch (e) {
+      message.error('触发 OCR 失败: ' + getErrorMessage(e))
     } finally {
       setOcrTriggering(false)
     }
@@ -211,8 +211,8 @@ export default function UploadPage() {
       setOcrTask(t)
       message.info(`已触发「${fileName}」OCR 识别`)
       pollOcrTask(t.id, currentDetailIdRef.current || '')
-    } catch (e: any) {
-      message.error('触发 OCR 失败: ' + (e?.message || e))
+    } catch (e) {
+      message.error('触发 OCR 失败: ' + getErrorMessage(e))
     } finally {
       setDocOcrLoading((m) => ({ ...m, [docId]: false }))
     }
@@ -229,8 +229,8 @@ export default function UploadPage() {
       message.success('删除成功')
       if (detail?.id === id) setDetail(null)
       await load()
-    } catch (e: any) {
-      message.error('删除失败: ' + (e?.message || e))
+    } catch (e) {
+      message.error('删除失败: ' + getErrorMessage(e))
     }
   }
 
@@ -239,8 +239,8 @@ export default function UploadPage() {
       await contractsApi.updateDocType(docId, docType)
       message.success('已修正文件类型')
       if (detail) await viewDetail(detail.id)
-    } catch (e: any) {
-      message.error('修正失败: ' + (e?.message || e))
+    } catch (e) {
+      message.error('修正失败: ' + getErrorMessage(e))
     }
   }
 
@@ -253,8 +253,8 @@ export default function UploadPage() {
       setAliasModal({ ...aliasModal, open: false })
       await load()
       if (detail?.id === aliasModal.contract.id) await viewDetail(aliasModal.contract.id)
-    } catch (e: any) {
-      message.error('更新失败: ' + (e?.message || e))
+    } catch (e) {
+      message.error('更新失败: ' + getErrorMessage(e))
     }
   }
 
@@ -268,8 +268,8 @@ export default function UploadPage() {
       try {
         const fresh = await contractsApi.getOcr(doc.id)
         setCompareDoc(fresh)
-      } catch (e: any) {
-        message.error('加载 OCR 详情失败: ' + (e?.message || e))
+    } catch (e) {
+      message.error('加载 OCR 详情失败: ' + getErrorMessage(e))
       } finally {
         setCompareLoading(false)
       }

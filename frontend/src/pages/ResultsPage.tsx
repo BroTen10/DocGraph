@@ -10,9 +10,9 @@ import {
   ReloadOutlined, FileSearchOutlined,
   EyeOutlined, FileTextOutlined,
 } from '@ant-design/icons'
-import { reviewsApi, contractsApi } from '../api/client'
+import { reviewsApi, contractsApi, getErrorMessage } from '../api/client'
 import type { ReviewResultItem, ReviewResultByRule, ReviewResultByDoc, ReviewTaskListItem, DocumentBrief } from '../types'
-import { RESULT_COLOR, RESULT_LABEL } from '../types'
+import { RESULT_COLOR, RESULT_LABEL, SEVERITY_COLOR, SEVERITY_LABEL } from '../types'
 import PageHeader from '../components/PageHeader'
 import EmptyState from '../components/EmptyState'
 import DocumentCompare from '../components/DocumentCompare'
@@ -102,9 +102,9 @@ export default function ResultsPage() {
         setOcrDoc(doc)
         setOcrDocName(doc.file_name)
       }
-    } catch (e: any) {
+    } catch (e) {
       if (requestId === ocrRequestRef.current) {
-        message.error('加载 OCR 详情失败: ' + (e?.message || e))
+        message.error('加载 OCR 详情失败: ' + getErrorMessage(e))
       }
     } finally {
       if (requestId === ocrRequestRef.current) {
@@ -116,10 +116,6 @@ export default function ResultsPage() {
   const closeOcrDrawer = useCallback(() => {
     ++ocrRequestRef.current
     setOcrVisible(false)
-    setOcrDocId(null)
-    setOcrDocName(null)
-    setOcrDoc(null)
-    setOcrLoading(false)
   }, [])
 
   // ============ 加载任务 ============
@@ -154,8 +150,8 @@ export default function ResultsPage() {
         setByRule(null)
         setByDoc(null)
       }
-    } catch (e: any) {
-      message.error('加载任务列表失败: ' + (e?.message || e))
+    } catch (e) {
+      message.error('加载任务列表失败: ' + getErrorMessage(e))
     } finally {
       setTasksLoading(false)
     }
@@ -170,8 +166,8 @@ export default function ResultsPage() {
       ])
       setByRule(r)
       setByDoc(d)
-    } catch (e: any) {
-      message.error('加载结果失败: ' + (e?.message || e))
+    } catch (e) {
+      message.error('加载结果失败: ' + getErrorMessage(e))
       setByRule(null)
       setByDoc(null)
     } finally {
@@ -196,6 +192,15 @@ export default function ResultsPage() {
     <Tag color={RESULT_COLOR[r]}>{RESULT_LABEL[r] || r}</Tag>
   )
 
+  // 批次 9：严重度标签（high/medium/low）
+  const severityTag = (s?: string | null) =>
+    s && SEVERITY_COLOR[s] ? <Tag color={SEVERITY_COLOR[s]}>{SEVERITY_LABEL[s]}</Tag> : null
+
+  // 批次 9：问题状态标签（open/confirmed/fixed/closed）
+  const statusLabel: Record<string, string> = {
+    open: '打开', confirmed: '已确认', fixed: '已修复', closed: '已关闭',
+  }
+
   // ============ 按规则视图列 ============
   // 列宽设计目标:1280px 视口下左 5/24 + 右 19/24,表格不需横向滚动即可看全主要列
   // 文件类型 字段已移至详情抽屉,避免挤压其它信息列
@@ -203,7 +208,12 @@ export default function ResultsPage() {
   const ruleColumns = useMemo<ColumnsType<ReviewResultItem>>(() => [
     {
       title: '结果', dataIndex: 'result', key: 'result', width: 80,
-      render: (v: string) => resultTag(v),
+      render: (_: unknown, record: ReviewResultItem) => (
+        <Space size={4} wrap>
+          {resultTag(record.result)}
+          {severityTag(record.severity)}
+        </Space>
+      ),
       filters: [
         { text: '不通过', value: 'fail' as const },
         { text: '无法核验', value: 'unverifiable' as const },
@@ -327,6 +337,57 @@ export default function ResultsPage() {
     },
   ], [openDetailDrawer, openOcrDrawer])
 
+  // 批次 5-12：按文档维度表格列定义 memo（避免 render 内重建）
+  const docColumns = useMemo<ColumnsType<ReviewResultItem>>(
+    () => [
+      { title: '结果', dataIndex: 'result', key: 'result', width: 80, render: (v: string) => resultTag(v) },
+      { title: '检查项', dataIndex: 'check_category', key: 'check_category', width: 90 },
+      {
+        title: '问题描述', dataIndex: 'issue_desc', key: 'issue_desc', width: 220,
+        render: (v: string | null) => {
+          if (!v) return <Text type="secondary">通过</Text>
+          return (
+            <Paragraph
+              ellipsis={{ rows: 2, expandable: true, symbol: '展开' }}
+              style={{ marginBottom: 0, whiteSpace: 'pre-wrap', fontSize: 12 }}
+            >
+              {v}
+            </Paragraph>
+          )
+        },
+      },
+      {
+        title: '修正建议', dataIndex: 'suggestion', key: 'suggestion', width: 180,
+        render: (v: string | null) => {
+          if (!v) return <Text type="secondary">-</Text>
+          return (
+            <Paragraph
+              ellipsis={{ rows: 2, expandable: true, symbol: '展开' }}
+              style={{ marginBottom: 0, whiteSpace: 'pre-wrap', fontSize: 12 }}
+              type="warning"
+            >
+              {v}
+            </Paragraph>
+          )
+        },
+      },
+      {
+        title: '操作', key: 'action', width: 90, fixed: 'right',
+        render: (_: unknown, record: ReviewResultItem) => (
+          <Space size={2} direction="vertical">
+            <Button type="link" size="small" style={{ padding: 0, fontSize: 12 }} onClick={() => openDetailDrawer(record)}>详情</Button>
+            {record.doc_id ? (
+              <Button type="link" size="small" style={{ padding: 0, fontSize: 12 }} onClick={() => openOcrDrawer(record.doc_id!, record.doc_name)}>对照</Button>
+            ) : (
+              <Text type="secondary" style={{ fontSize: 12 }}>无原件</Text>
+            )}
+          </Space>
+        ),
+      },
+    ],
+    [openDetailDrawer, openOcrDrawer],
+  )
+
   // ============ 问题详情抽屉 ============
 
   const renderDetailDrawer = () => {
@@ -342,6 +403,10 @@ export default function ResultsPage() {
         title={
           <Space>
             {resultTag(item.result)}
+            {severityTag(item.severity)}
+            {item.status && statusLabel[item.status] ? (
+              <Tag>{statusLabel[item.status]}</Tag>
+            ) : null}
             <span style={{ fontWeight: 600 }}>{item.check_category || '检查项'}</span>
           </Space>
         }
@@ -469,6 +534,15 @@ export default function ResultsPage() {
       width="88%"
       open={ocrVisible}
       onClose={closeOcrDrawer}
+      afterOpenChange={(open) => {
+        // 批次 5-2：关闭动画结束后再清空内容，避免关闭动画期间内容闪烁
+        if (!open) {
+          setOcrDocId(null)
+          setOcrDocName(null)
+          setOcrDoc(null)
+          setOcrLoading(false)
+        }
+      }}
       destroyOnClose
       styles={{ body: { padding: 16 } }}
     >
@@ -547,52 +621,7 @@ export default function ResultsPage() {
             >
               <Table
                 dataSource={d.results}
-                columns={[
-                  { title: '结果', dataIndex: 'result', key: 'result', width: 80, render: (v: string) => resultTag(v) },
-                  { title: '检查项', dataIndex: 'check_category', key: 'check_category', width: 90 },
-                  {
-                    title: '问题描述', dataIndex: 'issue_desc', key: 'issue_desc', width: 220,
-                    render: (v: string | null) => {
-                      if (!v) return <Text type="secondary">通过</Text>
-                      return (
-                        <Paragraph
-                          ellipsis={{ rows: 2, expandable: true, symbol: '展开' }}
-                          style={{ marginBottom: 0, whiteSpace: 'pre-wrap', fontSize: 12 }}
-                        >
-                          {v}
-                        </Paragraph>
-                      )
-                    },
-                  },
-                  {
-                    title: '修正建议', dataIndex: 'suggestion', key: 'suggestion', width: 180,
-                    render: (v: string | null) => {
-                      if (!v) return <Text type="secondary">-</Text>
-                      return (
-                        <Paragraph
-                          ellipsis={{ rows: 2, expandable: true, symbol: '展开' }}
-                          style={{ marginBottom: 0, whiteSpace: 'pre-wrap', fontSize: 12 }}
-                          type="warning"
-                        >
-                          {v}
-                        </Paragraph>
-                      )
-                    },
-                  },
-                  {
-                    title: '操作', key: 'action', width: 90, fixed: 'right',
-                    render: (_: unknown, record: ReviewResultItem) => (
-                      <Space size={2} direction="vertical">
-                        <Button type="link" size="small" style={{ padding: 0, fontSize: 12 }} onClick={() => openDetailDrawer(record)}>详情</Button>
-                        {record.doc_id ? (
-                          <Button type="link" size="small" style={{ padding: 0, fontSize: 12 }} onClick={() => openOcrDrawer(record.doc_id!, record.doc_name)}>对照</Button>
-                        ) : (
-                          <Text type="secondary" style={{ fontSize: 12 }}>无原件</Text>
-                        )}
-                      </Space>
-                    ),
-                  },
-                ]}
+                columns={docColumns}
                 rowKey="id"
                 size="middle"
                 pagination={false}
@@ -825,11 +854,6 @@ export default function ResultsPage() {
       {/* Drawers */}
       {renderDetailDrawer()}
       {renderOcrDrawer()}
-
-      <style>{`
-        .row-fail { background: #fff1f0 !important; }
-        .row-unverifiable { background: #fffbe6 !important; }
-      `}</style>
     </div>
   )
 }

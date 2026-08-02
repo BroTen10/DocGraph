@@ -96,6 +96,24 @@ interface ProcessedEdge extends GraphEdge {
   curvature: number
 }
 
+/** D3 仿真节点：GraphNode + 布局字段（x/y/vx/vy/fx/fy） */
+type SimNode = GraphNode & d3.SimulationNodeDatum
+/** D3 仿真边：ProcessedEdge + 布局后 source/target 指向节点对象 */
+type SimLink = d3.SimulationLinkDatum<SimNode> & ProcessedEdge
+
+/** 取边端点名（布局后 source/target 可能是节点对象） */
+function linkEndName(end: string | number | SimNode): string {
+  return typeof end === 'object' && end !== null ? end.name : String(end)
+}
+
+/** 取边端点坐标（布局后 source/target 可能是节点对象） */
+function linkEndPoint(end: string | number | SimNode): { x: number; y: number } {
+  if (typeof end === 'object' && end !== null) {
+    return { x: end.x ?? 0, y: end.y ?? 0 }
+  }
+  return { x: 0, y: 0 }
+}
+
 function processEdges(edges: GraphEdge[]): ProcessedEdge[] {
   // 按 (source,target) 分组（source 字典序在前）
   const pairKey = (s: string, t: string) => (s < t ? `${s}||${t}` : `${t}||${s}`)
@@ -248,18 +266,18 @@ export default function GraphView({
 
     // ===== 数据准备 =====
     // 后端边的 source/target 用节点 name 引用，所以 D3 link id accessor 也用 name
-    const nodes = graph.nodes.map((n) => ({
+    const nodes: SimNode[] = graph.nodes.map((n) => ({
       ...n,
       id: String(n.id ?? n.name),
-    } as GraphNode & { x?: number; y?: number; vx?: number; vy?: number; fx?: number; fy?: number }))
+    }))
 
-    const edges = processEdges(graph.edges)
+    const edges: SimLink[] = processEdges(graph.edges)
 
     // ===== 仿真 =====
-    const simulation = d3.forceSimulation(nodes as any)
-      .force('link', d3.forceLink(edges as any).id((d: any) => d.name).distance((d: any) => {
+    const simulation = d3.forceSimulation<SimNode>(nodes)
+      .force('link', d3.forceLink<SimNode, SimLink>(edges).id((d) => d.name).distance((d) => {
         const baseDistance = 150
-        return baseDistance + (((d.pairTotal as number) || 1) - 1) * 50
+        return baseDistance + ((d.pairTotal || 1) - 1) * 50
       }))
       .force('charge', d3.forceManyBody().strength(-400))
       .force('center', d3.forceCenter(width / 2, heightVal / 2))
@@ -334,7 +352,7 @@ export default function GraphView({
     let dragStart: [number, number] | null = null
     let dragMoved = false
 
-    const drag = d3.drag<any, any>()
+    const drag = d3.drag<SVGGElement, SimNode>()
       .on('start', (event, d) => {
         dragStart = [event.x, event.y]
         dragMoved = false
@@ -361,7 +379,7 @@ export default function GraphView({
         d.fy = null
       })
 
-    nodeG.call(drag as any)
+    nodeG.call(drag)
 
     // ===== 交互：节点点击高亮 + 外部回调 =====
     let currentSelectedNode: GraphNode | null = null
@@ -382,28 +400,24 @@ export default function GraphView({
       clearHighlight()
       currentSelectedNode = node
       // 高亮目标节点
-      nodeG.selectAll('circle').attr('stroke', (d: any) =>
+      nodeG.selectAll<SVGCircleElement, SimNode>('circle').attr('stroke', (d: SimNode) =>
         d.id === node.id ? HIGHLIGHT_COLOR : '#fff'
       )
-      nodeG.selectAll('circle').attr('stroke-width', (d: any) =>
+      nodeG.selectAll<SVGCircleElement, SimNode>('circle').attr('stroke-width', (d: SimNode) =>
         d.id === node.id ? 4 : 2.5
       )
       // 高亮相邻边
       const adjacentEdgeKeys = new Set<string>()
       edges.forEach((e, i) => {
-        const sid = e.source as any
-        const tid = e.target as any
-        const sName = typeof sid === 'object' ? sid.name : sid
-        const tName = typeof tid === 'object' ? tid.name : tid
+        const sName = linkEndName(e.source)
+        const tName = linkEndName(e.target)
         if (sName === node.name || tName === node.name) {
           adjacentEdgeKeys.add(`${i}`)
         }
       })
-      linkPaths.each(function (d: any, i: number) {
-        const sid = d.source as any
-        const tid = d.target as any
-        const sName = typeof sid === 'object' ? sid.name : sid
-        const tName = typeof tid === 'object' ? tid.name : tid
+      linkPaths.each(function (d: SimLink, i: number) {
+        const sName = linkEndName(d.source)
+        const tName = linkEndName(d.target)
         if (sName === node.name || tName === node.name) {
           d3.select(this).attr('stroke', HIGHLIGHT_COLOR).attr('stroke-width', 2.5)
         }
@@ -438,19 +452,15 @@ export default function GraphView({
       clearHighlight()
       currentSelectedNode = null
       d3.select(this).attr('stroke', '#3498db').attr('stroke-width', 3)
-      const sid = d.source as any
-      const tid = d.target as any
-      const sName = typeof sid === 'object' ? sid.name : sid
-      const tName = typeof tid === 'object' ? tid.name : tid
+      const sName = linkEndName(d.source)
+      const tName = linkEndName(d.target)
       onEdgeClick?.(sName, tName)
     })
 
     linkLabelBg.on('click', function (event, d) {
       event.stopPropagation()
-      const sid = d.source as any
-      const tid = d.target as any
-      const sName = typeof sid === 'object' ? sid.name : sid
-      const tName = typeof tid === 'object' ? tid.name : tid
+      const sName = linkEndName(d.source)
+      const tName = linkEndName(d.target)
       onEdgeClick?.(sName, tName)
     })
 
@@ -469,19 +479,19 @@ export default function GraphView({
       .on('zoom', (event) => {
         g.attr('transform', event.transform.toString())
       })
-    svg.call(zoom as any)
+    svg.call(zoom)
     zoomBehaviorRef.current = zoom
 
     // ===== 仿真 tick 更新 =====
     simulation.on('tick', () => {
       // 边路径
-      linkPaths.attr('d', (d: any) => {
-        const s = d.source as any
-        const t = d.target as any
-        const sx = typeof s === 'object' ? s.x : 0
-        const sy = typeof s === 'object' ? s.y : 0
-        const tx = typeof t === 'object' ? t.x : 0
-        const ty = typeof t === 'object' ? t.y : 0
+      linkPaths.attr('d', (d: SimLink) => {
+        const s = linkEndPoint(d.source)
+        const t = linkEndPoint(d.target)
+        const sx = s.x
+        const sy = s.y
+        const tx = t.x
+        const ty = t.y
         if (d.isSelfLoop) {
           return selfLoopPath(sx, sy)
         }
@@ -491,29 +501,29 @@ export default function GraphView({
       // 边标签位置（中点 + 曲线偏移）
       const labelOffset = 0
       linkLabelText
-        .attr('x', (d: any) => {
-          const s = d.source as any
-          const t = d.target as any
-          const sx = typeof s === 'object' ? s.x : 0
-          const tx = typeof t === 'object' ? t.x : 0
+        .attr('x', (d: SimLink) => {
+          const s = linkEndPoint(d.source)
+          const t = linkEndPoint(d.target)
+          const sx = s.x
+          const tx = t.x
           return (sx + tx) / 2 + labelOffset
         })
-        .attr('y', (d: any) => {
-          const s = d.source as any
-          const t = d.target as any
-          const sy = typeof s === 'object' ? s.y : 0
-          const ty = typeof t === 'object' ? t.y : 0
+        .attr('y', (d: SimLink) => {
+          const s = linkEndPoint(d.source)
+          const t = linkEndPoint(d.target)
+          const sy = s.y
+          const ty = t.y
           return (sy + ty) / 2
         })
 
       // 边标签背景跟随
-      linkLabelBg.each(function (d: any) {
-        const s = d.source as any
-        const t = d.target as any
-        const sx = typeof s === 'object' ? s.x : 0
-        const tx = typeof t === 'object' ? t.x : 0
-        const sy = typeof s === 'object' ? s.y : 0
-        const ty = typeof t === 'object' ? t.y : 0
+      linkLabelBg.each(function (d: SimLink) {
+        const s = linkEndPoint(d.source)
+        const t = linkEndPoint(d.target)
+        const sx = s.x
+        const tx = t.x
+        const sy = s.y
+        const ty = t.y
         const cx = (sx + tx) / 2
         const cy = (sy + ty) / 2
         const sel = d3.select(this)
@@ -524,7 +534,7 @@ export default function GraphView({
       })
 
       // 节点位置
-      nodeG.attr('transform', (d: any) => `translate(${d.x},${d.y})`)
+      nodeG.attr('transform', (d: SimNode) => `translate(${d.x ?? 0},${d.y ?? 0})`)
     })
 
     // ===== 外部 selectedNodeName 变化时联动高亮（独立 effect，避免重跑仿真） =====
@@ -537,7 +547,7 @@ export default function GraphView({
       svg.on('click', null)
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [graph, showEdgeLabels, containerReady])
+  }, [graph, showEdgeLabels, containerReady, height])
 
   // ===== 外部 selectedNodeName 变化时联动高亮（不重跑仿真） =====
   useEffect(() => {
@@ -546,17 +556,17 @@ export default function GraphView({
     const target = graph.nodes.find((n) => n.name === selectedNodeName)
     if (!target) return
     const targetId = String(target.id ?? target.name)
-    svg.selectAll('.node circle')
-      .attr('stroke', (d: any) => (d.id === targetId ? HIGHLIGHT_COLOR : '#fff'))
-      .attr('stroke-width', (d: any) => (d.id === targetId ? 4 : 2.5))
-      .style('filter', (d: any) => (d.id === targetId ? 'url(#glow-filter)' : 'none'))
+    svg.selectAll<SVGCircleElement, SimNode>('.node circle')
+      .attr('stroke', (d: SimNode) => (d.id === targetId ? HIGHLIGHT_COLOR : '#fff'))
+      .attr('stroke-width', (d: SimNode) => (d.id === targetId ? 4 : 2.5))
+      .style('filter', (d: SimNode) => (d.id === targetId ? 'url(#glow-filter)' : 'none'))
   }, [selectedNodeName, graph])
 
   // ===== 重置视图 =====
   const handleResetView = () => {
     const svg = d3.select(svgRef.current!)
     if (zoomBehaviorRef.current) {
-      svg.transition().duration(500).call(zoomBehaviorRef.current.transform as any, d3.zoomIdentity)
+      svg.transition().duration(500).call(zoomBehaviorRef.current.transform, d3.zoomIdentity)
     }
   }
 

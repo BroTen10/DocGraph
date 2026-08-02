@@ -106,7 +106,10 @@ def _llm_extract_fields_from_text(
             "严格输出 JSON: {\"fields\": {字段名: 值}, \"inferred_doc_type\": string|null, "
             "\"has_stamp\": true|false|null, \"confidence\": 0-1}\n"
             "has_stamp: 文本中是否提及印章/盖章/用印；无法判断时填 null。\n"
-            "confidence: 整体提取置信度。"
+            "confidence: 整体提取置信度。\n"
+            "字段提取规则：①金额/价税类返回纯数字（保留小数，如 5239994.43）；②日期类统一 YYYY-MM-DD；"
+            "③数量/重量类返回纯数字；④模板中每个字段都必须出现在 fields 中，无法识别时值为 null；"
+            "⑤合同号类逐位核对，禁止缺位/错位。"
         )
         user_prompt = (
             f"文件类型: {doc_type}\n"
@@ -121,7 +124,7 @@ def _llm_extract_fields_from_text(
                 {"role": "user", "content": user_prompt},
             ],
             temperature=0.1,
-            max_tokens=2048,
+            max_tokens=4096,
         )
         fields = resp.get("fields", {}) or {}
         inferred = resp.get("inferred_doc_type") or ""
@@ -221,7 +224,11 @@ def _ocr_scanned_pdf(
             r = ocr.recognize(str(tmp_img), doc_type_hint=doc_type, field_template=field_template)
             if r.get("success"):
                 all_text.append(r.get("text", ""))
-                merged_fields.update(r.get("fields", {}) or {})
+                # 多页合并：跳过空值，避免某页未识别出的 null 覆盖其他页已提取的值
+                for k, v in (r.get("fields", {}) or {}).items():
+                    if v is None or v == "":
+                        continue
+                    merged_fields[k] = v
                 if r.get("has_stamp") is True:
                     has_stamp_any = True
                 elif r.get("has_stamp") is False and has_stamp_any is not True:

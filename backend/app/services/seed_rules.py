@@ -1,15 +1,10 @@
 """种子规则数据：基于 PRD 第 2.3 节"出口代理"场景规则矩阵。
 
-调用 init_seed_rules(db) 在首次启动时插入默认规则（若 rules 表为空）。
 规则按"文件类型 × 检查项"二维组织，自然语言描述 + 容差参数。
+数据供验收脚本（acceptance_run.py）与测试灌入使用；不再内置启动播种入口。
 """
 
 from __future__ import annotations
-
-import logging
-
-from sqlalchemy import select
-from sqlalchemy.orm import Session
 
 from ..constants import (
     CHECK_ACCURACY,
@@ -29,9 +24,6 @@ from ..constants import (
     REQUIRED_DOC_TYPES,
     STAMP_REQUIREMENTS,
 )
-from ..models import Rule
-
-logger = logging.getLogger(__name__)
 
 
 def _rule(
@@ -237,17 +229,3 @@ _TIME_RULES = [
 ALL_SEED_RULES: list[dict] = (
     _COMPLETENESS_RULES + _STAMP_RULES + _ACCURACY_RULES + _TIME_RULES
 )
-
-
-def init_seed_rules(db: Session) -> int:
-    """首次启动时插入种子规则。返回插入条数（已存在则返回 0）。"""
-    existing = db.execute(select(Rule)).scalars().first()
-    if existing is not None:
-        return 0
-    count = 0
-    for r in ALL_SEED_RULES:
-        db.add(Rule(**r))
-        count += 1
-    db.commit()
-    logger.info("已插入 %d 条种子规则", count)
-    return count

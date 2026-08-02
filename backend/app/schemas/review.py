@@ -60,9 +60,22 @@ class ReviewResultItem(BaseModel):
     doc_id: UUID | None = None
     doc_name: str | None = None
     result: str  # pass / fail / unverifiable
+    # 批次 9：问题状态机 / 严重度 / 偏离度 / 图谱实体关联
+    status: str = "open"
+    status_history: list[dict[str, Any]] = Field(default_factory=list)
+    severity: str | None = None
+    deviation: dict[str, Any] | None = None
+    graph_source: str | None = None
+    graph_target: str | None = None
     issue_desc: str | None = None
     detail: dict[str, Any] = Field(default_factory=dict)
     suggestion: str | None = None
+
+
+class ReviewResultStatusUpdate(BaseModel):
+    """问题状态流转请求（open/confirmed/fixed/closed）。"""
+    status: str
+    note: str | None = None
 
 
 class ReviewResultByRule(BaseModel):

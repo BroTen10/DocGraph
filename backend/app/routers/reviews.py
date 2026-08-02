@@ -13,6 +13,8 @@ from ..models import Contract, ReviewTask
 from ..schemas.review import (
     ReviewResultByDoc,
     ReviewResultByRule,
+    ReviewResultItem,
+    ReviewResultStatusUpdate,
     ReviewStartRequest,
     ReviewTaskListItem,
     ReviewTaskSummary,
@@ -88,3 +90,19 @@ def get_results_by_doc(
 ) -> ReviewResultByDoc:
     """按文档维度结果视图。"""
     return ReviewResultByDoc(**review_service.get_results_by_doc(db, task_id))
+
+
+@router.patch("/results/{result_id}/status", response_model=ReviewResultItem)
+def update_result_status(
+    result_id: uuid.UUID,
+    payload: ReviewResultStatusUpdate,
+    db: Session = Depends(get_db),
+) -> ReviewResultItem:
+    """问题状态流转（批次 9）：open/confirmed/fixed/closed，带审计历史。"""
+    try:
+        result = review_service.update_result_status(
+            db, result_id, payload.status, note=payload.note
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return ReviewResultItem(**review_service._result_to_item(result))

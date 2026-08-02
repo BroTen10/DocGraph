@@ -87,6 +87,16 @@ def _run_migrations(engine) -> None:
     """执行增量 DDL 迁移。适用于在已有表上加列等操作。"""
     migrations = [
         "ALTER TABLE rules ADD COLUMN IF NOT EXISTS defects JSONB NOT NULL DEFAULT '[]'::jsonb;",
+        "ALTER TABLE rules ADD COLUMN IF NOT EXISTS structure JSONB;",
+        # 批次 9：结果闭环（问题状态机 + 严重度 + 偏离度 + 图谱实体关联）
+        "ALTER TABLE review_results ADD COLUMN IF NOT EXISTS status VARCHAR(16) NOT NULL DEFAULT 'open';",
+        "ALTER TABLE review_results ADD COLUMN IF NOT EXISTS status_history JSONB NOT NULL DEFAULT '[]'::jsonb;",
+        "ALTER TABLE review_results ADD COLUMN IF NOT EXISTS severity VARCHAR(16);",
+        "ALTER TABLE review_results ADD COLUMN IF NOT EXISTS deviation JSONB;",
+        "ALTER TABLE review_results ADD COLUMN IF NOT EXISTS graph_source VARCHAR(255);",
+        "ALTER TABLE review_results ADD COLUMN IF NOT EXISTS graph_target VARCHAR(255);",
+        # 存量 pass 结果回填为 closed（无需跟进）
+        "UPDATE review_results SET status = 'closed' WHERE result = 'pass' AND status = 'open';",
     ]
     with engine.begin() as conn:
         for sql in migrations:

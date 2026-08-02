@@ -24,8 +24,10 @@ logger = logging.getLogger(__name__)
 # 主合同号格式：2位年份 + HCSP + 9位数字（如 24HCSP012260253）
 _MAIN_CONTRACT_PATTERN = re.compile(r"\b(\d{2}HCSP\d{6,12})\b", re.IGNORECASE)
 # 主合同号 + 分批号：24HCSP012260253-10
+# 注意：分隔符必须显式出现（[-_\s]+），不能用 * —— 否则贪婪回溯会把主号末位数字
+# 当成分批号吞掉（24HCSP012260253 → 24HCSP01226025 + 3），产生错误主号。
 _MAIN_WITH_BATCH_PATTERN = re.compile(
-    r"\b(\d{2}HCSP\d{6,12})[-_\s]*(\d{1,3})\b", re.IGNORECASE
+    r"\b(\d{2}HCSP\d{6,12})[-_\s]+(\d{1,3})\b", re.IGNORECASE
 )
 # 外贸合同号：2位年份 + 字母 + 数字（如 24YK097）
 _FOREIGN_CONTRACT_PATTERN = re.compile(r"\b(\d{2}[A-Z]{2,5}\d{2,6})\b")
@@ -89,8 +91,9 @@ def normalize_contract_no(
     # 找主号：优先 HCSP 格式
     main_nos = [c for c in unique if _MAIN_CONTRACT_PATTERN.fullmatch(c)]
     if main_nos:
-        # 主号本身已不含分批号后缀（_MAIN_CONTRACT_PATTERN 不会匹配带 -10 的）
-        canonical = main_nos[0]
+        # 主号本身已不含分批号后缀（_MAIN_CONTRACT_PATTERN 不会匹配带 -10 的）。
+        # 多候选时优先取最长——更可能是完整主号（如 24HCSP012260253 > 24HCSP01226025）
+        canonical = max(main_nos, key=len)
     else:
         # 无主号，取第一个候选作为规范号
         canonical = unique[0]

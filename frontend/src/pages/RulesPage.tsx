@@ -6,8 +6,8 @@ import {
   Upload, Drawer, Progress,
 } from 'antd'
 import { PlusOutlined, EditOutlined, DeleteOutlined, HistoryOutlined, ImportOutlined, InboxOutlined, FileTextOutlined, SettingOutlined, CheckOutlined, WarningOutlined, ArrowRightOutlined } from '@ant-design/icons'
-import { rulesApi, constantsApi, ruleSetsApi, skillsApi } from '../api/client'
-import type { Rule, RuleSet, RuleSnapshot, DocTypeMeta, ConstantsResponse, RuleImportResponse, ImportTask } from '../types'
+import { rulesApi, constantsApi, getErrorMessage, isFormValidationError, ruleSetsApi, skillsApi } from '../api/client'
+import type { Rule, RuleSet, RuleSnapshot, DocTypeMeta, ConstantsResponse, RuleImportResponse, ImportTask, DefectItem } from '../types'
 import PageHeader from '../components/PageHeader'
 import { useRuleSet } from '../context/RuleSetContext'
 import SkillTab from './SkillTab'
@@ -18,6 +18,15 @@ const { Text } = Typography
 const { Dragger } = Upload
 // 后端单源化 — fallback（后端返回前兜底）
 const FALLBACK_CHECK_CATEGORIES = ['齐套性', '基础判断', '信息准确性', '时间逻辑']
+
+/** 冲突检测结果分组 */
+type ConflictGroup = {
+  rule_ids: string[]
+  type: string
+  severity: string
+  description: string
+  rules: Rule[]
+}
 const FILE_ACCEPT = '.pdf,.xlsx,.xls,.docx,.md,.txt'
 
 // 导入任务状态 → 中文标签
@@ -79,12 +88,14 @@ export default function RulesPage() {
   const [snapshots, setSnapshots] = useState<RuleSnapshot[]>([])
   const [docTypes, setDocTypes] = useState<DocTypeMeta[]>([])
   const [checkCategories, setCheckCategories] = useState<string[]>([])
+  const [completenessCategory, setCompletenessCategory] = useState<string>('齐套性')  // 批次 3-5：后端单源
   const [ruleSet, setRuleSet] = useState<RuleSet | null>(null)  // 当前规则集详情（含 doc_types / check_categories）
   const [loading, setLoading] = useState(false)
   const navigate = useNavigate()
   const [deleting, setDeleting] = useState(false)
   const [selectedRowKeys, setSelectedRowKeys] = useState<string[]>([])
   const [modalOpen, setModalOpen] = useState(false)
+  const [saving, setSaving] = useState(false)  // 批次 5-1：防重复提交
   const [editing, setEditing] = useState<Rule | null>(null)
   const [form] = Form.useForm()
   const [importOpen, setImportOpen] = useState(false)
@@ -93,7 +104,8 @@ export default function RulesPage() {
   const [importing, setImporting] = useState(false)
   const [importResult, setImportResult] = useState<RuleImportResponse | null>(null)
   // 文件导入
-  const [importFile, setImportFile] = useState<File | null>(null)
+  // RcFile = antd Upload 的 beforeUpload 参数类型（File + uid），可直接作 originFileObj
+  const [importFile, setImportFile] = useState<NonNullable<Parameters<NonNullable<UploadProps['beforeUpload']>>[0]> | null>(null)
   const [fileImportResult, setFileImportResult] = useState<RuleImportResponse | null>(null)
   // 导入阶段提示（解决"点了没反馈"的问题）
   const [importStage, setImportStage] = useState<'parsing' | 'llm' | 'saving' | null>(null)
@@ -111,7 +123,7 @@ export default function RulesPage() {
   // 批量确认
   const [confirming, setConfirming] = useState(false)
   // Skill 选择
-  const [allSkills, setAllSkills] = useState<Array<{ id: string; name: string; is_builtin: boolean }>>([])
+  const [allSkills, setAllSkills] = useState<Array<{ id: string; name: string; is_builtin: boolean; enabled: boolean }>>([])
   const [importSkillIds, setImportSkillIds] = useState<string[]>([])
   // 冲突检测
   const [conflictDetecting, setConflictDetecting] = useState(false)
@@ -156,10 +168,11 @@ export default function RulesPage() {
       setSnapshots(s)
       setDocTypes(c.doc_types)
       setCheckCategories(c.check_categories)
+      setCompletenessCategory(c.completeness_category || '齐套性')
       setRuleSet(rs)
       if (ds) setDefectSummaryRemote(ds)
-    } catch (e: any) {
-      message.error('加载失败: ' + (e?.message || e))
+    } catch (e) {
+      message.error('加载失败: ' + getErrorMessage(e))
     } finally {
       setLoading(false)
     }
@@ -209,12 +222,28 @@ export default function RulesPage() {
     return [...new Set([...seed, ...fromSet, ...fromRules])]
   }, [ruleSet, rules])
 
+  // 批次 3-3：必备文档 × 检查项 无已确认启用规则的空格（齐套性报警）
+  const essentialMissingCells = useMemo(() => {
+    const cells: Array<{ doc_type: string; check_category: string }> = []
+    effectiveDocTypes.forEach((dt) => {
+      const isRequired = (matrix[dt]?.[completenessCategory] || []).some(
+        (r) => r.enabled && r.status === 'confirmed'
+      )
+      if (!isRequired) return
+      effectiveCheckCategories.forEach((cc) => {
+        const confirmed = (matrix[dt]?.[cc] || []).filter((r) => r.enabled && r.status === 'confirmed')
+        if (confirmed.length === 0) cells.push({ doc_type: dt, check_category: cc })
+      })
+    })
+    return cells
+  }, [matrix, effectiveDocTypes, effectiveCheckCategories, completenessCategory])
+
   // 计算缺陷统计
   const defectSummary = useMemo(() => {
     const summary = { error: 0, warning: 0, info: 0, total: 0, conflict: 0 }
     rules.forEach((r) => {
-      const defects = (r as any).defects || []
-      defects.forEach((d: any) => {
+      const defects = r.defects || []
+      defects.forEach((d: DefectItem) => {
         const sev = d.severity || 'info'
         // 冲突类单独计数
         if (['logical_contradiction', 'boundary_overlap', 'redundant'].includes(d.type)) {
@@ -265,7 +294,7 @@ export default function RulesPage() {
       { key: 'doc_type', label: '适用单据' },
     ]
     const changes = LEARN_FIELDS.filter(
-      (f) => after[f.key] != null && String(after[f.key]) !== String((before as any)[f.key] ?? ''),
+      (f) => after[f.key] != null && String(after[f.key]) !== String(before[f.key] ?? ''),
     )
     if (!changes.length) return
 
@@ -281,7 +310,7 @@ export default function RulesPage() {
           {changes.map((f) => (
             <div key={f.key} style={{ fontSize: 12, marginBottom: 4 }}>
               <Tag>{f.label}</Tag>
-              <Text delete type="secondary">{String((before as any)[f.key] ?? '（空）')}</Text>
+              <Text delete type="secondary">{String(before[f.key] ?? '（空）')}</Text>
               {' → '}
               <Text strong>{String(after[f.key])}</Text>
             </div>
@@ -295,7 +324,7 @@ export default function RulesPage() {
           const beforeData: Record<string, unknown> = {}
           const afterData: Record<string, unknown> = {}
           changes.forEach((f) => {
-            beforeData[f.key] = (before as any)[f.key]
+            beforeData[f.key] = before[f.key]
             afterData[f.key] = after[f.key]
           })
           // rule_text 未变时也带上，作为经验的定位锚点
@@ -311,14 +340,16 @@ export default function RulesPage() {
           message.success(
             `已写入 Skill「${resp.skill.name}」（v${resp.skill.version}，新增 ${resp.added_instructions.length} 条经验）`,
           )
-        } catch (e: any) {
-          message.error('写入经验失败: ' + (e?.response?.data?.detail || e?.message || e))
+    } catch (e) {
+      message.error('写入经验失败: ' + getErrorMessage(e))
         }
       },
     })
   }
 
   const handleSave = async () => {
+    if (saving) return
+    setSaving(true)
     try {
       const values = await form.validateFields()
       // 组装容差参数
@@ -341,14 +372,16 @@ export default function RulesPage() {
         message.success('规则已更新')
         promptLearnFromCorrection(editing, payload)
       } else {
-        await rulesApi.create(currentId!, payload as any)
+        await rulesApi.create(currentId!, payload)
         message.success('规则已新增')
       }
       setModalOpen(false)
       await load()
-    } catch (e: any) {
-      if (e?.errorFields) return // 表单校验错误
-      message.error('保存失败: ' + (e?.message || e))
+    } catch (e) {
+      if (isFormValidationError(e)) return // 表单校验错误
+      message.error('保存失败: ' + getErrorMessage(e))
+    } finally {
+      setSaving(false)
     }
   }
 
@@ -357,8 +390,8 @@ export default function RulesPage() {
       await rulesApi.delete(id)
       message.success('已删除')
       await load()
-    } catch (e: any) {
-      message.error('删除失败: ' + (e?.message || e))
+    } catch (e) {
+      message.error('删除失败: ' + getErrorMessage(e))
     }
   }
 
@@ -372,8 +405,8 @@ export default function RulesPage() {
       message.success(`已删除 ${resp.deleted} 条规则`)
       setSelectedRowKeys([])
       await load()
-    } catch (e: any) {
-      message.error('删除失败: ' + (e?.response?.data?.detail || e?.message || e))
+    } catch (e) {
+      message.error('删除失败: ' + getErrorMessage(e))
     } finally {
       setDeleting(false)
     }
@@ -392,8 +425,8 @@ export default function RulesPage() {
       }
       message.success(resp.message + '，已同步启用')
       await load()
-    } catch (e: any) {
-      message.error('确认失败: ' + (e?.response?.data?.detail || e?.message || e))
+    } catch (e) {
+      message.error('确认失败: ' + getErrorMessage(e))
     } finally {
       setConfirming(false)
     }
@@ -423,8 +456,8 @@ export default function RulesPage() {
       }
       message.success(`检测到 ${resp.total_conflicts} 个冲突，涉及 ${resp.affected_rules} 条规则`)
       await load()
-    } catch (e: any) {
-      message.error('冲突检测失败: ' + (e?.response?.data?.detail || e?.message || e))
+    } catch (e) {
+      message.error('冲突检测失败: ' + getErrorMessage(e))
     } finally {
       setConflictDetecting(false)
     }
@@ -450,7 +483,7 @@ export default function RulesPage() {
       try {
         const { skillsApi } = await import('../api/client')
         const skills = await skillsApi.list(currentId)
-        setAllSkills(skills.map((s) => ({ id: s.id, name: s.name, is_builtin: s.is_builtin })))
+        setAllSkills(skills.map((s) => ({ id: s.id, name: s.name, is_builtin: s.is_builtin, enabled: s.enabled })))
       } catch {
         // 加载 Skill 失败不阻塞导入
       }
@@ -474,7 +507,7 @@ export default function RulesPage() {
         message.success(`导入完成：成功 ${resp.imported} 条，跳过 ${resp.skipped} 条`)
         await load()
         // 检测新的文档类型
-        const newTypes = (resp as any).new_doc_types
+        const newTypes = resp.new_doc_types
         if (newTypes && newTypes.length > 0) {
           message.info(
             `发现 ${newTypes.length} 个新的文档类型，可在「文档类型」页面查看并补充样例`,
@@ -484,8 +517,8 @@ export default function RulesPage() {
       } else {
         message.warning(`未导入任何规则，跳过 ${resp.skipped} 条`)
       }
-    } catch (e: any) {
-      const msg = '导入失败: ' + (e?.response?.data?.detail || e?.message || e)
+    } catch (e) {
+      const msg = '导入失败: ' + getErrorMessage(e)
       setImportError(msg)
       message.error(msg)
     } finally {
@@ -515,8 +548,8 @@ export default function RulesPage() {
       )
       taskId = task.task_id
       setImportStage('llm')
-    } catch (e: any) {
-      const msg = '文件上传失败: ' + (e?.response?.data?.detail || e?.message || e)
+    } catch (e) {
+      const msg = '文件上传失败: ' + getErrorMessage(e)
       setImportError(msg)
       message.error(msg)
       setImporting(false)
@@ -549,7 +582,7 @@ export default function RulesPage() {
           message.success(`导入完成：成功 ${task.result.imported} 条，跳过 ${task.result.skipped} 条`)
           await load()
           // 检测新的文档类型
-          const newTypes = (task.result as any).new_doc_types
+    const newTypes = task.result?.new_doc_types
           if (newTypes && newTypes.length > 0) {
             message.info(
               `发现 ${newTypes.length} 个新的文档类型，可在「文档类型」页面查看并补充样例`,
@@ -593,12 +626,12 @@ export default function RulesPage() {
             size: importFile.size,
             type: importFile.type,
             status: 'done',
-            originFileObj: importFile as any,
+            originFileObj: importFile,
           } as UploadFile,
         ]
       : [],
     beforeUpload: (file) => {
-      setImportFile(file as File)
+      setImportFile(file)
       setFileImportResult(null)
       return false // 阻止自动上传
     },
@@ -634,7 +667,7 @@ export default function RulesPage() {
             {effectiveDocTypes.map((dt) => {
               const meta = docTypes.find((d) => d.name === dt)
               // 必备/非必备从齐套性规则推导：该文档类型在"齐套性"列下有已确认规则即为必备
-              const isRequired = (matrix[dt]?.['齐套性'] || []).some(
+              const isRequired = (matrix[dt]?.[completenessCategory] || []).some(
                 (r) => r.enabled && r.status === 'confirmed'
               )
               // 计算该行已覆盖列数（指有至少 1 条 confirmed+enabled 规则）
@@ -652,6 +685,7 @@ export default function RulesPage() {
                     <div style={{ fontSize: 12, lineHeight: 1.8 }}>
                       <div>关键字段：{meta.key_fields?.length ? meta.key_fields.join('、') : '-'}</div>
                       <div>业务含义：{meta.business_meaning || '-'}</div>
+                      <div>印章要求：{meta.stamp_required || '无'}</div>
                       <div>样例文档：{meta.has_sample ? '已上传' : '未上传'}</div>
                     </div>
                   ) : <span style={{ fontSize: 12 }}>未在文档类型中定义</span>
@@ -670,11 +704,14 @@ export default function RulesPage() {
                 const isEssentialMissing = isRequired && confirmedCount === 0
                 const cellBg: string | undefined = isEssentialMissing ? '#fff1f0' : undefined
                 return (
-                  <td key={cc} style={{ ...checkTdStyle, background: cellBg }}>
+                  <td
+                    key={cc}
+                    style={{ ...checkTdStyle, background: cellBg }}
+                    onClick={totalCount === 0 ? () => openCreateWithDefaults(dt, cc) : undefined}
+                  >
                     {totalCount === 0 ? (
                       <a
-                        style={{ cursor: 'pointer', fontSize: 11, color: isEssentialMissing ? '#ff4d4f' : '#1890ff' }}
-                        onClick={(e) => { e.stopPropagation(); openCreateWithDefaults(dt, cc) }}
+                        style={{ fontSize: 11, color: isEssentialMissing ? '#ff4d4f' : '#1890ff' }}
                       >
                         + {isEssentialMissing ? '必检' : '添加'}
                       </a>
@@ -744,6 +781,48 @@ export default function RulesPage() {
         </tbody>
       </table>
       </div>
+    )
+  }
+
+  // 批次 5-6：错误/警告 Tab 共用缺陷表格渲染（消除重复）
+  const renderDefectTable = (severity: 'error' | 'warning', rowPrefix: string) => {
+    const entries: Array<{ ruleId: string; docType: string; checkCategory: string; ruleText: string; type: string; description: string }> = []
+    rules.forEach((r) => {
+      ;(r.defects || []).filter((d) => d.severity === severity).forEach((d) => {
+        entries.push({
+          ruleId: r.id, docType: r.doc_type, checkCategory: r.check_category,
+          ruleText: r.rule_text, type: d.type, description: d.description,
+        })
+      })
+    })
+    return (
+      <Table
+        dataSource={entries}
+        rowKey={(_, i) => `${rowPrefix}-${i}`}
+        size="small"
+        pagination={{ pageSize: 20, showSizeChanger: true, pageSizeOptions: ['10', '20', '50'], size: 'small' }}
+        columns={[
+          { title: '文件类型', dataIndex: 'docType', width: 100 },
+          { title: '检查项', dataIndex: 'checkCategory', width: 80 },
+          { title: '规则文本', dataIndex: 'ruleText', ellipsis: true },
+          { title: '缺陷描述', dataIndex: 'description', ellipsis: true },
+          {
+            title: '操作', width: 80,
+            render: (_: unknown, row: { ruleId: string }) => (
+              <Button
+                size="small"
+                type="link"
+                onClick={() => {
+                  setSelectedRowKeys([row.ruleId])
+                  setDefectDrawerOpen(false)
+                }}
+              >
+                定位
+              </Button>
+            ),
+          },
+        ]}
+      />
     )
   }
 
@@ -837,8 +916,8 @@ export default function RulesPage() {
                   : checked ? '规则已启用' : '规则已禁用，已从图谱中移除'
               )
               await load()
-            } catch (e: any) {
-              message.error('更新失败: ' + (e?.message || e))
+    } catch (e) {
+      message.error('更新失败: ' + getErrorMessage(e))
             }
           }}
         />
@@ -903,6 +982,22 @@ export default function RulesPage() {
         message="规则编辑完成后，请前往「知识图谱」页构建并确认图谱"
         description="本页不再内置「构建图谱」入口，构建动作统一由知识图谱页发起，以保证图谱数据与确认流程的唯一归属。"
       />
+
+      {essentialMissingCells.length > 0 && (
+        <Alert
+          type="warning"
+          showIcon
+          style={{ marginBottom: 16 }}
+          message={`${essentialMissingCells.length} 个必备检查格未配置已确认规则`}
+          description={
+            essentialMissingCells
+              .slice(0, 8)
+              .map((c) => `${c.doc_type} × ${c.check_category}`)
+              .join('、') +
+            (essentialMissingCells.length > 8 ? ` 等 ${essentialMissingCells.length} 项，请点击红色「必检」格补充规则` : '，请点击红色「必检」格补充规则')
+          }
+        />
+      )}
 
       <Tabs
         defaultActiveKey="matrix"
@@ -1088,7 +1183,8 @@ export default function RulesPage() {
         onOk={handleSave}
         onCancel={() => setModalOpen(false)}
         width={640}
-        confirmLoading={loading}
+        confirmLoading={saving}
+        okButtonProps={{ disabled: saving }}
       >
         <Form form={form} layout="vertical">
           <Row gutter={16}>
@@ -1195,15 +1291,20 @@ export default function RulesPage() {
                         placeholder="选择应用的 Skill（不选则使用默认配置）"
                         value={importSkillIds}
                         onChange={setImportSkillIds}
-                        options={allSkills.map((s) => ({
-                          value: s.id,
-                          label: `${s.name}${s.is_builtin ? ' (内置)' : ''}`,
-                        }))}
+                        options={allSkills
+                          .filter((s) => s.enabled)
+                          .map((s) => ({
+                            value: s.id,
+                            label: `${s.name}${s.is_builtin ? ' (内置)' : ''}`,
+                          }))}
                         allowClear
                       />
                       {allSkills.length > 0 && (
                         <Text type="secondary" style={{ fontSize: 12, lineHeight: '32px' }}>
                           已选 {importSkillIds.length} 个
+                          {allSkills.some((s) => !s.enabled)
+                            ? `（${allSkills.filter((s) => !s.enabled).length} 个已停用，不参与导入）`
+                            : ''}
                         </Text>
                       )}
                     </Space>
@@ -1489,7 +1590,7 @@ export default function RulesPage() {
                             columns={[
                               {
                                 title: '类型', width: 90,
-                                render: (_: any, group: any) => (
+                                render: (_: unknown, group: ConflictGroup) => (
                                   <Tag color={group.severity === 'error' ? 'red' : group.severity === 'warning' ? 'orange' : 'blue'}>
                                     {group.type === 'logical_contradiction' ? '逻辑矛盾' : group.type === 'boundary_overlap' ? '边界冲突' : '冗余'}
                                   </Tag>
@@ -1498,11 +1599,11 @@ export default function RulesPage() {
                               { title: '描述', dataIndex: 'description', ellipsis: true },
                               {
                                 title: '涉及规则', width: 80,
-                                render: (_: any, group: any) => <Tag>{group.rules.length} 条</Tag>,
+                                render: (_: unknown, group: ConflictGroup) => <Tag>{group.rules.length} 条</Tag>,
                               },
                               {
                                 title: '操作', width: 80,
-                                render: (_: any, group: any) => (
+                                render: (_: unknown, group: ConflictGroup) => (
                                   <Button
                                     size="small"
                                     type="link"
@@ -1527,92 +1628,14 @@ export default function RulesPage() {
               ? [{
                   key: 'error' as const,
                   label: `错误（${defectSummary.error}）`,
-                  children: (() => {
-                    const entries: Array<{ ruleId: string; docType: string; checkCategory: string; ruleText: string; type: string; description: string }> = []
-                    rules.forEach((r) => {
-                      ;(r.defects || []).filter((d) => d.severity === 'error').forEach((d) => {
-                        entries.push({
-                          ruleId: r.id, docType: r.doc_type, checkCategory: r.check_category,
-                          ruleText: r.rule_text, type: d.type, description: d.description,
-                        })
-                      })
-                    })
-                    return (
-                      <Table
-                        dataSource={entries}
-                        rowKey={(_, i) => `e-${i}`}
-                        size="small"
-                        pagination={{ pageSize: 20, showSizeChanger: true, pageSizeOptions: ['10', '20', '50'], size: 'small' }}
-                        columns={[
-                          { title: '文件类型', dataIndex: 'docType', width: 100 },
-                          { title: '检查项', dataIndex: 'checkCategory', width: 80 },
-                          { title: '规则文本', dataIndex: 'ruleText', ellipsis: true },
-                          { title: '缺陷描述', dataIndex: 'description', ellipsis: true },
-                          {
-                            title: '操作', width: 80,
-                            render: (_: any, row: any) => (
-                              <Button
-                                size="small"
-                                type="link"
-                                onClick={() => {
-                                  setSelectedRowKeys([row.ruleId])
-                                  setDefectDrawerOpen(false)
-                                }}
-                              >
-                                定位
-                              </Button>
-                            ),
-                          },
-                        ]}
-                      />
-                    )
-                  })(),
+                  children: renderDefectTable('error', 'e'),
                 }]
               : []),
             ...(defectSummary.warning > 0
               ? [{
                   key: 'warning' as const,
                   label: `警告（${defectSummary.warning}）`,
-                  children: (() => {
-                    const entries: Array<{ ruleId: string; docType: string; checkCategory: string; ruleText: string; type: string; description: string }> = []
-                    rules.forEach((r) => {
-                      ;(r.defects || []).filter((d) => d.severity === 'warning').forEach((d) => {
-                        entries.push({
-                          ruleId: r.id, docType: r.doc_type, checkCategory: r.check_category,
-                          ruleText: r.rule_text, type: d.type, description: d.description,
-                        })
-                      })
-                    })
-                    return (
-                      <Table
-                        dataSource={entries}
-                        rowKey={(_, i) => `w-${i}`}
-                        size="small"
-                        pagination={{ pageSize: 20, showSizeChanger: true, pageSizeOptions: ['10', '20', '50'], size: 'small' }}
-                        columns={[
-                          { title: '文件类型', dataIndex: 'docType', width: 100 },
-                          { title: '检查项', dataIndex: 'checkCategory', width: 80 },
-                          { title: '规则文本', dataIndex: 'ruleText', ellipsis: true },
-                          { title: '缺陷描述', dataIndex: 'description', ellipsis: true },
-                          {
-                            title: '操作', width: 80,
-                            render: (_: any, row: any) => (
-                              <Button
-                                size="small"
-                                type="link"
-                                onClick={() => {
-                                  setSelectedRowKeys([row.ruleId])
-                                  setDefectDrawerOpen(false)
-                                }}
-                              >
-                                定位
-                              </Button>
-                            ),
-                          },
-                        ]}
-                      />
-                    )
-                  })(),
+                  children: renderDefectTable('warning', 'w'),
                 }]
               : []),
           ]}
