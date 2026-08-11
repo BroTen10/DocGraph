@@ -32,6 +32,56 @@ type ConflictGroup = {
 }
 const FILE_ACCEPT = '.pdf,.xlsx,.xls,.docx,.md,.txt'
 
+/** 导入结果对照：原文片段 ↔ 解析出的规则 */
+function ImportResultRules({ rules }: { rules: Array<Record<string, unknown>> }) {
+  const get = (r: Record<string, unknown>, k: string) => {
+    const v = r[k]
+    return v == null ? '' : String(v)
+  }
+  const rows = rules.map((r, i) => ({
+    key: i,
+    source: get(r, 'source_text') || get(r, 'rule_text'),
+    rule: get(r, 'rule_text'),
+    meta: [get(r, 'doc_type'), get(r, 'check_category')].filter(Boolean).join(' / ') || '-',
+  }))
+  if (rows.length === 0) return null
+  return (
+    <div style={{ marginTop: 12 }}>
+      <Text strong style={{ display: 'block', marginBottom: 8 }}>
+        解析结果对照（原文 → 规则）
+      </Text>
+      <Table
+        size="small"
+        pagination={false}
+        dataSource={rows}
+        columns={[
+          {
+            title: '原文片段',
+            dataIndex: 'source',
+            width: '38%',
+            render: (v: string) => (
+              <Tooltip title={v}>
+                <Text type="secondary" style={{ fontSize: 12, whiteSpace: 'pre-wrap' }}>{v}</Text>
+              </Tooltip>
+            ),
+          },
+          {
+            title: '解析结果',
+            dataIndex: 'rule',
+            render: (v: string) => <Text style={{ fontSize: 12 }}>{v}</Text>,
+          },
+          {
+            title: '类型 / 检查项',
+            dataIndex: 'meta',
+            width: 180,
+            render: (v: string) => <Text style={{ fontSize: 12 }}>{v}</Text>,
+          },
+        ]}
+      />
+    </div>
+  )
+}
+
 // 导入任务状态 → 中文标签
 function statusLabel(status: ImportTask['status']): string {
   const map: Record<ImportTask['status'], string> = {
@@ -1337,12 +1387,13 @@ export default function RulesPage() {
                           style={{ marginTop: 8 }}
                           message={
                             <span>
-                              缺陷检测报告：{importResult.conflict_report.by_severity.error > 0 && <Tag color="red">{importResult.conflict_report.by_severity.error} 错误</Tag>}{importResult.conflict_report.by_severity.warning > 0 && <Tag color="orange">{importResult.conflict_report.by_severity.warning} 警告</Tag>}{importResult.conflict_report.by_severity.info > 0 && <Tag color="blue">{importResult.conflict_report.by_severity.info} 提示</Tag>}
+                             缺陷检测报告：{importResult.conflict_report.by_severity.error > 0 && <Tag color="red">{importResult.conflict_report.by_severity.error} 错误</Tag>}{importResult.conflict_report.by_severity.warning > 0 && <Tag color="orange">{importResult.conflict_report.by_severity.warning} 警告</Tag>}{importResult.conflict_report.by_severity.info > 0 && <Tag color="blue">{importResult.conflict_report.by_severity.info} 提示</Tag>}
                               <Text type="secondary" style={{ fontSize: 12 }}>（回到规则列表可查看详情）</Text>
                             </span>
                           }
                         />
                       )}
+                      {importResult.rules.length > 0 && <ImportResultRules rules={importResult.rules} />}
                     </div>
                   )}
                 </>
@@ -1443,12 +1494,13 @@ export default function RulesPage() {
                           style={{ marginTop: 8 }}
                           message={
                             <span>
-                              缺陷检测报告：{fileImportResult.conflict_report.by_severity.error > 0 && <Tag color="red">{fileImportResult.conflict_report.by_severity.error} 错误</Tag>}{fileImportResult.conflict_report.by_severity.warning > 0 && <Tag color="orange">{fileImportResult.conflict_report.by_severity.warning} 警告</Tag>}{fileImportResult.conflict_report.by_severity.info > 0 && <Tag color="blue">{fileImportResult.conflict_report.by_severity.info} 提示</Tag>}
+                             缺陷检测报告：{fileImportResult.conflict_report.by_severity.error > 0 && <Tag color="red">{fileImportResult.conflict_report.by_severity.error} 错误</Tag>}{fileImportResult.conflict_report.by_severity.warning > 0 && <Tag color="orange">{fileImportResult.conflict_report.by_severity.warning} 警告</Tag>}{fileImportResult.conflict_report.by_severity.info > 0 && <Tag color="blue">{fileImportResult.conflict_report.by_severity.info} 提示</Tag>}
                               <Text type="secondary" style={{ fontSize: 12 }}>（回到规则列表可查看详情）</Text>
                             </span>
                           }
                         />
                       )}
+                      {fileImportResult.rules.length > 0 && <ImportResultRules rules={fileImportResult.rules} />}
                     </div>
                   )}
                 </>

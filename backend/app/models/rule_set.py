@@ -36,6 +36,11 @@ class RuleSet(Base):
     doc_types: Mapped[list] = mapped_column(JSONB, default=list, nullable=False)
     # 适用检查项类别清单，如 ["齐套性","基础判断","信息准确性","时间逻辑"]
     check_categories: Mapped[list] = mapped_column(JSONB, default=list, nullable=False)
+    # 是否使用内置默认解析 Skill（领域知识）。关闭后仅保留系统解析契约，
+    # 适用于业务与内置通用贸易领域知识差异较大的规则集（如内贸/非贸易单据）
+    use_default_skill: Mapped[bool] = mapped_column(
+        Boolean, default=True, nullable=False
+    )
     # 是否默认规则集（同一时刻只能有一个默认）
     is_default: Mapped[bool] = mapped_column(
         Boolean, default=False, nullable=False, index=True

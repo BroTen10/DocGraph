@@ -505,6 +505,35 @@ def _known_doc_types(db: Session, rule_set_id: uuid.UUID) -> list[str]:
     return names
 
 
+def _known_check_categories(db: Session, rule_set_id: uuid.UUID) -> list[str]:
+    """构造规则导入提示词中的"已知检查项"清单。
+
+    与 _known_doc_types 对称：当前规则集已累积的检查项/意图
+    （rule_set.check_categories，保持声明顺序）优先，再补充内置常量，
+    两者去重；注册表为空时回退到常量清单。
+    """
+    names: list[str] = []
+    seen: set[str] = set()
+
+    rs = db.get(RuleSet, rule_set_id)
+    if rs is not None:
+        for name in rs.check_categories or []:
+            name = str(name).strip()
+            if name and name not in seen:
+                seen.add(name)
+                names.append(name)
+
+    for name in CHECK_CATEGORIES:
+        name = str(name).strip()
+        if name and name not in seen:
+            seen.add(name)
+            names.append(name)
+
+    if not names:
+        return list(CHECK_CATEGORIES)
+    return names
+
+
 def import_rules_from_text(
     db: Session, rule_set_id: uuid.UUID, raw_text: str,
     directive: RuleParseDirective | None = None,
@@ -532,7 +561,7 @@ def import_rules_from_text(
 
     llm = get_llm_client()
     doc_types_str = "、".join(_known_doc_types(db, rule_set_id))
-    check_categories_str = "、".join(CHECK_CATEGORIES)
+    check_categories_str = "、".join(_known_check_categories(db, rule_set_id))
 
     # 长文本分段解析：避免单次输出超 max_tokens 被截断（JSON 不完整）
     chunks = _split_text(raw_text)
@@ -789,7 +818,12 @@ def import_rules_from_text(
                 defects=clean_defects,
             )
             rule_out = create_rule(db, rule_set_id, payload)
-            imported.append(rule_out.model_dump(mode="json"))
+            rule_dict = rule_out.model_dump(mode="json")
+            # 原文对照：记录该规则来源的分段原文，供前端"原文 ↔ 解析结果"视图
+            ci = rule_chunks[i - 1] if i - 1 < len(rule_chunks) else None
+            if isinstance(ci, int) and 0 <= ci - 1 < len(chunks):
+                rule_dict["source_text"] = chunks[ci - 1]
+            imported.append(rule_dict)
             if progress is not None:
                 update_task(progress, imported_rules=len(imported),
                             message=f"已入库 {len(imported)}/{len(raw_rules)} 条")
