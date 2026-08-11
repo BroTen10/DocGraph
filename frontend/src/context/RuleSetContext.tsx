@@ -30,6 +30,8 @@ interface RuleSetContextValue {
   switchTo: (id: string) => void
   /** 创建新规则集并自动切换到新集 */
   create: (data: RuleSetCreate) => Promise<RuleSet>
+  /** 删除规则集（后端会级联清空其全部数据），删除后自动切换/刷新 */
+  remove: (id: string) => Promise<void>
   /** 刷新规则集列表(外部修改后调用) */
   refresh: () => Promise<void>
 }
@@ -99,6 +101,19 @@ export function RuleSetProvider({ children }: { children: ReactNode }) {
     [refresh],
   )
 
+  const remove = useCallback(
+    async (id: string) => {
+      await ruleSetsApi.delete(id)
+      // 若删除的是当前规则集，先清除本地记忆，refresh 会自动切到默认/首个剩余规则集
+      if (id === currentId) {
+        localStorage.removeItem(STORAGE_KEY)
+      }
+      await refresh()
+      message.success('规则集已删除，关联数据已全部清空')
+    },
+    [currentId, refresh],
+  )
+
   const current = useMemo(
     () => ruleSets.find((r) => r.id === currentId) || null,
     [ruleSets, currentId],
@@ -113,9 +128,10 @@ export function RuleSetProvider({ children }: { children: ReactNode }) {
       error,
       switchTo,
       create,
+      remove,
       refresh,
     }),
-    [ruleSets, current, currentId, loading, error, switchTo, create, refresh],
+    [ruleSets, current, currentId, loading, error, switchTo, create, remove, refresh],
   )
 
   return <RuleSetContext.Provider value={value}>{children}</RuleSetContext.Provider>

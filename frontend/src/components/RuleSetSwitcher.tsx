@@ -1,18 +1,21 @@
-/** 规则集切换器:Header 右上角下拉切换 + 创建新规则集弹窗。 */
+/** 规则集切换器:Header 右上角下拉切换 + 创建/删除规则集按钮。 */
 
 import { useEffect, useMemo, useState } from 'react'
-import { Button, Dropdown, Modal, Form, Input, Select, Switch, Space, Tag, Tooltip, Typography } from 'antd'
+import { Alert, Button, Dropdown, Modal, Form, Input, Select, Switch, Space, Tag, Tooltip, Typography, message } from 'antd'
 import type { MenuProps } from 'antd'
-import { PlusOutlined, DownOutlined, AppstoreOutlined } from '@ant-design/icons'
+import { PlusOutlined, DownOutlined, AppstoreOutlined, MinusOutlined } from '@ant-design/icons'
 import { useRuleSet } from '../context/RuleSetContext'
-import { constantsApi } from '../api/client'
+import { constantsApi, getErrorMessage } from '../api/client'
 import type { DocTypeMeta } from '../types'
 
 const { Text } = Typography
 
 export function RuleSetSwitcher() {
-  const { ruleSets, current, currentId, loading, switchTo, create } = useRuleSet()
+  const { ruleSets, current, currentId, loading, switchTo, create, remove } = useRuleSet()
   const [modalOpen, setModalOpen] = useState(false)
+  const [deleteOpen, setDeleteOpen] = useState(false)
+  const [deleteConfirmText, setDeleteConfirmText] = useState('')
+  const [deleting, setDeleting] = useState(false)
   const [docTypes, setDocTypes] = useState<DocTypeMeta[]>([])
   const [submitting, setSubmitting] = useState(false)
   const [form] = Form.useForm()
@@ -38,6 +41,20 @@ export function RuleSetSwitcher() {
       // 校验失败或创建失败,message 已由 context/form 处理
     } finally {
       setSubmitting(false)
+    }
+  }
+
+  const handleDelete = async () => {
+    if (!currentId || !current || deleting) return
+    try {
+      setDeleting(true)
+      await remove(currentId)
+      setDeleteOpen(false)
+      setDeleteConfirmText('')
+    } catch (e) {
+      message.error('删除失败: ' + getErrorMessage(e, ''))
+    } finally {
+      setDeleting(false)
     }
   }
 
@@ -127,6 +144,28 @@ export function RuleSetSwitcher() {
             }}
           />
         </Tooltip>
+
+        {/* 独立的"删除当前规则集"按钮:红色危险样式,点击后需二次确认 */}
+        <Tooltip title={current ? '删除当前规则集' : '暂无规则集可删除'} placement="bottom">
+          <Button
+            danger
+            icon={<MinusOutlined />}
+            disabled={!current}
+            onClick={() => {
+              setDeleteConfirmText('')
+              setDeleteOpen(true)
+            }}
+            style={{
+              borderRadius: 8,
+              height: 36,
+              width: 36,
+              padding: 0,
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+            }}
+          />
+        </Tooltip>
       </Space>
 
       <Modal
@@ -167,6 +206,46 @@ export function RuleSetSwitcher() {
             <Switch />
           </Form.Item>
         </Form>
+      </Modal>
+
+      <Modal
+        title="删除规则集"
+        open={deleteOpen}
+        onCancel={() => {
+          setDeleteOpen(false)
+          setDeleteConfirmText('')
+        }}
+        onOk={handleDelete}
+        confirmLoading={deleting}
+        okText="确认删除"
+        okButtonProps={{
+          danger: true,
+          disabled: deleteConfirmText !== current?.name,
+        }}
+        cancelText="取消"
+        destroyOnHidden
+      >
+        <div style={{ marginTop: 16 }}>
+          <Alert
+            type="error"
+            showIcon
+            message={`即将永久删除规则集「${current?.name || ''}」及其全部数据，此操作不可恢复。`}
+            description="将一并删除：审查规则与快照、合同与上传文件、OCR 与审查结果、知识图谱节点，以及该规则集的自定义 Skill。"
+            style={{ marginBottom: 16 }}
+          />
+          <div style={{ marginBottom: 8, color: '#475569' }}>
+            为避免误删，请输入规则集名称 <b style={{ color: '#0f172a' }}>{current?.name || ''}</b> 以确认：
+          </div>
+          <Input
+            value={deleteConfirmText}
+            onChange={(e) => setDeleteConfirmText(e.target.value)}
+            placeholder="请输入规则集名称"
+            maxLength={64}
+            onPressEnter={() => {
+              if (deleteConfirmText === current?.name) handleDelete()
+            }}
+          />
+        </div>
       </Modal>
     </>
   )
