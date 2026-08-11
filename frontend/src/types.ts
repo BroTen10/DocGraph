@@ -7,6 +7,7 @@ export interface RuleSet {
   description: string | null
   doc_types: string[]
   check_categories: string[]
+  use_default_skill: boolean
   is_default: boolean
   created_at: string
   updated_at: string
@@ -16,6 +17,7 @@ export interface RuleSetCreate {
   name: string
   description?: string
   doc_types?: string[]
+  use_default_skill?: boolean
   is_default?: boolean
 }
 
@@ -23,6 +25,7 @@ export interface RuleSetUpdate {
   name?: string
   description?: string
   doc_types?: string[]
+  use_default_skill?: boolean
   is_default?: boolean
 }
 

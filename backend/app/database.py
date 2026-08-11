@@ -104,6 +104,8 @@ def _run_migrations(engine) -> None:
         # 批次 10 Phase C：双引擎审查——结果来源（graph/llm/legacy）与置信度
         "ALTER TABLE review_results ADD COLUMN IF NOT EXISTS source VARCHAR(16);",
         "ALTER TABLE review_results ADD COLUMN IF NOT EXISTS confidence FLOAT;",
+        # 规则集级开关：禁用内置默认 Skill 领域知识（仅保留系统解析契约）
+        "ALTER TABLE rule_sets ADD COLUMN IF NOT EXISTS use_default_skill BOOLEAN NOT NULL DEFAULT TRUE;",
         # 存量 pass 结果回填为 closed（无需跟进）
         "UPDATE review_results SET status = 'closed' WHERE result = 'pass' AND status = 'open';",
     ]

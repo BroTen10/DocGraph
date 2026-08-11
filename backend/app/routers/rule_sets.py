@@ -51,6 +51,7 @@ def create_rule_set(
         description=payload.description,
         doc_types=payload.doc_types,
         check_categories=payload.check_categories,
+        use_default_skill=payload.use_default_skill,
         is_default=payload.is_default,
     )
     db.add(rs)

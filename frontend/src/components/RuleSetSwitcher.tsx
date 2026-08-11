@@ -33,6 +33,7 @@ export function RuleSetSwitcher() {
         name: values.name,
         description: values.description,
         doc_types: values.doc_types || [],
+        use_default_skill: values.use_default_skill !== false,
         is_default: values.is_default || false,
       })
       setModalOpen(false)
@@ -201,6 +202,15 @@ export function RuleSetSwitcher() {
               showSearch
               allowClear
             />
+          </Form.Item>
+          <Form.Item
+            name="use_default_skill"
+            label="使用内置默认解析 Skill"
+            valuePropName="checked"
+            initialValue={true}
+            tooltip="关闭后该规则集仅保留系统解析契约，不使用内置通用贸易领域知识，适合业务差异较大的规则集"
+          >
+            <Switch />
           </Form.Item>
           <Form.Item name="is_default" label="设为默认规则集" valuePropName="checked">
             <Switch />

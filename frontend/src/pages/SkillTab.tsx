@@ -2,9 +2,9 @@ import { useState, useEffect } from 'react'
 import { load as yamlLoad } from 'js-yaml'
 import {
   Table, Tag, Button, Modal, Form, Input, Space, message, Typography, Tooltip,
-  Popconfirm, Switch, Alert,
+  Popconfirm, Switch, Alert, Radio,
 } from 'antd'
-import { PlusOutlined, EditOutlined, DeleteOutlined, ReloadOutlined, WarningOutlined } from '@ant-design/icons'
+import { PlusOutlined, EditOutlined, DeleteOutlined, ReloadOutlined, WarningOutlined, BulbOutlined } from '@ant-design/icons'
 import { skillsApi, getErrorDetail, getErrorMessage } from '../api/client'
 import type { RuleParseSkill, RuleParseSkillCreate, RuleParseSkillUpdate } from '../types'
 
@@ -153,6 +153,65 @@ export default function SkillTab({ ruleSetId }: Props) {
   const [description, setDescription] = useState('')
   const [yamlText, setYamlText] = useState('')
   const [yamlError, setYamlError] = useState('')
+  // 纠偏引导（向导式生成最小 YAML，降低用户编写门槛）
+  const [wizardOpen, setWizardOpen] = useState(false)
+  const [wizType, setWizType] = useState<'term' | 'mapping' | 'instruction'>('term')
+  const [wizTermCanonical, setWizTermCanonical] = useState('')
+  const [wizTermVariants, setWizTermVariants] = useState('')
+  const [wizMappingField, setWizMappingField] = useState('')
+  const [wizMappingFrom, setWizMappingFrom] = useState('')
+  const [wizMappingTo, setWizMappingTo] = useState('')
+  const [wizInstruction, setWizInstruction] = useState('')
+
+  const openWizard = () => {
+    setWizType('term')
+    setWizTermCanonical('')
+    setWizTermVariants('')
+    setWizMappingField('')
+    setWizMappingFrom('')
+    setWizMappingTo('')
+    setWizInstruction('')
+    setWizardOpen(true)
+  }
+
+  const generateFromWizard = () => {
+    let yaml = ''
+    if (wizType === 'term') {
+      const canonical = wizTermCanonical.trim()
+      const variants = wizTermVariants.split(/[,，]/).map((s) => s.trim()).filter(Boolean)
+      if (!canonical || variants.length === 0) {
+        message.warning('请填写标准词和至少一个别名')
+        return
+      }
+      yaml = '# 术语归一：把同义说法统一为标准词\nterm_normalization:\n' +
+        `  ${canonical}:\n` + variants.map((v) => `    - ${v}`).join('\n') + '\n'
+    } else if (wizType === 'mapping') {
+      const field = wizMappingField.trim()
+      const from = wizMappingFrom.trim()
+      const to = wizMappingTo.trim()
+      if (!field || !from || !to) {
+        message.warning('请填写字段名、原值、目标值')
+        return
+      }
+      yaml = '# 字段映射：把解析错的取值纠正为目标值\nfield_mappings:\n' +
+        `  ${field}:\n    ${from}: ${to}\n`
+    } else {
+      const text = wizInstruction.trim()
+      if (!text) {
+        message.warning('请填写解析指令')
+        return
+      }
+      yaml = '# 解析指令：追加到解析提示词中纠偏\nprompt_instructions:\n' +
+        `  - ${text}\n`
+    }
+    setEditing(null)
+    setName('纠偏 Skill')
+    setDescription('由纠偏引导生成，请核对后保存')
+    setYamlText(yaml)
+    setYamlError('')
+    setWizardOpen(false)
+    setModalOpen(true)
+  }
 
   const load = async () => {
     if (!ruleSetId) return
@@ -332,6 +391,7 @@ export default function SkillTab({ ruleSetId }: Props) {
       <div style={{ marginBottom: 12 }}>
         <Space>
           <Button type="primary" icon={<PlusOutlined />} onClick={openCreate}>新建 Skill</Button>
+          <Button icon={<BulbOutlined />} onClick={openWizard}>纠偏引导</Button>
           <Button icon={<ReloadOutlined />} onClick={load}>刷新</Button>
         </Space>
         <Alert
@@ -356,6 +416,84 @@ export default function SkillTab({ ruleSetId }: Props) {
         pagination={false}
         loading={loading}
       />
+
+      <Modal
+        title="纠偏引导：按意图生成最小 Skill"
+        open={wizardOpen}
+        onOk={generateFromWizard}
+        onCancel={() => setWizardOpen(false)}
+        okText="生成到编辑器"
+        cancelText="取消"
+      >
+        <Alert
+          type="info"
+          showIcon
+          style={{ marginBottom: 12 }}
+          message="Skill 只做纠偏，不需要从零写解析规则。选择一种纠偏意图，系统生成对应 YAML，你核对后保存即可。"
+        />
+        <Form layout="vertical">
+          <Form.Item label="纠偏意图" required>
+            <Radio.Group value={wizType} onChange={(e) => setWizType(e.target.value)}>
+              <Radio.Button value="term">术语归一</Radio.Button>
+              <Radio.Button value="mapping">字段取值纠正</Radio.Button>
+              <Radio.Button value="instruction">补充解析指令</Radio.Button>
+            </Radio.Group>
+          </Form.Item>
+          {wizType === 'term' && (
+            <>
+              <Form.Item label="标准词" required>
+                <Input
+                  value={wizTermCanonical}
+                  onChange={(e) => setWizTermCanonical(e.target.value)}
+                  placeholder="如：委托出口确认单"
+                />
+              </Form.Item>
+              <Form.Item label="别名（逗号分隔，统一为标准词）" required>
+                <Input
+                  value={wizTermVariants}
+                  onChange={(e) => setWizTermVariants(e.target.value)}
+                  placeholder="如：委托出口代理订单,委托确认单"
+                />
+              </Form.Item>
+            </>
+          )}
+          {wizType === 'mapping' && (
+            <>
+              <Form.Item label="字段名" required>
+                <Input
+                  value={wizMappingField}
+                  onChange={(e) => setWizMappingField(e.target.value)}
+                  placeholder="如：check_category"
+                />
+              </Form.Item>
+              <Form.Item label="原值（解析错了的值）" required>
+                <Input
+                  value={wizMappingFrom}
+                  onChange={(e) => setWizMappingFrom(e.target.value)}
+                  placeholder="如：齐套"
+                />
+              </Form.Item>
+              <Form.Item label="目标值（应纠正为）" required>
+                <Input
+                  value={wizMappingTo}
+                  onChange={(e) => setWizMappingTo(e.target.value)}
+                  placeholder="如：齐套性"
+                />
+              </Form.Item>
+            </>
+          )}
+          {wizType === 'instruction' && (
+            <Form.Item label="解析指令" required>
+              <Input.TextArea
+                rows={4}
+                value={wizInstruction}
+                onChange={(e) => setWizInstruction(e.target.value)}
+                placeholder="如：本规则集中『验收单』一律指『验收确认单』；金额比对必须显式给出比较方向"
+              />
+            </Form.Item>
+          )}
+        </Form>
+      </Modal>
 
       <Modal
         title={editing ? `编辑 Skill：${editing.name}${editing.is_builtin ? '（保存为自定义副本）' : ''}` : '新建 Skill'}

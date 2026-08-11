@@ -58,14 +58,28 @@ def compile_directive(db: Session, rule_set_id: Any) -> RuleParseDirective:
     2. 加载该规则集的自定义 Skill（可覆盖内置）
     3. 按能力逐 key 合并
     """
+    from ..models import RuleSet
+
+    rs = db.get(RuleSet, rule_set_id)
+    use_default_skill = rs is None or rs.use_default_skill
+
+    conditions = [RuleParseSkill.enabled.is_(True)]
+    if use_default_skill:
+        # 内置默认 Skill（全局常驻）+ 该规则集自定义 Skill
+        conditions.append(
+            (RuleParseSkill.is_builtin.is_(True))
+            | (RuleParseSkill.rule_set_id == rule_set_id)
+        )
+    else:
+        # 规则集关闭了内置默认 Skill 领域知识：仅使用该规则集自定义 Skill
+        conditions.append(RuleParseSkill.rule_set_id == rule_set_id)
+
+    # 合并顺序：内置默认先合并，自定义后合并（后写覆盖先写）→ 自定义纠偏生效
     skills = db.execute(
-        select(RuleParseSkill).where(
-            RuleParseSkill.enabled.is_(True),
-            (
-                (RuleParseSkill.is_builtin.is_(True)) |
-                (RuleParseSkill.rule_set_id == rule_set_id)
-            ),
-        ).order_by(RuleParseSkill.is_builtin.asc(), RuleParseSkill.priority)
+        select(RuleParseSkill).where(*conditions).order_by(
+            RuleParseSkill.is_builtin.desc(),
+            RuleParseSkill.priority,
+        )
     ).scalars().all()
 
     if not skills:

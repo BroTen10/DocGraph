@@ -15,6 +15,7 @@ class RuleSetBase(BaseModel):
     description: str | None = None
     doc_types: list[str] = Field(default_factory=list)
     check_categories: list[str] = Field(default_factory=list)
+    use_default_skill: bool = True
     is_default: bool = False
 
 
@@ -31,6 +32,7 @@ class RuleSetUpdate(BaseModel):
     description: str | None = None
     doc_types: list[str] | None = None
     check_categories: list[str] | None = None
+    use_default_skill: bool | None = None
     is_default: bool | None = None
 
 
