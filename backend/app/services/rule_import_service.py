@@ -25,7 +25,7 @@ from sqlalchemy.orm import Session
 from ..config import settings
 from ..constants import ALL_DOC_TYPES, CHECK_CATEGORIES
 from ..llm_client import LLMError, get_llm_client
-from ..models import Rule, RuleSet
+from ..models import DocumentType, Rule, RuleSet
 from .rule_service import create_rule
 from ..schemas.rule import RuleCreate, ConflictReport
 from .rule_parse_engine import (
@@ -468,6 +468,43 @@ def _merge_into_existing(
     return changes
 
 
+def _known_doc_types(db: Session, rule_set_id: uuid.UUID) -> list[str]:
+    """构造规则导入提示词中的"已知文件类型"清单。
+
+    来源优先级：
+    1. 当前规则集声明的适用文件类型（rule_set.doc_types，保持声明顺序）
+    2. 全局 DocumentType 注册表（active + pending_review，按名称排序）
+
+    两者去重合并；若均无内容（如注册表尚未初始化），回退到 constants 内置清单，
+    保证导入流程在任何情况下都能拿到候选类型。
+    """
+    names: list[str] = []
+    seen: set[str] = set()
+
+    rs = db.get(RuleSet, rule_set_id)
+    if rs is not None:
+        for name in rs.doc_types or []:
+            name = str(name).strip()
+            if name and name not in seen:
+                seen.add(name)
+                names.append(name)
+
+    rows = db.execute(
+        select(DocumentType.name)
+        .where(DocumentType.status.in_(("active", "pending_review")))
+        .order_by(DocumentType.name)
+    ).scalars().all()
+    for name in rows:
+        name = str(name).strip()
+        if name and name not in seen:
+            seen.add(name)
+            names.append(name)
+
+    if not names:
+        return list(ALL_DOC_TYPES)
+    return names
+
+
 def import_rules_from_text(
     db: Session, rule_set_id: uuid.UUID, raw_text: str,
     directive: RuleParseDirective | None = None,
@@ -494,7 +531,7 @@ def import_rules_from_text(
         raw_text = apply_text_preprocessing(raw_text, directive.text_preprocessing)
 
     llm = get_llm_client()
-    doc_types_str = "、".join(ALL_DOC_TYPES)
+    doc_types_str = "、".join(_known_doc_types(db, rule_set_id))
     check_categories_str = "、".join(CHECK_CATEGORIES)
 
     # 长文本分段解析：避免单次输出超 max_tokens 被截断（JSON 不完整）
