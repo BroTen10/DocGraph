@@ -10,13 +10,11 @@
 
 from __future__ import annotations
 
-import io
 import logging
 from pathlib import Path
 from typing import Optional
 
-from ..config import settings
-from ..constants import FIELD_TEMPLATES, STAMP_REQUIREMENTS
+from ..constants import FIELD_TEMPLATES
 from ..llm_client import LLMError, get_llm_client
 from ..models import Document
 from ..ocr_client import get_ocr_client
@@ -177,7 +175,6 @@ def process_document(
         return {"success": False, "error": f"文件不存在: {doc.file_path}"}
 
     field_template = key_fields if key_fields is not None else FIELD_TEMPLATES.get(doc.doc_type, [])
-    stamp_required = STAMP_REQUIREMENTS.get(doc.doc_type)
 
     try:
         if doc.file_type == "pdf":

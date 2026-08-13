@@ -14,8 +14,6 @@ import re
 from typing import Any, Optional
 
 from ..constants import (
-    DOC_CUSTOMS_DECLARATION,
-    DOC_ENTRUST_CONFIRM,
     DOC_RECEIVE_VOUCHER,
     DOC_PAY_VOUCHER,
     DOC_VAT_INVOICE,

@@ -13,7 +13,6 @@
 
 from __future__ import annotations
 
-import json
 import logging
 import re
 import uuid
@@ -22,7 +21,6 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from ..config import settings
 from ..constants import ALL_DOC_TYPES, CHECK_CATEGORIES
 from ..llm_client import LLMError, get_llm_client
 from ..models import DocumentType, Rule, RuleSet

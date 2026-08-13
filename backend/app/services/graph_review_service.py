@@ -27,16 +27,9 @@ from typing import Optional
 
 from sqlalchemy.orm import Session
 
-from ..constants import (
-    CHECK_ACCURACY,
-    CHECK_COMPLETENESS,
-    CHECK_STAMP,
-    CHECK_TIME_LOGIC,
-)
 from ..models import Contract, Document, ReviewResult, RuleSnapshot
 from ..neo4j_client import Neo4jClient, get_neo4j_client
 from .contract_normalizer import extract_contract_numbers, normalize_contract_no
-from .field_extraction_service import parse_amount, parse_date
 from . import result_meta
 
 logger = logging.getLogger(__name__)

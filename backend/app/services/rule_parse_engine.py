@@ -169,9 +169,9 @@ def apply_field_mappings(rules: list[dict], mappings: dict[str, dict[str, str]])
         return rules
 
     for rule in rules:
-        for field, mapping in mappings.items():
-            if field in rule and isinstance(rule[field], str):
-                rule[field] = mapping.get(rule[field], rule[field])
+        for field_name, mapping in mappings.items():
+            if field_name in rule and isinstance(rule[field_name], str):
+                rule[field_name] = mapping.get(rule[field_name], rule[field_name])
     return rules
 
 

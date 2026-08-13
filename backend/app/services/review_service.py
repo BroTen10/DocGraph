@@ -46,11 +46,10 @@ from .field_extraction_service import (
     aggregate_amount,
     cross_validate_contract_no,
     normalize_fields,
-    parse_amount,
     parse_date,
 )
 from .ocr_service import process_document, resolve_field_template
-from .suggestion_service import build_suggestion, build_suggestion_llm
+from .suggestion_service import build_suggestion_llm
 from . import result_meta
 
 logger = logging.getLogger(__name__)
@@ -657,7 +656,6 @@ def _check_time_logic(
     agency_docs = _docs_by_type(docs, DOC_AGENCY_AGREEMENT)
     entrust_docs = _docs_by_type(docs, DOC_ENTRUST_CONFIRM)
     customs_docs = _docs_by_type(docs, DOC_CUSTOMS_DECLARATION)
-    waybill_docs = _docs_by_type(docs, DOC_WAYBILL)
     receipt_docs = _docs_by_type(docs, DOC_RECEIPT)
     receive_docs = _docs_by_type(docs, DOC_RECEIVE_VOUCHER)
     pay_docs = _docs_by_type(docs, DOC_PAY_VOUCHER)
@@ -690,7 +688,6 @@ def _check_time_logic(
     # 4.2 合同 < 报关 < 提单/签收
     e_date = _get_field(entrust_docs[0], "签订日期") if entrust_docs else None
     c_date = _get_field(customs_docs[0], "出口日期", ["申报日期"]) if customs_docs else None
-    w_date = _get_field(waybill_docs[0], "起运日期") if waybill_docs else None
     r_date = _get_field(receipt_docs[0], "签收日期") if receipt_docs else None
 
     rule_c = _find_rule(rules_by_key, DOC_CUSTOMS_DECLARATION, CHECK_TIME_LOGIC)
