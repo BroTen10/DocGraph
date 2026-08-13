@@ -192,3 +192,20 @@
 - 执行顺序按批次号推进；同一批次内子任务按编号顺序
 - 所有代码改动遵守 AGENTS.md：只改必须改的、修 Bug 先说明根因、高风险操作先确认
 - 外部依赖：后端需重启生效的改动，沙箱无法 kill 宿主机进程，需提示用户手动重启
+
+### 批次 11：全面体检与安全/冗余清理（2026-08-13）
+- [x] 目录与 Git 状态盘点；识别已忽略的生成物、缓存、日志与业务数据
+- [x] 后端安全扫描（secret scanner + pattern scanner + pip-audit）
+- [x] 前端依赖审计（npm audit）
+- [x] 后端静态检查（ruff，重点 F 类问题）
+- [x] 运行 tests/run_graph_rule_tests.py（PASS=14 / FAIL=0）
+- [x] 清理可再生成缓存/构建产物并移入系统临时目录，保留业务数据与依赖目录
+- **Status:** complete（仅体检与清理，未改业务代码；待办项见 findings.md）
+
+### 批次 11 执行记录（2026-08-13）
+- [x] 清空临时目录；删除 backend/uploads 与 6 个根目录一次性调试脚本
+- [x] ruff --select F401 --fix 移除 31 个未使用 import
+- [x] 补 graph_builder_service.py 的 Any；修复 ocr_service/review_service/rule_parse_engine 中未使用变量与变量遮蔽
+- [x] 修复 frontend/vite.config.ts 兜底端口 18800 → 8800
+- [x] 回归：py_compile、tsc --noEmit、tests/run_graph_rule_tests.py 均通过
+- **Status:** complete

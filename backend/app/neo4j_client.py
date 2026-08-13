@@ -9,7 +9,7 @@ from __future__ import annotations
 import logging
 import threading
 import json
-from typing import Any, Optional
+from typing import Optional
 
 from neo4j import Driver, GraphDatabase, ManagedTransaction
 

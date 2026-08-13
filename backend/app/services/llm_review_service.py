@@ -17,7 +17,6 @@ from __future__ import annotations
 import json
 import logging
 import re
-from datetime import datetime
 from typing import Any, Optional
 
 from ..constants import CHECK_COMPLETENESS, CHECK_STAMP

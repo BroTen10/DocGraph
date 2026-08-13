@@ -18,11 +18,9 @@ from ..schemas.rule import RuleImportResponse
 from ..services import (
     graph_builder_service,
     graph_build_progress,
-    rule_document_import_service,
     rule_service,
     rule_import_task,
 )
-from ..services.rule_import_task import ImportProgress
 from ..neo4j_client import get_neo4j_client
 
 router = APIRouter(prefix="/api/rules", tags=["graph"])

@@ -19,8 +19,7 @@ from typing import Any
 
 from sqlalchemy.orm import Session
 
-from .rule_import_service import import_rules_from_text, import_rules_with_skills
-from .rule_parse_engine import RuleParseDirective
+from .rule_import_service import import_rules_with_skills
 
 logger = logging.getLogger(__name__)
 

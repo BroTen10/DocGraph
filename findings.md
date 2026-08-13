@@ -197,3 +197,22 @@
 - PRD：基于知识图谱的自动文档审查智能体-PRD.md、需求规格精简版.md
 - 调研：docs/research_审查算法与图谱审查案例调研.md（批次 0.5 产出）
 - 外部参照：arxiv 2511.06618（GRAPH-GRPO-LEX）、arxiv 2606.03326（Violation Situation Pattern）、arxiv 2510.16309（MedRule-KG）、github.com/neo4j-product-examples/graphrag-contract-review、journal.hep.com.cn/fem/EN/10.1007/s42524-026-4237-0（天大合同问答）
+
+## 2026-08-13 全面体检结论
+- Git：master 工作区干净，116 个已跟踪文件。
+- 运行测试：tests/run_graph_rule_tests.py 全绿，14 项通过；tsc --noEmit 通过。
+- 前端依赖：npm audit 发现 react-router（间接依赖）高危 CSRF 绕过，范围 7.12.0-7.18.1，建议升级 react-router-dom 到 >=7.18.2 后重新 lock。
+- 后端依赖：pip-audit 发现 5 个包共 42 条已知漏洞：python-multipart 0.0.20、Pillow 11.0.0、python-dotenv 1.0.1、pdfminer-six 20231228、starlette 0.41.3；升级需做回归验证。
+- 后端安全扫描：源码未发现硬编码真实密钥；.env.example 中 PG_PASSWORD/NEO4J_PASSWORD 缺少注释，NEO4J_URI 与密钥占位值建议改成明显 placeholder。
+- 静态质量：ruff 共 352 条问题，其中 F 类 49 条（31 条未使用 import、graph_builder_service.py:432 缺少 Any、若干未使用变量/被遮蔽 import）；另有大量 Optional 现代语法、宽异常、导入排序等风格问题。
+- 关键潜在问题：frontend/vite.config.ts 兜底代理目标写为 18800，疑似应为 8800；main.py 与 config.py 仍保留默认数据库口令作为兜底；API 无鉴权/限流，MVP 可接受但生产前需处理。
+- 清理：已把 frontend/dist、tsconfig.tsbuildinfo、_extracted_imgs、acceptance_output、backend 阶段日志、项目内 __pycache__（排除 .venv）移动到系统临时目录，Git 仍干净。
+- 未清理候选（需用户确认）：backend/uploads 有 214 个文件/约 93 MB 且存在多轮重复上传；根目录 analyze.py/check_dupes.py/cleanup_dupes.py/ocr_verify.py/test_import_doc.py/duplicate_report.md 为一次性调试产物；backend/.venv 与 frontend/node_modules 可由安装命令重建；20260710资料样本/需求相关文档/.workbuddy 属于用户数据与记忆，不建议自动删除。
+
+## 2026-08-13 用户确认后的执行结果
+- 依赖与安全项按用户要求保持不动（MVP 本机环境，暂不升级版本）。
+- 已删除 backend/uploads（214 个文件）与 6 个根目录一次性调试文件，Git 显示对应删除状态。
+- 已清空临时目录；项目内缓存/构建产物/日志/提取图片/验收产物均已移除。
+- 低风险代码优化已执行：移除 31 个未使用 import；补 graph_builder_service.py 的 Any；修复 ocr_service/review_service/rule_parse_engine 中未使用局部变量与被遮蔽的 field 循环变量；修复 vite 兜底端口 18800 → 8800。
+- 验证：py_compile 全过、前端 tsc --noEmit 通过、tests/run_graph_rule_tests.py PASS=14 / FAIL=0。
+- 剩余 ruff F 类仅 14 个 SQLAlchemy 字符串前向引用（模型间 Mapped["..."]），非运行期错误，暂不改。

@@ -438,3 +438,36 @@
 - Risks / notes:
   - 后端已运行新代码（隐藏窗口 + 日志 backend_phaseE.log）；后续如再改代码，热重载会重启 worker，验收脚本需在改动完成后一次跑通
   - 多值字符串相等不做 LLM 语义兜底为已知设计边界（确定性结果保留，防止 LLM 误判）
+
+## Session: 2026-08-13
+
+### 全面体检与安全/冗余清理
+- **Status:** complete
+- Actions taken:
+  - 盘点项目目录、Git 跟踪状态与主要目录体积。
+  - 运行后端 secret/pattern 扫描、pip-audit、前端 npm audit、ruff F 类检查、tsc --noEmit。
+  - 运行 tests/run_graph_rule_tests.py，14/14 通过。
+  - 将可再生成缓存/构建产物移动到系统临时目录：frontend/dist、tsconfig.tsbuildinfo、_extracted_imgs、acceptance_output、backend/backend_phaseE.log、backend/backend_phaseE_err.log、项目内 __pycache__（排除 .venv）。
+- Verification:
+  - git status 清理后仍为干净状态。
+  - 图谱规则测试 PASS=14 / FAIL=0。
+- Files created/modified:
+  - task_plan.md / findings.md / progress.md（追加本批次记录）
+- Risks / notes:
+  - 本次未修改业务代码，未删除用户业务文档、依赖目录和 .workbuddy。
+  - 待办优先级：前端 react-router 升级 > 后端依赖升级与回归 > ruff 清理（至少修 graph_builder_service.py 缺少 Any）。
+
+### 用户确认后的清理与低风险优化
+- **Status:** complete
+- Actions taken:
+  - 清空临时目录；删除 backend/uploads 和 6 个根目录一次性调试脚本。
+  - ruff --select F401 --fix 移除 31 个未使用 import；补 graph_builder_service.py 的 Any。
+  - 修复 ocr_service/review_service/rule_parse_engine 的未使用变量与变量遮蔽；修复 vite 兜底端口。
+- Verification:
+  - py_compile 通过，前端 tsc --noEmit 通过。
+  - tests/run_graph_rule_tests.py PASS=14 / FAIL=0。
+- Files created/modified:
+  - backend/app/services/*、backend/app/routers/*、backend/app/models/*、frontend/vite.config.ts 等低风险代码文件。
+  - task_plan.md / findings.md / progress.md。
+- Risks / notes:
+  - 依赖与安全项未动；backend/uploads 已按用户确认删除，若后续还需要原始上传文件，需从资料样本重新上传。

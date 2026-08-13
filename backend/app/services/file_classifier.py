@@ -28,7 +28,6 @@ from ..constants import (
     DOC_VAT_INVOICE,
     DOC_WAREHOUSE_INOUT,
     DOC_WAYBILL,
-    OPTIONAL_DOC_TYPES,
     REQUIRED_DOC_TYPES,
 )
 
