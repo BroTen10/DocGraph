@@ -23,6 +23,7 @@ backend/CACHEDIR.TAG
 # 构建与分发
 build/
 dist/
+release/
 *.egg-info/
 *.egg
 .eggs/
