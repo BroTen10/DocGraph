@@ -20,6 +20,7 @@ import type {
   ImportTask,
   OcrTask,
   OcrTaskBrief,
+  PromptOptimizeResult,
   ReviewResultByDoc,
   ReviewResultByRule,
   RuleParseSkill,
@@ -33,6 +34,7 @@ import type {
   RuleSetCreate,
   RuleSetUpdate,
   RuleSnapshot,
+  SettingsResponse,
   SkillLearnRequest,
   SkillLearnResponse,
 } from '../types'
@@ -131,6 +133,9 @@ export const contractsApi = {
     http.put<ContractBrief>(`/contracts/${id}/aliases`, { contract_no, alias_list }).then((r) => r.data),
   updateDocType: (docId: string, doc_type: string) =>
     http.put(`/contracts/documents/${docId}/doc-type`, { doc_type }).then((r) => r.data),
+  /** 人工修正 OCR 结构化字段（OCR 对照界面保存） */
+  updateOcrFields: (docId: string, payload: { extracted_fields: Record<string, unknown>; has_stamp?: boolean | null }) =>
+    http.put<DocumentBrief>(`/contracts/documents/${docId}/ocr-fields`, payload).then((r) => r.data),
   /** 获取原始文件预览 URL（PDF/图片可直接用 iframe/img 展示） */
   fileUrl: (docId: string) => `/api/contracts/documents/${docId}/file`,
   /** 获取单个文档的 OCR 识别详情 */
@@ -307,6 +312,20 @@ export const docTypesApi = {
   /** 从规则中检测新文档类型 */
   detectFromRules: (docTypes: string[]) =>
     http.post<DetectNewTypesResponse>('/doc-types/detect-from-rules', { rule_doc_types: docTypes }).then((r) => r.data),
+}
+
+// ============ 系统设置 ============
+export const settingsApi = {
+  /** 全部设置（提示词 + 运行参数） */
+  list: () => http.get<SettingsResponse>('/settings').then((r) => r.data),
+  /** 批量更新；value 传 null 表示重置回默认 */
+  update: (items: Array<{ key: string; value: unknown }>) =>
+    http.put<SettingsResponse>('/settings', { items }).then((r) => r.data),
+  /** LLM 生成提示词优化建议（不直接应用） */
+  optimizePrompt: (key: string, current: string, instruction: string) =>
+    http
+      .post<PromptOptimizeResult>('/settings/optimize-prompt', { key, current, instruction })
+      .then((r) => r.data),
 }
 
 // ============ 规则解析 Skill ============

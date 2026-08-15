@@ -48,6 +48,14 @@ class ReviewTaskSummary(ReviewTaskStatus):
     summary: dict[str, Any] = Field(default_factory=dict)
 
 
+class ReviewRelatedDoc(BaseModel):
+    """审查结果涉及的单个原件文档。"""
+
+    doc_id: UUID
+    file_name: str
+    doc_type: str | None = None
+
+
 class ReviewResultItem(BaseModel):
     """单条审查结果。"""
     model_config = ConfigDict(from_attributes=True)
@@ -59,6 +67,7 @@ class ReviewResultItem(BaseModel):
     check_category: str | None = None
     doc_id: UUID | None = None
     doc_name: str | None = None
+    related_docs: list[ReviewRelatedDoc] = Field(default_factory=list)
     result: str  # pass / fail / unverifiable
     # 批次 9：问题状态机 / 严重度 / 偏离度 / 图谱实体关联
     status: str = "open"

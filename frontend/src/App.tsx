@@ -18,6 +18,7 @@ import GraphPage from './pages/GraphPage'
 import ReviewPage from './pages/ReviewPage'
 import ResultsPage from './pages/ResultsPage'
 import DocTypesPage from './pages/DocTypesPage'
+import SettingsPage from './pages/SettingsPage'
 import { RuleSetProvider, useRuleSet } from './context/RuleSetContext'
 import { RuleSetSwitcher } from './components/RuleSetSwitcher'
 
@@ -31,6 +32,7 @@ const menuItems = [
   { key: '/graph', icon: <ApartmentOutlined />, label: '图谱确认' },
   { key: '/review', icon: <FileSearchOutlined />, label: '审查执行' },
   { key: '/results', icon: <CheckCircleOutlined />, label: '结果展示' },
+  { key: '/settings', icon: <SettingOutlined />, label: '系统设置' },
 ]
 
 /** 路径 → 当前页标题映射(给 Header 显示) */
@@ -224,6 +226,7 @@ function AppInner() {
               <Route path="/graph" element={<GraphPage />} />
               <Route path="/review" element={<ReviewPage />} />
               <Route path="/results" element={<ResultsPage />} />
+              <Route path="/settings" element={<SettingsPage />} />
             </Routes>
           </div>
         </Content>

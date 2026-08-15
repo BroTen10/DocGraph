@@ -19,7 +19,17 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from .config import settings
 from .database import get_db, init_db
-from .routers import contracts, doc_types, graph, ocr, reviews, rule_parse_skills, rule_sets, rules
+from .routers import (
+    contracts,
+    doc_types,
+    graph,
+    ocr,
+    reviews,
+    rule_parse_skills,
+    rule_sets,
+    rules,
+    settings as settings_router,
+)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -71,6 +81,7 @@ app.include_router(reviews.router)
 app.include_router(ocr.router)
 app.include_router(rule_parse_skills.router)
 app.include_router(doc_types.router)
+app.include_router(settings_router.router)
 
 
 @app.get("/api/health")
@@ -100,6 +111,7 @@ def list_doc_types(db=Depends(get_db)) -> dict:
                 "name": r.name,
                 "stamp_required": r.stamp_required,
                 "key_fields": r.key_fields or [],
+                "aliases": r.aliases or [],
                 "business_meaning": r.business_meaning,
                 "has_sample": r.has_sample if hasattr(r, "has_sample") else False,
             }

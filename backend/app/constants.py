@@ -152,3 +152,60 @@ STAMP_REQUIREMENTS: dict[str, str | None] = {
     DOC_RECEIVE_VOUCHER: None,
     DOC_PAY_VOUCHER: None,
 }
+
+
+# ============ 类型/字段显式别名（批次 11：写时归一） ============
+# 原则：
+# 1. 只登记业务上确定同义的说法，不做模糊/近似猜测，避免过拟合；
+# 2. 别名在"写入那一刻"翻译成规范名（规则解析落库、文档分类落库、OCR 提取落库），
+#    审查匹配仍用精确等值，行为可预期、可审计；
+# 3. 未命中规范名/别名的新名称不硬猜，走新类型检测 → pending_review 人工确认。
+# 用户可在"文档类型"页维护各类型的 aliases / field_aliases，注册表优先于此处常量。
+DOC_TYPE_ALIASES: dict[str, list[str]] = {
+    # 内置规范名 → 常见同义叫法
+    DOC_CUSTOMS_DECLARATION: ["报关单", "出口货物报关单", "海关报关单"],
+    DOC_PACKING_LIST: ["装箱清单", "装箱明细"],
+}
+
+# 字段别名：{规范文档类型: {字段别名: 规范字段名 或 {"field": ..., "aggregate": ...}}}
+# aggregate 用于表达"总数量 = 数量求和"这类聚合语义，而非普通同义词。
+FIELD_ALIASES: dict[str, dict[str, object]] = {
+    DOC_CUSTOMS_DECLARATION: {
+        "币种": "币别",
+        "币制": "币别",
+        "货币": "币别",
+        "金额": "总价",
+        "总金额": "总价",
+        "货值": "总价",
+        "报关金额": "总价",
+    },
+    DOC_PACKING_LIST: {
+        "总数量": {"field": "数量", "aggregate": "SUM"},
+        "数量合计": {"field": "数量", "aggregate": "SUM"},
+        "总计数量": {"field": "数量", "aggregate": "SUM"},
+        "总件数": {"field": "件数", "aggregate": "SUM"},
+        "件数合计": {"field": "件数", "aggregate": "SUM"},
+    },
+    DOC_WAYBILL: {
+        "总件数": {"field": "件数", "aggregate": "SUM"},
+        "总重量": {"field": "重量", "aggregate": "SUM"},
+    },
+}
+
+# ============ 币别值别名（批次 12：写时归一 + 读时兜底） ============
+# 规范值为中文币名（与规则条件/OCR 提取的中文表述一致），值为该币种的常见写法
+# （ISO 代码 / 货币符号 / 中文变体），统一大写比较。
+# 原则与字段别名一致：只登记业务上确定同义的写法，不做模糊猜测。
+CURRENCY_VALUE_ALIASES: dict[str, list[str]] = {
+    "美元": ["USD", "US$", "US DOLLAR", "美金", "美圆", "美元"],
+    "人民币": ["CNY", "RMB", "人民币元", "人民币"],
+    "港币": ["HKD", "港元", "港币"],
+    "欧元": ["EUR", "欧元"],
+    "日元": ["JPY", "日圆", "日元"],
+    "英镑": ["GBP", "英镑"],
+    "澳大利亚元": ["AUD", "澳元", "澳大利亚元"],
+    "加拿大元": ["CAD", "加元", "加拿大元"],
+    "新加坡元": ["SGD", "新加坡元"],
+    "新台币": ["TWD", "台币", "新台币"],
+    "韩元": ["KRW", "韩圆", "韩元"],
+}

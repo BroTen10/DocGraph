@@ -29,6 +29,8 @@ class DocTypeOut(BaseModel):
     name: str
     description: str | None = None
     key_fields: list[str] = []
+    aliases: list[str] = []
+    field_aliases: dict = {}
     stamp_required: str | None = None
     business_meaning: str | None = None
     has_sample: bool = False
@@ -46,6 +48,8 @@ class DocTypeCreate(BaseModel):
     name: str
     description: str | None = None
     key_fields: list[str] = []
+    aliases: list[str] = []
+    field_aliases: dict = {}
     stamp_required: str | None = None
     business_meaning: str | None = None
     source: str = "manual"
@@ -56,6 +60,8 @@ class DocTypeUpdate(BaseModel):
     name: str | None = None
     description: str | None = None
     key_fields: list[str] | None = None
+    aliases: list[str] | None = None
+    field_aliases: dict | None = None
     stamp_required: str | None = None
     business_meaning: str | None = None
 
@@ -82,6 +88,8 @@ def _to_out(dt: DocumentType) -> DocTypeOut:
         name=dt.name,
         description=dt.description,
         key_fields=list(dt.key_fields) if dt.key_fields else [],
+        aliases=list(dt.aliases or []),
+        field_aliases=dict(dt.field_aliases or {}),
         stamp_required=dt.stamp_required,
         business_meaning=dt.business_meaning,
         has_sample=bool(dt.sample_file_path),
@@ -137,17 +145,28 @@ def get_doc_type(type_id: str, db: Session = Depends(get_db)):
 @router.post("", response_model=DocTypeOut, status_code=201)
 def create_doc_type(body: DocTypeCreate, db: Session = Depends(get_db)):
     """创建新的文档类型。"""
+    from ..services.doc_normalizer import normalize_doc_type
+
     # 检查重名
     existing = db.execute(
         select(DocumentType).where(DocumentType.name == body.name)
     ).scalars().first()
     if existing:
         raise HTTPException(status_code=409, detail=f"文档类型「{body.name}」已存在")
+    # 批次 11：别名即类型 → 拒绝，避免双轨繁殖
+    canonical = normalize_doc_type(db, body.name)
+    if canonical and canonical != body.name:
+        raise HTTPException(
+            status_code=409,
+            detail=f"「{body.name}」是「{canonical}」的别名，请使用规范名或在其别名中维护",
+        )
 
     dt = DocumentType(
         name=body.name,
         description=body.description,
         key_fields=body.key_fields,
+        aliases=body.aliases,
+        field_aliases=body.field_aliases,
         stamp_required=body.stamp_required,
         business_meaning=body.business_meaning,
         source=body.source,
@@ -164,6 +183,7 @@ def create_doc_type(body: DocTypeCreate, db: Session = Depends(get_db)):
 def update_doc_type(type_id: str, body: DocTypeUpdate, db: Session = Depends(get_db)):
     """更新文档类型信息，如补充关键字段、业务含义等。"""
     from sqlalchemy.exc import IntegrityError
+    from ..services.doc_normalizer import normalize_doc_type
 
     dt = db.execute(
         select(DocumentType).where(DocumentType.id == uuid.UUID(type_id))
@@ -173,6 +193,12 @@ def update_doc_type(type_id: str, body: DocTypeUpdate, db: Session = Depends(get
 
     # 若要重命名，先检查重名
     if body.name and body.name != dt.name:
+        canonical = normalize_doc_type(db, body.name)
+        if canonical and canonical != body.name:
+            raise HTTPException(
+                status_code=409,
+                detail=f"「{body.name}」是「{canonical}」的别名，不能作为独立类型名",
+            )
         existing = db.execute(
             select(DocumentType).where(
                 DocumentType.name == body.name,
@@ -221,6 +247,8 @@ def delete_doc_type(type_id: str, db: Session = Depends(get_db)):
 @router.post("/{type_id}/confirm", response_model=DocTypeOut)
 def confirm_doc_type(type_id: str, db: Session = Depends(get_db)):
     """确认新检测到的文档类型（pending_review → active）。"""
+    from ..services.doc_normalizer import normalize_doc_type
+
     dt = db.execute(
         select(DocumentType).where(DocumentType.id == uuid.UUID(type_id))
     ).scalars().first()
@@ -228,6 +256,13 @@ def confirm_doc_type(type_id: str, db: Session = Depends(get_db)):
         raise HTTPException(status_code=404, detail="文档类型不存在")
     if dt.status != "pending_review":
         raise HTTPException(status_code=400, detail="只有待审核状态的类型可以确认")
+    canonical = normalize_doc_type(db, dt.name)
+    if canonical and canonical != dt.name:
+        # 该名称已是某规范类型的别名：不应作为独立类型确认，直接置为 rejected
+        dt.status = "rejected"
+        db.commit()
+        logger.info("文档类型「%s」是「%s」的别名，确认时自动拒绝", dt.name, canonical)
+        return _to_out(dt)
 
     dt.status = "active"
     db.commit()
@@ -312,36 +347,16 @@ async def analyze_sample_document(
         text_content = "[文本提取失败]"
 
     # 用 LLM 分析
+    from ..services.settings_service import get_prompt
     llm = get_llm_client()
     hint_text = f"（提示：该文档可能属于「{doc_type_hint}」类型）" if doc_type_hint else ""
 
-    system_prompt = """你是一个单证分析专家。分析用户上传的文档样例，输出以下 JSON：
-
-{
-  "detected_name": "推测的文档类型名称（简洁无歧义，如"代理协议""出口报关单"）",
-  "description": "对该文档类型功能的简短描述",
-  "key_fields": ["字段1", "字段2", ...],
-  "stamp_required": "用印要求描述，不要求则 null",
-  "business_meaning": "该文档在贸易单证流程中承载的业务意义（1-3句话）"
-}
-
-规则：
-1. detected_name 从文档内容、标题、格式综合推断
-2. key_fields 列出该文档类型下应该提取的关键字段（如合同号、金额、日期等）
-3. business_meaning 解释该文档在业务流程中的位置和作用
-4. 如果文档内容不足以判断，基于文件名和常识做合理推测"""
-
-    user_prompt = f"""请分析以下文档内容，判断其文档类型、关键字段和业务意义。
-
-文件名：{file.filename}
-{hint_text}
-
-文档内容（前 6000 字符）：
----
-{text_content[:6000]}
----
-
-请输出 JSON。"""
+    system_prompt = get_prompt(db, "doc_analyze.system")
+    user_prompt = get_prompt(db, "doc_analyze.user").format(
+        file_name=file.filename or "",
+        hint=hint_text,
+        text=text_content[:6000],
+    )
 
     try:
         resp = llm.chat_json(

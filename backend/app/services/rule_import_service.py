@@ -34,6 +34,13 @@ from .rule_parse_engine import (
     apply_text_preprocessing,
 )
 from .rule_import_task import ImportProgress, update_task
+from .settings_service import get_prompt, get_setting
+from .doc_normalizer import (
+    normalize_doc_type as _norm_doc_type,
+    normalize_field as _norm_field,
+    normalize_scope as _norm_scope,
+    normalize_structure as _norm_structure,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -573,13 +580,13 @@ def import_rules_from_text(
     rule_chunks: list[int] = []  # 每条 raw_rule 所属分段（用于 provenance）
     ontology: dict[str, list] = {"doc_types": [], "fields": [], "check_intents": []}
     for idx, chunk in enumerate(chunks, start=1):
-        user_prompt = _USER_PROMPT_TEMPLATE.format(
+        user_prompt = get_prompt(db, "rule_import.user").format(
             doc_types=doc_types_str,
             check_categories=check_categories_str,
             raw_text=chunk,
         )
         # 构建动态 System Prompt（附加 Skill 指令 + 领域上下文）
-        system_content = _SYSTEM_PROMPT
+        system_content = get_prompt(db, "rule_import.system")
         if directive:
             if directive.prompt_additions:
                 system_content += "\n\n### 用户自定义解析指令\n" + "\n".join(f"- {a}" for a in directive.prompt_additions)
@@ -716,6 +723,15 @@ def import_rules_from_text(
         if not check_category and intents:
             check_category = intents[0]
 
+        # 批次 11：写时归一——文档类型/字段名映射到规范名（显式别名表，防双轨繁殖）。
+        # 未命中规范名/别名的新名称原样保留，由下方"新类型检测"注册为 pending_review。
+        if doc_type:
+            doc_type = _norm_doc_type(db, doc_type)
+        if scope:
+            scope = _norm_scope(db, scope)
+        if structure:
+            structure = _norm_structure(db, structure, doc_type or None)
+
         # 收集新发现的类型/意图（含 scope 声明；ontology 声明在循环后并入）
         if doc_type:
             new_doc_types.add(doc_type)
@@ -835,7 +851,7 @@ def import_rules_from_text(
     # 将 LLM ontology 声明的新文件类型/检查意图并入发现集合（批次 10）
     for x in ontology.get("doc_types") or []:
         if isinstance(x, dict) and str(x.get("name") or "").strip():
-            new_doc_types.add(str(x["name"]).strip())
+            new_doc_types.add(_norm_doc_type(db, str(x["name"]).strip()) or str(x["name"]).strip())
     for x in ontology.get("check_intents") or []:
         if isinstance(x, dict) and str(x.get("name") or "").strip():
             new_check_categories.add(str(x["name"]).strip())
@@ -865,8 +881,9 @@ def import_rules_from_text(
     for f in ontology.get("fields") or []:
         if not isinstance(f, dict):
             continue
-        fdt = str(f.get("doc_type") or "").strip()
-        fname = str(f.get("name") or "").strip()
+        fdt = _norm_doc_type(db, str(f.get("doc_type") or "").strip()) or ""
+        fname, _ = _norm_field(db, fdt, str(f.get("name") or "").strip())
+        fname = str(fname or "").strip()
         if fdt and fname and fname not in field_map.setdefault(fdt, []):
             field_map[fdt].append(fname)
 
@@ -906,7 +923,11 @@ def import_rules_from_text(
                 dt = DocumentType(
                     name=name,
                     source="rule_import",
-                    status="pending_review",
+                    status=(
+                        "active"
+                        if get_setting(db, "rules.auto_confirm_new_types")
+                        else "pending_review"
+                    ),
                     key_fields=field_map.get(name, []),
                 )
                 db.add(dt)

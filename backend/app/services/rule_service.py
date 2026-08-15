@@ -14,6 +14,11 @@ from sqlalchemy.orm import Session
 
 from ..models import Rule, RuleSnapshot
 from ..schemas.rule import RuleCreate, RuleOut, RuleUpdate
+from .doc_normalizer import (
+    normalize_doc_type,
+    normalize_scope,
+    normalize_structure,
+)
 
 
 def list_rules(
@@ -67,7 +72,15 @@ def get_rule(db: Session, rule_id: uuid.UUID) -> Optional[Rule]:
 
 def create_rule(db: Session, rule_set_id: uuid.UUID, payload: RuleCreate) -> RuleOut:
     """创建规则（必须挂在指定规则集下）。"""
-    rule = Rule(rule_set_id=rule_set_id, **payload.model_dump())
+    data = payload.model_dump()
+    # 批次 11：写时归一——手工创建/导入的规则同样归一文档类型与字段名
+    if data.get("doc_type"):
+        data["doc_type"] = normalize_doc_type(db, data["doc_type"]) or data["doc_type"]
+    if data.get("scope"):
+        data["scope"] = normalize_scope(db, data["scope"])
+    if data.get("structure"):
+        data["structure"] = normalize_structure(db, data["structure"], data.get("doc_type"))
+    rule = Rule(rule_set_id=rule_set_id, **data)
     db.add(rule)
     db.commit()
     db.refresh(rule)
@@ -81,6 +94,15 @@ def update_rule(
     if rule is None:
         return None
     data = payload.model_dump(exclude_unset=True)
+    # 批次 11：写时归一——手工编辑规则同样归一文档类型与字段名
+    if data.get("doc_type"):
+        data["doc_type"] = normalize_doc_type(db, data["doc_type"]) or data["doc_type"]
+    if data.get("scope"):
+        data["scope"] = normalize_scope(db, data["scope"])
+    if data.get("structure"):
+        data["structure"] = normalize_structure(
+            db, data["structure"], data.get("doc_type") or rule.doc_type
+        )
     for k, v in data.items():
         setattr(rule, k, v)
     db.commit()

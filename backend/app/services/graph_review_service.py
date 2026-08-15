@@ -30,6 +30,7 @@ from sqlalchemy.orm import Session
 from ..models import Contract, Document, ReviewResult, RuleSnapshot
 from ..neo4j_client import Neo4jClient, get_neo4j_client
 from .contract_normalizer import extract_contract_numbers, normalize_contract_no
+from .doc_normalizer import is_currency_field, normalize_currency_value
 from . import result_meta
 
 logger = logging.getLogger(__name__)
@@ -39,6 +40,14 @@ logger = logging.getLogger(__name__)
 
 def _docs_by_type(docs: list[Document], doc_type: str) -> list[Document]:
     return [d for d in docs if d.doc_type == doc_type]
+
+
+def _first_doc_for_type(docs: list[Document], doc_type: str | None) -> Optional[Document]:
+    """返回指定业务类型下的第一份文档，用于给审查结果绑定可打开原件。"""
+    if not doc_type:
+        return None
+    typed = _docs_by_type(docs, doc_type)
+    return typed[0] if typed else None
 
 
 def _get_field(doc: Document, key: str, aliases: list[str] | None = None):
@@ -230,7 +239,10 @@ def _check_required_docs(
 
         if doc_type in present_types:
             results.append(_make_result_from_graph(
-                rel_props, None, "pass", detail={"doc_type": doc_type},
+                rel_props,
+                _first_doc_for_type(docs, doc_type),
+                "pass",
+                detail={"doc_type": doc_type},
                 source_node=rec.get("source"), target_node=rec.get("target"),
             ))
         else:
@@ -337,8 +349,15 @@ def _check_compare_relationships(
             docs=docs,
             contract=contract,
         )
+        # 跨文件比对结果虽涉及 source/target 两类文件，但“原件对照”入口绑定
+        # 规则的主文件类型（通常为 source/rule.doc_type），避免操作栏误显示“无原件”。
+        primary_doc_type = rel_props.get("doc_type") or _parse_field_node(source_name)[0]
         results.append(_make_result_from_graph(
-            rel_props, None, result, issue_desc=issue_desc, detail=detail,
+            rel_props,
+            _first_doc_for_type(docs, primary_doc_type),
+            result,
+            issue_desc=issue_desc,
+            detail=detail,
             source_node=source_name, target_node=target_name,
         ))
     return results
@@ -450,7 +469,13 @@ def _run_intent_chain(
 
     # E1-2：币别预检（批次 7-4 保留，并入意图链证据）
     currency = rel_props.get("currency")
-    if currency:
+    # 若条件已对源文档的币别字段做过约束（如"报关单币种为美元"），
+    # 币别预检即为冗余且可能误判（如人民币发票上的"共计美元"折算值），跳过。
+    condition_gates_currency = bool(
+        isinstance(condition, dict)
+        and str(condition.get("field") or "").strip() in ("币别", "币种", "币制", "货币")
+    )
+    if currency and not condition_gates_currency:
         cur_res = _check_currency(currency, src_doc_type, tgt_doc_type, docs)
         if cur_res == "fail":
             return (
@@ -581,6 +606,13 @@ def _evaluate_criterion(criterion: dict, values: list) -> tuple[Optional[bool], 
         return (bool(values), True)
     if operator in ("为空", "为空值"):
         return (not bool(values), True)
+    # OCR 多行字段会以 ";" 拼接（如 币别="美元;美元"、单价="0.5459;1.4025"）。
+    # 条件求值前先展开为独立值，避免"美元;美元"与"美元"整体比较误判为条件不满足。
+    values = _expand_multi_values(values)
+    # 币别类字段：值级别名（USD/美金 等）按注册表归一后再比较（批次 12）
+    if is_currency_field(criterion.get("field")):
+        values = [normalize_currency_value(v) or v for v in values]
+        value = normalize_currency_value(value) if value is not None else value
     if not values or value is None:
         return (None, False)
     try:
@@ -615,6 +647,23 @@ def _evaluate_criterion(criterion: dict, values: list) -> tuple[Optional[bool], 
             return (any(n <= v_num for n in nums), True)
         return (any(n >= v_num for n in nums), True)
     return (None, False)
+
+
+def _expand_multi_values(values: list) -> list:
+    """展开 OCR 多行字段的 ";" 拼接值（支持中英文分号），空片段丢弃。
+
+    仅拆分字符串；数字/日期等非字符串原样保留。
+    """
+    out: list = []
+    for v in values:
+        if isinstance(v, str):
+            for part in v.replace("；", ";").split(";"):
+                part = part.strip()
+                if part:
+                    out.append(part)
+        else:
+            out.append(v)
+    return out
 
 
 def _try_exempt(
@@ -1071,7 +1120,10 @@ def _field_evidence_entry(docs: list[Document], doc_type: str, field: str, node_
         "node": node_name,
         "doc_type": doc_type,
         "field": field,
-        "docs": [{"doc_name": d.file_name, "value": v} for d, v in values],
+        "docs": [
+            {"doc_id": str(d.id), "doc_name": d.file_name, "value": v}
+            for d, v in values
+        ],
         "missing_fields": missing,
     }
 
@@ -1113,7 +1165,7 @@ def _check_currency(
     tgt_vals = _collect_fields(docs, tgt_doc_type, "币别")
     if not src_vals or not tgt_vals:
         return "unverifiable"
-    norm = lambda s: str(s).strip().upper()
+    norm = lambda s: str(normalize_currency_value(s) or s).strip().upper()
     src_cur = norm(src_vals[0])
     tgt_cur = norm(tgt_vals[0])
     if src_cur != tgt_cur or src_cur != norm(required):

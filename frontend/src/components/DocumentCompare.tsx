@@ -15,11 +15,13 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { Document as PdfDocument, Page as PdfPage } from 'react-pdf'
 import {
-  Card, Tabs, Table, Tag, Empty, Spin, Typography, Button, Tooltip, message,
+  Card, Tabs, Table, Tag, Empty, Spin, Typography, Button, Tooltip, message, Input, Space, Popconfirm,
 } from 'antd'
 import {
   SearchOutlined, FileTextOutlined, CheckCircleOutlined, WarningOutlined,
+  EditOutlined, SaveOutlined, PlusOutlined, DeleteOutlined, CloseOutlined,
 } from '@ant-design/icons'
+import { contractsApi, getErrorMessage } from '../api/client'
 import type { DocumentBrief } from '../types'
 import '../pdf-setup'
 
@@ -29,6 +31,8 @@ interface DocumentCompareProps {
   doc: DocumentBrief
   fileUrl: string
   height?: number | string
+  /** 字段修正保存成功后的回调（父级可刷新文档详情） */
+  onSaved?: () => void
 }
 
 /** 高亮 CSS 类名 */
@@ -305,14 +309,22 @@ function DocxViewer({
 }
 
 /** 主组件 */
-export default function DocumentCompare({ doc, fileUrl, height = 600 }: DocumentCompareProps) {
+export default function DocumentCompare({ doc, fileUrl, height = 600, onSaved }: DocumentCompareProps) {
   const [highlightTarget, setHighlightTarget] = useState<string | null>(null)
+  const [editing, setEditing] = useState(false)
+  const [draftFields, setDraftFields] = useState<Array<{ key: string; value: string }>>([])
+  const [saving, setSaving] = useState(false)
+  const [freshDoc, setFreshDoc] = useState<DocumentBrief | null>(null)
   const docContainerRef = useRef<HTMLElement | null>(null)
 
-  // 批次 5-14：切换文档时清除上一次的高亮目标，避免旧高亮残留
+  // 切换文档时清除上一次的高亮目标与编辑状态，避免旧状态残留
   useEffect(() => {
     setHighlightTarget(null)
+    setEditing(false)
+    setFreshDoc(null)
   }, [doc, fileUrl])
+
+  const displayDoc = freshDoc ?? doc
 
   const handleDocReady = useCallback((container: HTMLElement | null) => {
     docContainerRef.current = container
@@ -398,7 +410,60 @@ export default function DocumentCompare({ doc, fileUrl, height = 600 }: Document
     [],
   )
 
-  // 字段表格列
+  // ============ 字段人工修正（OCR 对照界面） ============
+  const startEditFields = () => {
+    setDraftFields(
+      Object.entries(displayDoc.extracted_fields || {})
+        .filter(([k]) => k !== '__inferred_doc_type__')
+        .map(([k, v]) => ({ key: k, value: v == null ? '' : String(v) })),
+    )
+    setEditing(true)
+  }
+
+  const cancelEditFields = () => {
+    setEditing(false)
+    setDraftFields([])
+  }
+
+  const saveFields = async () => {
+    if (saving) return
+    const extracted_fields: Record<string, unknown> = {}
+    for (const row of draftFields) {
+      const k = (row.key || '').trim()
+      if (!k) continue
+      extracted_fields[k] = row.value
+    }
+    // 保留模型推断类型（不在编辑表中展示）
+    const inferred = (displayDoc.extracted_fields as Record<string, unknown>)?.['__inferred_doc_type__']
+    if (inferred) extracted_fields['__inferred_doc_type__'] = inferred
+
+    setSaving(true)
+    try {
+      const updated = await contractsApi.updateOcrFields(displayDoc.id, { extracted_fields })
+      message.success('OCR 字段已保存，重新审查将使用修正后的数据')
+      setFreshDoc(updated)
+      setEditing(false)
+      onSaved?.()
+    } catch (e) {
+      message.error('保存失败: ' + getErrorMessage(e, ''))
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  const updateDraft = (idx: number, patch: Partial<{ key: string; value: string }>) => {
+    setDraftFields((prev) => prev.map((row, i) => (i === idx ? { ...row, ...patch } : row)))
+  }
+
+  const removeDraft = (idx: number) => {
+    setDraftFields((prev) => prev.filter((_, i) => i !== idx))
+  }
+
+  const addDraft = () => {
+    setDraftFields((prev) => [...prev, { key: '', value: '' }])
+  }
+
+  // 字段表格列（查看模式）
   const fieldColumns = [
     {
       title: '字段名',
@@ -425,17 +490,58 @@ export default function DocumentCompare({ doc, fileUrl, height = 600 }: Document
     },
   ]
 
-  const fieldData = Object.entries(doc.extracted_fields || {})
+  // 字段表格列（编辑模式）
+  const editFieldColumns = [
+    {
+      title: '字段名',
+      dataIndex: 'key',
+      key: 'key',
+      width: '34%',
+      render: (v: string, _: unknown, idx: number) => (
+        <Input
+          size="small"
+          value={v}
+          placeholder="字段名"
+          onChange={(e) => updateDraft(idx, { key: e.target.value })}
+        />
+      ),
+    },
+    {
+      title: '值',
+      dataIndex: 'value',
+      key: 'value',
+      render: (v: string, _: unknown, idx: number) => (
+        <Input
+          size="small"
+          value={v}
+          placeholder="从左侧识别文本复制实际值"
+          onChange={(e) => updateDraft(idx, { value: e.target.value })}
+        />
+      ),
+    },
+    {
+      title: '',
+      key: 'op',
+      width: 48,
+      render: (_: unknown, __: unknown, idx: number) => (
+        <Popconfirm title="删除该字段？" onConfirm={() => removeDraft(idx)}>
+          <Button size="small" type="text" danger icon={<DeleteOutlined />} />
+        </Popconfirm>
+      ),
+    },
+  ]
+
+  const fieldData = Object.entries(displayDoc.extracted_fields || {})
     .filter(([k]) => k !== '__inferred_doc_type__')
     .map(([k, v]) => ({
       key: k,
       value: String(v ?? ''),
     }))
 
-  const inferredDocType = (doc.extracted_fields as Record<string, unknown>)?.['__inferred_doc_type__'] as string | undefined
+  const inferredDocType = (displayDoc.extracted_fields as Record<string, unknown>)?.['__inferred_doc_type__'] as string | undefined
 
   // OCR 文本按行分割，每行可点击高亮
-  const ocrLines = (doc.ocr_text || '').split('\n').filter((line) => line.trim())
+  const ocrLines = (displayDoc.ocr_text || '').split('\n').filter((line) => line.trim())
 
   return (
     <div style={{ display: 'flex', gap: 12, height: typeof height === 'number' ? `${height}px` : height }}>
@@ -481,8 +587,8 @@ export default function DocumentCompare({ doc, fileUrl, height = 600 }: Document
             </span>
           }
           extra={
-            <Tag color={doc.ocr_status === 'done' ? 'green' : doc.ocr_status === 'failed' ? 'red' : 'blue'}>
-              {doc.ocr_status}
+            <Tag color={displayDoc.ocr_status === 'done' ? 'green' : displayDoc.ocr_status === 'failed' ? 'red' : 'blue'}>
+              {displayDoc.ocr_status}
             </Tag>
           }
         >
@@ -493,12 +599,12 @@ export default function DocumentCompare({ doc, fileUrl, height = 600 }: Document
                 模型推测类型: {inferredDocType}
               </Tag>
             )}
-            {doc.ocr_confidence != null && (
-              <span>置信度: {(doc.ocr_confidence * 100).toFixed(1)}% </span>
+            {displayDoc.ocr_confidence != null && (
+              <span>置信度: {(displayDoc.ocr_confidence * 100).toFixed(1)}% </span>
             )}
-            {doc.has_stamp != null && (
-              <Tag color={doc.has_stamp ? 'green' : 'red'} style={{ marginLeft: 8 }}>
-                {doc.has_stamp ? '有印章' : '无印章'}
+            {displayDoc.has_stamp != null && (
+              <Tag color={displayDoc.has_stamp ? 'green' : 'red'} style={{ marginLeft: 8 }}>
+                {displayDoc.has_stamp ? '有印章' : '无印章'}
               </Tag>
             )}
           </div>
@@ -509,16 +615,61 @@ export default function DocumentCompare({ doc, fileUrl, height = 600 }: Document
               {
                 key: 'fields',
                 label: `结构化字段 (${fieldData.length})`,
-                children: fieldData.length > 0 ? (
-                  <Table
-                    dataSource={fieldData}
-                    columns={fieldColumns}
-                    pagination={false}
-                    size="small"
-                    scroll={{ y: 400 }}
-                  />
-                ) : (
-                  <Empty description="无提取字段" />
+                children: (
+                  <div>
+                    <Space style={{ marginBottom: 8 }}>
+                      {!editing ? (
+                        <Button size="small" icon={<EditOutlined />} onClick={startEditFields}>
+                          修正字段
+                        </Button>
+                      ) : (
+                        <>
+                          <Button
+                            size="small"
+                            type="primary"
+                            icon={<SaveOutlined />}
+                            loading={saving}
+                            onClick={saveFields}
+                          >
+                            保存
+                          </Button>
+                          <Button size="small" icon={<CloseOutlined />} onClick={cancelEditFields}>
+                            取消
+                          </Button>
+                        </>
+                      )}
+                      {editing && (
+                        <Button size="small" icon={<PlusOutlined />} onClick={addDraft}>
+                          新增字段
+                        </Button>
+                      )}
+                    </Space>
+                    {editing ? (
+                      <Table
+                        dataSource={draftFields}
+                        columns={editFieldColumns}
+                        pagination={false}
+                        size="small"
+                        scroll={{ y: 340 }}
+                        rowKey={(_, idx) => String(idx)}
+                      />
+                    ) : fieldData.length > 0 ? (
+                      <Table
+                        dataSource={fieldData}
+                        columns={fieldColumns}
+                        pagination={false}
+                        size="small"
+                        scroll={{ y: 400 }}
+                      />
+                    ) : (
+                      <Empty description="无提取字段" />
+                    )}
+                    {editing && (
+                      <Paragraph type="warning" style={{ marginTop: 8, fontSize: 11, marginBottom: 0 }}>
+                        合计类字段（数量/总价/件数等）请填所有明细行的汇总值，可直接从左侧识别文本中取值。
+                      </Paragraph>
+                    )}
+                  </div>
                 ),
               },
               {

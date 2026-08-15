@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import shutil
 import uuid
+from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
@@ -27,6 +28,8 @@ from .contract_normalizer import (
     normalize_contract_no,
 )
 from .file_classifier import classify_file, get_file_type
+from .doc_normalizer import normalize_doc_type, resolve_field_aliases
+from .field_extraction_service import normalize_fields
 
 logger = logging.getLogger(__name__)
 
@@ -88,6 +91,8 @@ async def upload_contract_folder(
         content = await f.read()
         tmp_path.write_bytes(content)
         doc_type, is_required = classify_file(orig_name, registry=registry)
+        # 批次 11：写时归一——分类结果映射到规范类型名（别名不再落库为并列类型）
+        doc_type = normalize_doc_type(db, doc_type) or doc_type
         # 从文件名提取合同号
         contract_candidates.extend(extract_contract_numbers(orig_name))
         saved.append((orig_name, tmp_path, doc_type, is_required))
@@ -214,8 +219,45 @@ def update_doc_type(
     doc = db.get(Document, doc_id)
     if doc is None:
         return None
-    doc.doc_type = doc_type
+    # 批次 11：写时归一——前端/接口传入的别名统一落库为规范名
+    doc.doc_type = normalize_doc_type(db, doc_type) or doc_type
     doc.is_required = doc_type in REQUIRED_DOC_TYPES
+    db.commit()
+    db.refresh(doc)
+    return doc
+
+
+def update_doc_ocr_fields(
+    db: Session,
+    doc_id: uuid.UUID,
+    extracted_fields: dict,
+    has_stamp: Optional[bool] = None,
+    update_has_stamp: bool = False,
+) -> Optional[Document]:
+    """人工修正 OCR 结构化字段（OCR 对照界面保存入口）。
+
+    复用与 OCR 写入一致的字段归一（别名映射 + 数值/日期规范化），
+    保证审查读取的 extracted_fields 与自动提取路径口径一致。
+    """
+    doc = db.get(Document, doc_id)
+    if doc is None:
+        return None
+
+    fields = dict(extracted_fields or {})
+    # 保留模型推断类型（前端字段编辑表不展示该内部键）
+    if "__inferred_doc_type__" not in fields:
+        prev = (doc.extracted_fields or {}).get("__inferred_doc_type__")
+        if prev:
+            fields["__inferred_doc_type__"] = prev
+
+    doc.extracted_fields = normalize_fields(
+        doc.doc_type,
+        fields,
+        aliases=resolve_field_aliases(db, doc.doc_type),
+    )
+    if update_has_stamp:
+        doc.has_stamp = has_stamp
+    doc.extracted_at = datetime.now()
     db.commit()
     db.refresh(doc)
     return doc
