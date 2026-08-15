@@ -59,6 +59,7 @@ def init_db() -> None:
         rule_parse_skill,  # noqa: F401
         rule_set,       # noqa: F401
         rule_snapshot,  # noqa: F401
+        system_setting, # noqa: F401
     )
 
     if settings.db_reset_on_startup:
@@ -81,6 +82,8 @@ def init_db() -> None:
     # 种子数据：内置默认 Skill + 文档类型
     _seed_builtin_skill()
     _seed_doc_types()
+    # 批次 11：规范名/别名单源 + 存量清洗（幂等）
+    _migrate_canonical_types()
 
 
 def _run_migrations(engine) -> None:
@@ -108,6 +111,9 @@ def _run_migrations(engine) -> None:
         "ALTER TABLE rule_sets ADD COLUMN IF NOT EXISTS use_default_skill BOOLEAN NOT NULL DEFAULT TRUE;",
         # 存量 pass 结果回填为 closed（无需跟进）
         "UPDATE review_results SET status = 'closed' WHERE result = 'pass' AND status = 'open';",
+        # 批次 11：文档类型显式别名（写时归一）
+        "ALTER TABLE document_types ADD COLUMN IF NOT EXISTS aliases JSONB NOT NULL DEFAULT '[]'::jsonb;",
+        "ALTER TABLE document_types ADD COLUMN IF NOT EXISTS field_aliases JSONB NOT NULL DEFAULT '{}'::jsonb;",
     ]
     with engine.begin() as conn:
         for sql in migrations:
@@ -235,3 +241,120 @@ def _seed_doc_types() -> None:
             db.add(dt)
         db.commit()
         logger.info("已 seed %d 个内置文档类型", len(ALL_DOC_TYPES))
+
+
+def _migrate_canonical_types() -> None:
+    """批次 11：规范名/别名单源 + 存量清洗（幂等，可重复执行）。
+
+    1. 补齐内置规范类型（含此前缺失的"出口报关单"），写入内置 aliases/field_aliases 默认值；
+    2. 把"别名即类型"的重复条目（如规则导入自动发现的"报关单"）置为 rejected，
+       避免同一业务含义在注册表里双轨繁殖；
+    3. 存量文档/规则/规则集归一到规范名；存量 extracted_fields 字段键按别名归一。
+    """
+    from sqlalchemy import select
+    from .models import Document, DocumentType, Rule, RuleSet
+    from . import constants as C
+    from .services.doc_normalizer import (
+        build_doc_type_alias_index,
+        normalize_doc_type,
+        normalize_extracted_keys,
+        normalize_scope,
+        normalize_structure,
+    )
+
+    with SessionLocal() as db:
+        # ---- 1) 补齐内置规范类型 + 别名默认值 ----
+        existing = {dt.name: dt for dt in db.execute(select(DocumentType)).scalars()}
+        changed = False
+        for name in C.ALL_DOC_TYPES:
+            dt = existing.get(name)
+            if dt is None:
+                if name in C.REQUIRED_DOC_TYPES:
+                    category, is_required = "required", True
+                elif name in C.OPTIONAL_DOC_TYPES:
+                    category, is_required = "optional", False
+                elif name in (C.DOC_FX_CLAIM, C.DOC_PAY_APPLICATION):
+                    category, is_required = "supporting", False
+                elif name == C.DOC_OTHER:
+                    category, is_required = "other", False
+                else:
+                    category, is_required = "extra", False
+                dt = DocumentType(
+                    name=name,
+                    category=category,
+                    is_required=is_required,
+                    key_fields=C.FIELD_TEMPLATES.get(name, []),
+                    stamp_required=C.STAMP_REQUIREMENTS.get(name),
+                    source="seed",
+                    status="active",
+                )
+                db.add(dt)
+                existing[name] = dt
+                changed = True
+            if not dt.aliases and C.DOC_TYPE_ALIASES.get(name):
+                dt.aliases = C.DOC_TYPE_ALIASES.get(name)
+                changed = True
+            if not dt.field_aliases and C.FIELD_ALIASES.get(name):
+                dt.field_aliases = C.FIELD_ALIASES.get(name)
+                changed = True
+        if changed:
+            db.commit()
+
+        # ---- 2) 别名条目置为 rejected（如 rule_import 的"报关单"）----
+        alias_index = build_doc_type_alias_index(db)
+        for alias, canonical in alias_index.items():
+            row = existing.get(alias)
+            if row is not None and row.name != canonical and row.status == "active":
+                row.status = "rejected"
+                row.is_required = False
+                db.commit()
+                logger.info("文档类型「%s」已并入「%s」的别名（置为 rejected）", alias, canonical)
+
+        # ---- 3) 存量数据归一：文档 ----
+        for d in list(db.execute(select(Document)).scalars()):
+            dirty = False
+            nt = normalize_doc_type(db, d.doc_type)
+            if nt and nt != d.doc_type:
+                d.doc_type = nt
+                dirty = True
+            if d.extracted_fields:
+                nf = normalize_extracted_keys(db, d.doc_type, d.extracted_fields)
+                if nf != d.extracted_fields:
+                    d.extracted_fields = nf
+                    dirty = True
+            if dirty:
+                db.commit()
+
+        # ---- 3) 存量数据归一：规则 ----
+        for r in list(db.execute(select(Rule)).scalars()):
+            dirty = False
+            if r.doc_type:
+                nt = normalize_doc_type(db, r.doc_type)
+                if nt and nt != r.doc_type:
+                    r.doc_type = nt
+                    dirty = True
+            if r.structure:
+                ns = normalize_structure(db, r.structure, r.doc_type)
+                if ns != r.structure:
+                    r.structure = ns
+                    dirty = True
+            if r.scope:
+                ns = normalize_scope(db, r.scope)
+                if ns != r.scope:
+                    r.scope = ns
+                    dirty = True
+            if dirty:
+                db.commit()
+
+        # ---- 3) 存量数据归一：规则集 doc_types ----
+        for rs in list(db.execute(select(RuleSet)).scalars()):
+            nd = sorted(
+                {
+                    normalize_doc_type(db, x) or str(x)
+                    for x in (rs.doc_types or [])
+                    if x
+                }
+            )
+            if nd != rs.doc_types:
+                rs.doc_types = nd
+                db.commit()

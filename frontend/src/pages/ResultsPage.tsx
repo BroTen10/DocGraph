@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback, useRef, useMemo } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import {
   Card, Row, Col, Tabs, Table, Tag, Button, message, Typography,
-  Empty, Statistic, Space, Tooltip, Collapse, List,
+  Empty, Statistic, Space, Tooltip, Collapse, Select,
   Drawer, Spin, Descriptions, Divider,
 } from 'antd'
 import type { ColumnsType } from 'antd/es/table'
@@ -14,7 +14,6 @@ import { reviewsApi, contractsApi, getErrorMessage } from '../api/client'
 import type { ReviewResultItem, ReviewResultByRule, ReviewResultByDoc, ReviewTaskListItem, DocumentBrief } from '../types'
 import { RESULT_COLOR, RESULT_LABEL, SEVERITY_COLOR, SEVERITY_LABEL } from '../types'
 import PageHeader from '../components/PageHeader'
-import EmptyState from '../components/EmptyState'
 import DocumentCompare from '../components/DocumentCompare'
 import { useRuleSet } from '../context/RuleSetContext'
 import dayjs from 'dayjs'
@@ -216,6 +215,57 @@ export default function ResultsPage() {
     open: '打开', confirmed: '已确认', fixed: '已修复', closed: '已关闭',
   }
 
+  // 一条审查结果可能涉及多个文档。优先使用后端解析好的 related_docs，
+  // 兼容旧数据只有单一 doc_id 的情况。
+  const getRelatedDocs = useCallback((record: ReviewResultItem) => {
+    const docs = Array.isArray(record.related_docs) ? record.related_docs : []
+    if (docs.length > 0) return docs
+    if (record.doc_id) {
+      return [{
+        doc_id: record.doc_id,
+        file_name: record.doc_name || '原件',
+        doc_type: record.doc_type,
+      }]
+    }
+    return []
+  }, [])
+
+  const renderDocButtons = useCallback((record: ReviewResultItem) => {
+    const docs = getRelatedDocs(record)
+    if (docs.length === 0) {
+      return (
+        <Tooltip title="当前检查项未绑定具体文件，无法查看原件">
+          <Text type="secondary" style={{ fontSize: 12 }}>无原件</Text>
+        </Tooltip>
+      )
+    }
+    return (
+      <Space size={[2, 2]} direction="vertical" style={{ width: '100%', alignItems: 'flex-start' }}>
+        {docs.map((d) => (
+          <Button
+            key={d.doc_id}
+            type="link"
+            size="small"
+            title={d.file_name}
+            onClick={() => openOcrDrawer(d.doc_id, d.file_name)}
+            style={{
+              padding: 0,
+              fontSize: 12,
+              maxWidth: 150,
+              overflow: 'hidden',
+              textOverflow: 'ellipsis',
+              whiteSpace: 'nowrap',
+              display: 'block',
+              textAlign: 'left',
+            }}
+          >
+            {d.file_name}
+          </Button>
+        ))}
+      </Space>
+    )
+  }, [getRelatedDocs, openOcrDrawer])
+
   // ============ 按规则视图列 ============
   // 列宽设计目标:1280px 视口下左 5/24 + 右 19/24,表格不需横向滚动即可看全主要列
   // 文件类型 字段已移至详情抽屉,避免挤压其它信息列
@@ -242,35 +292,6 @@ export default function ResultsPage() {
       title: '规则', dataIndex: 'rule_text', key: 'rule_text', width: 150, ellipsis: true,
       render: (v: string | null) =>
         v ? <Tooltip title={v}><Text>{v}</Text></Tooltip> : <Text type="secondary">-</Text>,
-    },
-    {
-      title: '涉及文件', dataIndex: 'doc_name', key: 'doc_name', width: 170, ellipsis: true,
-      render: (v: string | null, record: ReviewResultItem) => {
-        if (!v) return <Text type="secondary">（未绑定文件）</Text>
-        return (
-          <Space size={4}>
-            <Tooltip title={v}>
-              <Text style={{ maxWidth: 105, display: 'inline-block' }} ellipsis>
-                {v}
-              </Text>
-            </Tooltip>
-            {record.doc_id ? (
-              <Button
-                type="link"
-                size="small"
-                style={{ padding: 0, fontSize: 12 }}
-                onClick={(e) => { e.stopPropagation(); openOcrDrawer(record.doc_id!, record.doc_name) }}
-              >
-                对照
-              </Button>
-            ) : (
-              <Tooltip title="未绑定文件，无法查看原件">
-                <Text type="secondary" style={{ fontSize: 12 }}>无原件</Text>
-              </Tooltip>
-            )}
-          </Space>
-        )
-      },
     },
     {
       title: '问题描述', dataIndex: 'issue_desc', key: 'issue_desc', width: 220,
@@ -335,23 +356,22 @@ export default function ResultsPage() {
       },
     },
     {
-      title: '操作', key: 'action', width: 90, fixed: 'right',
+      title: '操作', key: 'action', width: 180, fixed: 'right',
       render: (_: unknown, record: ReviewResultItem) => (
-        <Space size={2} direction="vertical">
-          <Button type="link" size="small" style={{ padding: 0, fontSize: 12 }} onClick={() => openDetailDrawer(record)}>
+        <Space size={[2, 2]} direction="vertical" style={{ alignItems: 'flex-start' }}>
+          <Button
+            type="link"
+            size="small"
+            style={{ padding: 0, fontSize: 12 }}
+            onClick={() => openDetailDrawer(record)}
+          >
             详情
           </Button>
-          {record.doc_id ? (
-            <Button type="link" size="small" style={{ padding: 0, fontSize: 12 }} onClick={() => openOcrDrawer(record.doc_id!, record.doc_name)}>
-              对照
-            </Button>
-          ) : (
-            <Text type="secondary" style={{ fontSize: 12 }}>无原件</Text>
-          )}
+          {renderDocButtons(record)}
         </Space>
       ),
     },
-  ], [openDetailDrawer, openOcrDrawer])
+  ], [openDetailDrawer, renderDocButtons])
 
   // 批次 5-12：按文档维度表格列定义 memo（避免 render 内重建）
   const docColumns = useMemo<ColumnsType<ReviewResultItem>>(
@@ -396,20 +416,23 @@ export default function ResultsPage() {
         },
       },
       {
-        title: '操作', key: 'action', width: 90, fixed: 'right',
+        title: '操作', key: 'action', width: 180, fixed: 'right',
         render: (_: unknown, record: ReviewResultItem) => (
-          <Space size={2} direction="vertical">
-            <Button type="link" size="small" style={{ padding: 0, fontSize: 12 }} onClick={() => openDetailDrawer(record)}>详情</Button>
-            {record.doc_id ? (
-              <Button type="link" size="small" style={{ padding: 0, fontSize: 12 }} onClick={() => openOcrDrawer(record.doc_id!, record.doc_name)}>对照</Button>
-            ) : (
-              <Text type="secondary" style={{ fontSize: 12 }}>无原件</Text>
-            )}
+          <Space size={[2, 2]} direction="vertical" style={{ alignItems: 'flex-start' }}>
+            <Button
+              type="link"
+              size="small"
+              style={{ padding: 0, fontSize: 12 }}
+              onClick={() => openDetailDrawer(record)}
+            >
+              详情
+            </Button>
+            {renderDocButtons(record)}
           </Space>
         ),
       },
     ],
-    [openDetailDrawer, openOcrDrawer],
+    [openDetailDrawer, renderDocButtons],
   )
 
   // ============ 问题详情抽屉 ============
@@ -417,6 +440,7 @@ export default function ResultsPage() {
   const renderDetailDrawer = () => {
     const item = detailItem
     if (!item) return null
+    const relatedDocs = getRelatedDocs(item)
 
     const detailEntries = item.detail && typeof item.detail === 'object'
       ? Object.entries(item.detail).filter(([, v]) => v != null && v !== '')
@@ -440,18 +464,21 @@ export default function ResultsPage() {
         open={detailVisible}
         onClose={closeDetailDrawer}
         footer={
-          item.doc_id ? (
-            <div style={{ textAlign: 'right' }}>
-              <Button
-                type="primary"
-                icon={<FileTextOutlined />}
-                onClick={() => {
-                  closeDetailDrawer()
-                  openOcrDrawer(item.doc_id!, item.doc_name)
-                }}
-              >
-                打开原件 + OCR 对照
-              </Button>
+          relatedDocs.length > 0 ? (
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, justifyContent: 'flex-end' }}>
+              {relatedDocs.map((d) => (
+                <Button
+                  key={d.doc_id}
+                  type="primary"
+                  icon={<FileTextOutlined />}
+                  onClick={() => {
+                    closeDetailDrawer()
+                    openOcrDrawer(d.doc_id, d.file_name)
+                  }}
+                >
+                  {d.file_name}
+                </Button>
+              ))}
             </div>
           ) : undefined
         }
@@ -464,19 +491,20 @@ export default function ResultsPage() {
           {item.doc_type && (
             <Descriptions.Item label="文件类型">{item.doc_type}</Descriptions.Item>
           )}
-          {item.doc_name && (
+          {relatedDocs.length > 0 && (
             <Descriptions.Item label="涉及文件">
-              {item.doc_id ? (
-                <Button
-                  type="link"
-                  size="small"
-                  onClick={() => { closeDetailDrawer(); openOcrDrawer(item.doc_id!, item.doc_name) }}
-                >
-                  {item.doc_name}
-                </Button>
-              ) : (
-                item.doc_name
-              )}
+              <Space size={[4, 4]} wrap>
+                {relatedDocs.map((d) => (
+                  <Button
+                    key={d.doc_id}
+                    type="link"
+                    size="small"
+                    onClick={() => { closeDetailDrawer(); openOcrDrawer(d.doc_id, d.file_name) }}
+                  >
+                    {d.file_name}
+                  </Button>
+                ))}
+              </Space>
             </Descriptions.Item>
           )}
         </Descriptions>
@@ -528,7 +556,7 @@ export default function ResultsPage() {
           </>
         )}
 
-        {!item.doc_id && (
+        {relatedDocs.length === 0 && (
           <Paragraph type="secondary" style={{ marginTop: 16, textAlign: 'center', fontSize: 13 }}>
             {item.detail?.skipped_rule_count
               ? `本条为 ${item.detail.skipped_rule_count} 条规则核验项汇总，关联 ${(Array.isArray(item.detail?.doc_types) ? item.detail.doc_types.length : 0)} 类文档`
@@ -580,6 +608,14 @@ export default function ResultsPage() {
           doc={ocrDoc}
           fileUrl={contractsApi.fileUrl(ocrDoc.id)}
           height="calc(100vh - 160px)"
+          onSaved={async () => {
+            try {
+              const fresh = await contractsApi.getOcr(ocrDoc.id)
+              setOcrDoc(fresh)
+            } catch (e) {
+              message.error('刷新 OCR 详情失败: ' + getErrorMessage(e))
+            }
+          }}
         />
       ) : (
         <Empty description="无法加载文档信息" />
@@ -648,7 +684,7 @@ export default function ResultsPage() {
                 dataSource={d.results}
                 columns={docColumns}
                 rowKey="id"
-                size="middle"
+                size="small"
                 pagination={false}
                 scroll={{ x: 760 }}
               />
@@ -678,143 +714,64 @@ export default function ResultsPage() {
         }
       />
 
-      <Row gutter={[16, 16]} style={{ marginTop: 16 }} align="top">
-        {/* 左侧：任务列表 - 紧凑模式,不抢占结果区宽度 */}
-        <Col xs={24} md={9} lg={7} xl={5}>
-          <Card title="审查任务列表" size="small" loading={tasksLoading}>
-            {tasks.length === 0 ? (
-              <EmptyState description="暂无审查任务" padding={48} />
-            ) : (
-              <List
-                dataSource={tasks}
-                rowKey="id"
-                style={{ maxHeight: 500, overflowY: 'auto' }}
-                size="small"
-                renderItem={(t) => (
-                  <List.Item
-                    onClick={() => onSelect(t.id)}
-                    style={{
-                      cursor: 'pointer',
-                      padding: '8px 10px',
-                      marginBottom: 6,
-                      background: t.id === selectedId ? '#eef2ff' : undefined,
-                      borderLeft: t.id === selectedId ? '3px solid #6366f1' : '3px solid transparent',
-                      borderRadius: 6,
-                      transition: 'all 0.2s',
-                    }}
-                  >
-                    <div style={{ width: '100%' }}>
-                      <Space style={{ width: '100%', justifyContent: 'space-between' }}>
-                        <Text strong style={{ fontSize: 13 }}>{t.contract_no || t.contract_id.slice(0, 8)}</Text>
-                        <Tag color={statusColor[t.status]} style={{ fontSize: 11, padding: '0 6px' }}>{statusLabel[t.status] || t.status}</Tag>
-                      </Space>
-                      <div style={{ fontSize: 11, color: '#888', marginTop: 2 }}>
-                        {dayjs(t.start_time).format('YYYY-MM-DD HH:mm')}
-                        {t.end_time && (() => {
-                          const durMs = dayjs(t.end_time).diff(dayjs(t.start_time))
-                          if (durMs < 0) return null
-                          let durText: string
-                          if (durMs < 1000) durText = `${durMs}ms`
-                          else if (durMs < 60000) durText = `${(durMs / 1000).toFixed(1)}s`
-                          else {
-                            const m = Math.floor(durMs / 60000)
-                            const s = Math.floor((durMs % 60000) / 1000)
-                            durText = `${m}分${s}秒`
-                          }
-                          return <Text type="secondary" style={{ marginLeft: 6 }}>耗时 {durText}</Text>
-                        })()}
-                      </div>
-                      {t.status === 'completed' && t.summary && (
-                        <div style={{ fontSize: 11, marginTop: 2 }}>
-                          <Space size={4}>
-                            <Text type="secondary">共 {t.summary.total || 0}</Text>
-                            <Text type="success">过 {t.summary.pass || 0}</Text>
-                            <Text type="danger">否 {t.summary.fail || 0}</Text>
-                            <Text type="warning">未核 {t.summary.unverifiable || 0}</Text>
-                          </Space>
-                        </div>
-                      )}
-                      {t.status === 'failed' && t.error && (
-                        <div style={{ fontSize: 11, color: '#ff4d4f', marginTop: 2 }}>错误: {t.error}</div>
-                      )}
-                      {t.status === 'running' && (
-                        <div style={{ fontSize: 11, color: '#1677ff', marginTop: 2 }}>
-                          {t.stage || '执行中'} · {t.progress}%
-                        </div>
-                      )}
-                    </div>
-                  </List.Item>
-                )}
-              />
-            )}
+      <Card size="small" style={{ marginTop: 16, marginBottom: 16 }} loading={tasksLoading}>
+        <Row gutter={[16, 8]} align="middle">
+          <Col flex="auto">
+            <Space size={8} wrap>
+              <FileSearchOutlined />
+              <Text strong>审查任务</Text>
+              {selectedTask && (
+                <Tag color={statusColor[selectedTask.status]}>
+                  {statusLabel[selectedTask.status] || selectedTask.status}
+                </Tag>
+              )}
+            </Space>
+          </Col>
+          <Col xs={24} sm={14} md={10} lg={8} xl={6}>
+            <Select
+              value={selectedId}
+              placeholder={tasks.length > 0 ? '选择审查任务' : '暂无审查任务'}
+              onChange={(id: string) => onSelect(id)}
+              style={{ width: '100%' }}
+              showSearch
+              optionFilterProp="label"
+              options={tasks.map((t) => ({
+                value: t.id,
+                label: `${t.contract_no || t.contract_id.slice(0, 8)} · ${statusLabel[t.status] || t.status} · ${dayjs(t.start_time).format('MM-DD HH:mm')}`,
+              }))}
+            />
+          </Col>
+        </Row>
+      </Card>
+
+      {!selectedId || !byRule ? (
+        <Card><Empty description={selectedId ? '加载中...' : '请选择审查任务查看结果'} /></Card>
+      ) : (
+        <>
+          {/* 任务摘要 + 统计合并到一行,降低纵向信息密度 */}
+          <Card size="small" style={{ marginBottom: 16 }} styles={{ body: { padding: '12px 16px' } }}>
+            <Row gutter={[24, 8]} align="middle">
+              <Col flex="auto">
+                <Space size={8} wrap>
+                  <Text strong style={{ fontSize: 14 }}>{selectedTask?.contract_no || '合同'}</Text>
+                  <Text type="secondary" style={{ fontSize: 12 }}>
+                    {dayjs(selectedTask?.start_time).format('YYYY-MM-DD HH:mm:ss')}
+                  </Text>
+                </Space>
+              </Col>
+              <Col>
+                <Space size={20} wrap>
+                  <Statistic title="总检查项" value={summary.total || 0} valueStyle={{ fontSize: 20 }} />
+                  <Statistic title="通过" value={summary.pass || 0} valueStyle={{ color: '#52c41a', fontSize: 20 }} />
+                  <Statistic title="不通过" value={summary.fail || 0} valueStyle={{ color: '#ff4d4f', fontSize: 20 }} />
+                  <Statistic title="无法核验" value={summary.unverifiable || 0} valueStyle={{ color: '#faad14', fontSize: 20 }} />
+                </Space>
+              </Col>
+            </Row>
           </Card>
-        </Col>
 
-        {/* 右侧：结果区 */}
-        <Col xs={24} md={15} lg={17} xl={19} style={{ minWidth: 0 }}>
-          {!selectedId || !byRule ? (
-            <Card><Empty description={selectedId ? '加载中...' : '请从左侧选择一个审查任务查看结果'} /></Card>
-          ) : (
-            <>
-              {/* 任务摘要 */}
-              <Card size="small" style={{ marginBottom: 16 }}>
-                <Row align="middle" gutter={16}>
-                  <Col flex="auto">
-                    <Space>
-                      <FileSearchOutlined />
-                      <Text strong>{selectedTask?.contract_no || '合同'}</Text>
-                      <Tag color={statusColor[selectedTask?.status || '']}>
-                        {statusLabel[selectedTask?.status || ''] || selectedTask?.status}
-                      </Tag>
-                      <Text type="secondary">
-                        {dayjs(selectedTask?.start_time).format('YYYY-MM-DD HH:mm:ss')}
-                      </Text>
-                    </Space>
-                  </Col>
-                </Row>
-              </Card>
-
-              {/* 紧凑统计卡片 + 图例提示 */}
-              <Card style={{ marginBottom: 16 }} styles={{ body: { padding: '12px 24px' } }}>
-                <Row gutter={24} align="middle">
-                  <Col>
-                    <Statistic title="总检查项" value={summary.total || 0} />
-                  </Col>
-                  <Col>
-                    <Statistic
-                      title="通过"
-                      value={summary.pass || 0}
-                      valueStyle={{ color: '#52c41a' }}
-                    />
-                  </Col>
-                  <Col>
-                    <Statistic
-                      title="不通过"
-                      value={summary.fail || 0}
-                      valueStyle={{ color: '#ff4d4f' }}
-                    />
-                  </Col>
-                  <Col>
-                    <Statistic
-                      title="无法核验"
-                      value={summary.unverifiable || 0}
-                      valueStyle={{ color: '#faad14' }}
-                    />
-                  </Col>
-                  <Col flex="auto" style={{ textAlign: 'right' }}>
-                    <Text type="secondary" style={{ fontSize: 12 }}>
-                      优先关注{' '}
-                      <Text strong style={{ color: '#ff4d4f' }}>不通过</Text>
-                      {' / '}
-                      <Text strong style={{ color: '#faad14' }}>无法核验</Text>
-                      {' '}项
-                    </Text>
-                  </Col>
-                </Row>
-              </Card>
-
-              {/* 结果 Tabs */}
-              <Card>
+          {/* 结果 Tabs */}
+          <Card>
                 <Tabs
                   defaultActiveKey="rule"
                   items={[
@@ -841,17 +798,21 @@ export default function ResultsPage() {
                               <EyeOutlined /> 点击“详情”或“展开”查看完整问题描述和修正建议
                             </Text>
                             <Text type="secondary">
-                              <FileTextOutlined /> 点击“对照”查看原件与 OCR 识别内容
+                              <FileTextOutlined /> 点击操作栏文件名按钮查看原件与 OCR 识别内容
                             </Text>
                           </div>
                           <Table
                             dataSource={byRule.results}
                             columns={ruleColumns}
                             rowKey="id"
-                            size="middle"
+                            size="small"
                             loading={loading}
-                            pagination={{ pageSize: 20 }}
-                            scroll={{ x: 1000 }}
+                            pagination={{
+                              pageSize: 10,
+                              showSizeChanger: true,
+                              pageSizeOptions: [10, 20, 50],
+                            }}
+                            scroll={{ x: 900 }}
                             rowClassName={(row: ReviewResultItem) =>
                               row.result === 'fail'
                                 ? 'row-fail'
@@ -870,11 +831,9 @@ export default function ResultsPage() {
                     },
                   ]}
                 />
-              </Card>
-            </>
-          )}
-        </Col>
-      </Row>
+          </Card>
+        </>
+      )}
 
       {/* Drawers */}
       {renderDetailDrawer()}

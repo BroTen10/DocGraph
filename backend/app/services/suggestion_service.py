@@ -16,6 +16,7 @@ from ..constants import (
     CHECK_STAMP,
     CHECK_TIME_LOGIC,
 )
+from .settings_service import get_prompt
 
 logger = logging.getLogger(__name__)
 
@@ -26,14 +27,12 @@ def build_suggestion_llm(
     issue_desc: str,
     detail: dict,
     rule_text: str = "",
+    db=None,
 ) -> str:
     """LLM 生成修正建议（以证据链为上下文）。调用失败/低质量时回退模板。"""
     try:
         llm = get_llm_client()
-        system_prompt = (
-            "你是贸易单证审查助手。根据一条审查发现的问题与证据，给出可操作的修正建议。"
-            "要求：中文，1-3 句，直接告诉业务人员应该核对/补充/修改什么，不解释推理过程，不臆造证据。"
-        )
+        system_prompt = get_prompt(db, "suggestion.system")
         evidence = json.dumps(detail or {}, ensure_ascii=False)[:1500]
         user_prompt = f"""规则：{rule_text or '-'}
 检查项：{check_category or '-'}

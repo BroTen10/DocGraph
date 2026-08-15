@@ -280,6 +280,12 @@ export interface ReviewResultItem {
   check_category: string | null
   doc_id: string | null
   doc_name: string | null
+  /** 本条审查结果涉及的所有可打开原件（单文档规则 1 项，跨文件比对 2 项及以上） */
+  related_docs?: Array<{
+    doc_id: string
+    file_name: string
+    doc_type: string | null
+  }>
   result: 'pass' | 'fail' | 'unverifiable'
   /** 批次 9：问题状态机（open/confirmed/fixed/closed）、严重度（high/medium/low）、偏离度、图谱实体关联 */
   status?: string
@@ -317,6 +323,7 @@ export interface DocTypeMeta {
   name: string
   stamp_required: string | null
   key_fields: string[]
+  aliases?: string[]
   business_meaning: string | null
   has_sample: boolean
 }
@@ -458,6 +465,8 @@ export interface DocTypeItem {
   name: string
   description: string | null
   key_fields: string[]
+  aliases: string[]
+  field_aliases?: Record<string, unknown>
   stamp_required: string | null
   business_meaning: string | null
   has_sample: boolean
@@ -477,6 +486,8 @@ export interface DocTypeCreate {
   name: string
   description?: string
   key_fields?: string[]
+  aliases?: string[]
+  field_aliases?: Record<string, unknown>
   stamp_required?: string | null
   business_meaning?: string
   source?: string
@@ -486,6 +497,8 @@ export interface DocTypeUpdate {
   name?: string
   description?: string
   key_fields?: string[]
+  aliases?: string[]
+  field_aliases?: Record<string, unknown>
   stamp_required?: string | null
   business_meaning?: string
 }
@@ -496,6 +509,29 @@ export interface AnalyzeSampleResult {
   key_fields: string[]
   stamp_required: string | null
   business_meaning: string
+}
+
+// ============ 系统设置 ============
+
+export interface SettingsItem {
+  key: string
+  label: string
+  group: string
+  description: string
+  kind: 'text' | 'number' | 'boolean'
+  value: unknown
+  is_default: boolean
+}
+
+export interface SettingsResponse {
+  settings: SettingsItem[]
+}
+
+export interface PromptOptimizeResult {
+  key: string
+  suggested: string
+  reasoning: string
+  error?: string
 }
 
 export interface NewDocTypeInfo {

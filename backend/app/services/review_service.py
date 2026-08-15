@@ -49,6 +49,8 @@ from .field_extraction_service import (
     parse_date,
 )
 from .ocr_service import process_document, resolve_field_template
+from .doc_normalizer import resolve_field_aliases
+from .settings_service import get_setting
 from .suggestion_service import build_suggestion_llm
 from . import result_meta
 
@@ -194,7 +196,11 @@ def _run_review_pipeline(
         if doc.ocr_status == "done" and doc.extracted_fields:
             # 已处理过，跳过
             continue
-        r = process_document(doc, key_fields=resolve_field_template(db, doc.doc_type))
+        r = process_document(
+            doc,
+            key_fields=resolve_field_template(db, doc.doc_type),
+            db=db,
+        )
         if r.get("success"):
             doc.ocr_status = "done"
             doc.ocr_text = r.get("text", "")
@@ -203,7 +209,11 @@ def _run_review_pipeline(
             # 规范化字段 + 文件名 ground truth 交叉校验（防 OCR 合同号末位误识假阳性）
             doc.extracted_fields = cross_validate_contract_no(
                 doc.file_name,
-                normalize_fields(doc.doc_type, r.get("fields", {})),
+                normalize_fields(
+                    doc.doc_type,
+                    r.get("fields", {}),
+                    aliases=resolve_field_aliases(db, doc.doc_type),
+                ),
             )
             doc.extracted_at = datetime.now()
         else:
@@ -263,16 +273,20 @@ def _run_review_pipeline(
         from .llm_review_service import (
             review_unstructured_rules,
             semantic_equivalence_fallback,
+            semantic_adjudication_fallback,
         )
         enabled_rules = _load_enabled_rules(db, contract.rule_set_id)
         llm_results = review_unstructured_rules(db, contract, docs, enabled_rules)
         for lr in llm_results:
-            results.append(_make_result_from_llm(lr))
+            results.append(_make_result_from_llm(lr, docs))
         semantic_changed = semantic_equivalence_fallback(db, contract, docs, results)
-        if llm_results or semantic_changed:
+        adjudication_changed = 0
+        if get_setting(db, "review.semantic_adjudication_enabled", True):
+            adjudication_changed = semantic_adjudication_fallback(db, contract, docs, results)
+        if llm_results or semantic_changed or adjudication_changed:
             logger.info(
-                "审查任务 %s: LLM 语义审查新增 %d 条结果，语义复核调整 %d 条",
-                task.id, len(llm_results), semantic_changed,
+                "审查任务 %s: LLM 语义审查新增 %d 条结果，语义复核调整 %d 条，语义裁决调整 %d 条",
+                task.id, len(llm_results), semantic_changed, adjudication_changed,
             )
     except Exception as e:
         logger.warning("审查任务 %s: LLM 语义审查失败（不影响确定性结果）: %s", task.id, e, exc_info=True)
@@ -291,6 +305,7 @@ def _run_review_pipeline(
                 issue_desc=r.issue_desc or "",
                 detail=r.detail or {},
                 rule_text=r.rule_text or "",
+                db=db,
             )
         db.add(r)
 
@@ -361,9 +376,28 @@ def _make_result(
     )
 
 
-def _make_result_from_llm(lr: dict) -> ReviewResult:
+def _primary_doc_for_rule(rule: Rule, docs: list[Document]) -> Optional[Document]:
+    """为规则类结果选择一个可打开原件的文档。
+
+    优先规则 doc_type；若为空，则仅在 scope.doc_types 恰好声明单一文件类型时
+    使用该类型。整批/多文件类型规则仍保持未绑定，避免误指到某一份文件。
+    """
+    doc_type = rule.doc_type
+    if not doc_type:
+        scope = rule.scope or {}
+        scope_types = scope.get("doc_types")
+        if isinstance(scope_types, list) and len(scope_types) == 1:
+            doc_type = scope_types[0]
+    if not doc_type:
+        return None
+    typed = _docs_by_type(docs, doc_type)
+    return typed[0] if typed else None
+
+
+def _make_result_from_llm(lr: dict, docs: Optional[list[Document]] = None) -> ReviewResult:
     """LLM 语义审查结果 → ReviewResult（source=llm，携带置信度）。"""
     rule: Rule = lr["rule"]
+    primary_doc = _primary_doc_for_rule(rule, docs or [])
     status = result_meta.default_status(lr["result"])
     severity, deviation = result_meta.compute_severity(
         lr["result"], rule.check_category, lr.get("detail") or {}
@@ -373,7 +407,7 @@ def _make_result_from_llm(lr: dict) -> ReviewResult:
         rule_text=rule.rule_text,
         doc_type=rule.doc_type,
         check_category=rule.check_category,
-        doc_id=None,
+        doc_id=primary_doc.id if primary_doc else None,
         result=lr["result"],
         status=status,
         status_history=[
@@ -497,7 +531,7 @@ def _check_accuracy(
 ) -> list[ReviewResult]:
     """信息准确性检查：跨文档字段比对 + 一对多总额比对。"""
     results: list[ReviewResult] = []
-    tolerance_pct = settings.amount_tolerance_percent
+    tolerance_pct = get_setting(db, "review.amount_tolerance_percent") or settings.amount_tolerance_percent
 
     # 3.1 合同号归一化：所有文档的合同号应归一到 contract.contract_no
     for doc in docs:
@@ -651,7 +685,11 @@ def _check_time_logic(
 ) -> list[ReviewResult]:
     """时间逻辑检查。"""
     results: list[ReviewResult] = []
-    allow_same_day = settings.allow_same_day_receive_pay
+    allow_same_day = (
+        get_setting(db, "review.allow_same_day_receive_pay")
+        if get_setting(db, "review.allow_same_day_receive_pay") is not None
+        else settings.allow_same_day_receive_pay
+    )
 
     agency_docs = _docs_by_type(docs, DOC_AGENCY_AGREEMENT)
     entrust_docs = _docs_by_type(docs, DOC_ENTRUST_CONFIRM)
@@ -851,6 +889,14 @@ def _filter_results(items: list[dict]) -> list[dict]:
                     existing = missing_by_key[key]
                     files = set(existing.get("doc_files") or []) | set(mf.get("doc_files") or [])
                     existing["doc_files"] = sorted(files)
+        related_docs: list[dict] = []
+        seen_related: set[str] = set()
+        for it in group:
+            for rd in it.get("related_docs") or []:
+                key = rd.get("doc_id")
+                if key and key not in seen_related:
+                    seen_related.add(key)
+                    related_docs.append(rd)
         merged = {
             "id": group[0]["id"],
             "rule_id": None,
@@ -859,6 +905,7 @@ def _filter_results(items: list[dict]) -> list[dict]:
             "check_category": cat,
             "doc_id": None,
             "doc_name": None,
+            "related_docs": related_docs,
             "result": "unverifiable",
             "status": group[0].get("status") or "open",
             "status_history": group[0].get("status_history") or [],
@@ -900,8 +947,81 @@ def get_task_status(db: Session, task_id: uuid.UUID) -> Optional[ReviewTask]:
     return db.get(ReviewTask, task_id)
 
 
-def _result_to_item(r: ReviewResult) -> dict:
+def _load_document_lookup(db: Session, contract_id: uuid.UUID) -> tuple[dict[str, Document], dict[str, Document]]:
+    """加载合同下的文档，构造 file_name / id 索引。"""
+    from sqlalchemy import select
+
+    docs = list(
+        db.execute(
+            select(Document).where(Document.contract_id == contract_id)
+        ).scalars().all()
+    )
+    by_name = {d.file_name: d for d in docs}
+    by_id = {str(d.id): d for d in docs}
+    return by_name, by_id
+
+
+def _evidence_docs(detail: dict | None) -> list[dict]:
+    """从 result.detail.evidence 中提取参与比对的文档名/ID。
+
+    兼容旧证据只记录 doc_name 的情况；新证据会同时记录 doc_id。
+    """
+    if not isinstance(detail, dict):
+        return []
+    evidence = detail.get("evidence") or {}
+    if not isinstance(evidence, dict):
+        return []
+    out: list[dict] = []
+    for side in ("source", "target"):
+        entry = evidence.get(side) or {}
+        docs = entry.get("docs") if isinstance(entry, dict) else None
+        if isinstance(docs, list):
+            out.extend(d for d in docs if isinstance(d, dict))
+    return out
+
+
+def _result_to_item(
+    r: ReviewResult,
+    docs_by_name: Optional[dict[str, Document]] = None,
+    docs_by_id: Optional[dict[str, Document]] = None,
+) -> dict:
     """ReviewResult → 结果条目 dict（含批次 9 新增字段：status/severity/deviation/图谱实体）。"""
+    related_docs: list[dict] = []
+    seen_doc_ids: set[str] = set()
+
+    def add_doc(doc: Optional[Document]) -> None:
+        if doc is None:
+            return
+        doc_id = str(doc.id)
+        if doc_id in seen_doc_ids:
+            return
+        seen_doc_ids.add(doc_id)
+        related_docs.append({
+            "doc_id": doc_id,
+            "file_name": doc.file_name,
+            "doc_type": doc.doc_type,
+        })
+
+    # 主绑定文档优先，保证单文档规则仍只出现一个“原件对照”入口。
+    primary = None
+    if docs_by_id and r.doc_id:
+        primary = docs_by_id.get(str(r.doc_id))
+    if primary is None:
+        primary = r.document
+    add_doc(primary)
+
+    # 跨文件比对：从证据链中补齐 source/target 文档。
+    for entry in _evidence_docs(r.detail):
+        doc_id = entry.get("doc_id")
+        doc = None
+        if doc_id and docs_by_id:
+            doc = docs_by_id.get(str(doc_id))
+        if doc is None:
+            name = entry.get("doc_name") or entry.get("file_name")
+            if name and docs_by_name:
+                doc = docs_by_name.get(str(name))
+        add_doc(doc)
+
     return {
         "id": str(r.id),
         "rule_id": str(r.rule_id) if r.rule_id else None,
@@ -910,6 +1030,7 @@ def _result_to_item(r: ReviewResult) -> dict:
         "check_category": r.check_category,
         "doc_id": str(r.doc_id) if r.doc_id else None,
         "doc_name": r.document.file_name if r.document else None,
+        "related_docs": related_docs,
         "result": r.result,
         "status": r.status,
         "status_history": r.status_history or [],
@@ -940,7 +1061,8 @@ def get_results_by_rule(db: Session, task_id: uuid.UUID) -> dict:
     )
     results = list(db.execute(stmt).scalars().all())
 
-    items = [_result_to_item(r) for r in results]
+    docs_by_name, docs_by_id = _load_document_lookup(db, task.contract_id)
+    items = [_result_to_item(r, docs_by_name, docs_by_id) for r in results]
 
     # 过滤：去重 + 合并 unverifiable 字段缺失噪声
     items = _filter_results(items)
@@ -965,7 +1087,8 @@ def get_results_by_doc(db: Session, task_id: uuid.UUID) -> dict:
     results = list(db.execute(stmt).scalars().all())
 
     # 先构造全部 items 列表，便于统一过滤
-    all_items = [_result_to_item(r) for r in results]
+    docs_by_name, docs_by_id = _load_document_lookup(db, task.contract_id)
+    all_items = [_result_to_item(r, docs_by_name, docs_by_id) for r in results]
 
     # 过滤：去重 + 合并 unverifiable 字段缺失噪声
     filtered_items = _filter_results(all_items)

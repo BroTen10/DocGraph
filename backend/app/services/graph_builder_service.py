@@ -43,6 +43,7 @@ from ..schemas.graph import (
     RuleGraphConvertResult,
 )
 from .rule_service import get_enabled_rules_for_snapshot
+from .settings_service import get_prompt, get_setting
 
 logger = logging.getLogger(__name__)
 
@@ -85,11 +86,12 @@ _USER_PROMPT_TEMPLATE = """请将以下规则转换为图谱结构：
 def _convert_one_rule(
     rule: Rule,
     rule_index: int,
+    db=None,
 ) -> RuleGraphConvertResult:
     """调用 LLM 将单条规则转换为图谱结构。"""
     llm = get_llm_client()
     rule_id_str = f"R{rule_index:03d}"
-    user_prompt = _USER_PROMPT_TEMPLATE.format(
+    user_prompt = get_prompt(db, "graph_builder.user").format(
         rule_id=rule_id_str,
         doc_type=rule.doc_type or "",
         check_category=rule.check_category or "",
@@ -99,7 +101,7 @@ def _convert_one_rule(
     try:
         resp = llm.chat_json(
             messages=[
-                {"role": "system", "content": _SYSTEM_PROMPT},
+                {"role": "system", "content": get_prompt(db, "graph_builder.system")},
                 {"role": "user", "content": user_prompt},
             ],
             temperature=0.1,
@@ -412,7 +414,7 @@ def build_graph(
     if not rules:
         raise ValueError("无已确认且已启用的规则，请先在规则管理中确认并启用规则")
 
-    threshold = settings.llm_confidence_threshold
+    threshold = get_setting(db, "llm.confidence_threshold") or settings.llm_confidence_threshold
     _report("读取启用规则", 10, f"共 {len(rules)} 条启用规则")
 
     # 2. 逐条转换
@@ -557,7 +559,7 @@ def build_graph(
                 10 + int((idx - 1) / total * 70),
                 f"正在转换规则 {idx}/{total}：[{rule.doc_type}] {rule.rule_text[:40]}...",
             )
-            result = _convert_one_rule(rule, idx)
+            result = _convert_one_rule(rule, idx, db)
         if auto_confirm_all or result.confidence >= threshold:
             result.auto_confirmed = True
             auto_confirmed_count += 1

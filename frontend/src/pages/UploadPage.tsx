@@ -668,6 +668,15 @@ export default function UploadPage() {
             doc={compareDoc}
             fileUrl={contractsApi.fileUrl(compareDoc.id)}
             height="calc(100vh - 120px)"
+            onSaved={async () => {
+              try {
+                const fresh = await contractsApi.getOcr(compareDoc.id)
+                setCompareDoc(fresh)
+                if (detail) await viewDetail(detail.id)
+              } catch (e) {
+                message.error('刷新文档详情失败: ' + getErrorMessage(e))
+              }
+            }}
           />
         ) : (
           <EmptyState description="未选择文档" padding={48} />

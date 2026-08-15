@@ -20,8 +20,10 @@ import re
 from typing import Any, Optional
 
 from ..constants import CHECK_COMPLETENESS, CHECK_STAMP
+from .settings_service import get_prompt
 from ..llm_client import LLMError, get_llm_client
 from ..models import Document, ReviewResult, Rule
+from .doc_normalizer import normalize_currency_value
 from . import result_meta
 
 logger = logging.getLogger(__name__)
@@ -151,7 +153,7 @@ def review_unstructured_rules(
         llm = get_llm_client()
         resp = llm.chat_json(
             messages=[
-                {"role": "system", "content": _REVIEW_SYSTEM_PROMPT},
+                {"role": "system", "content": get_prompt(db, "llm_review.review_system")},
                 {"role": "user", "content": user_prompt},
             ],
             temperature=0.1,
@@ -300,7 +302,7 @@ def semantic_equivalence_fallback(
         llm = get_llm_client()
         resp = llm.chat_json(
             messages=[
-                {"role": "system", "content": _SEMANTIC_SYSTEM_PROMPT},
+                {"role": "system", "content": get_prompt(db, "llm_review.semantic_system")},
                 {"role": "user", "content": user_prompt},
             ],
             temperature=0.1,
@@ -341,6 +343,188 @@ def semantic_equivalence_fallback(
         r.confidence = confidence
         r.detail = detail
         # 结果变化后重算状态/严重度
+        r.status = result_meta.default_status(r.result)
+        r.severity, r.deviation = result_meta.compute_severity(r.result, r.check_category, detail)
+        changed += 1
+
+    return changed
+
+
+# ============ 语义裁决：条件预检/不可核验复核（引擎 B-3） ============
+
+def _condition_values_suspicious(values, expected) -> bool:
+    """条件值是否存在语义歧义，值得交给 LLM 裁决：
+    - 多行分号拼接（展开后仍不匹配，需确认是否有等价项）
+    - 值与期望值存在包含关系（如 "美元(USD)" 与 "美元"）
+    - 值是期望值的币别别名变体（如 期望"美元"、值"USD"/"美金"，注册表可映射为同一规范值）
+    """
+    if expected is None:
+        return False
+    exp = str(expected).strip()
+    if not exp:
+        return False
+    for v in values or []:
+        s = str(v).strip()
+        if not s:
+            continue
+        if ";" in s or "；" in s:
+            return True
+        if exp in s or s in exp:
+            return True
+        try:
+            nv = normalize_currency_value(s)
+            ne = normalize_currency_value(exp)
+            if nv and ne and str(nv).upper() == str(ne).upper():
+                return True
+        except Exception:
+            continue
+    return False
+
+
+def _is_adjudication_candidate(r: ReviewResult) -> bool:
+    """是否适合 LLM 语义裁决：确定性引擎"判不了"或"疑似误判"的结果。
+
+    覆盖三类：
+    1. 条件预检 unknown（字段缺失/纯文本条件/值不可解析）→ 现为 unverifiable；
+    2. 条件预检 not_met 但条件值存在语义歧义 → 现为 pass+skip（静默跳过盲区）；
+    3. 断言不可核验（字段数据缺失/无法解析），且至少一侧有字段值可佐证。
+    """
+    if r.source == "llm":
+        return False  # 已由 LLM 判定，不再二次裁决
+    d = r.detail or {}
+    if r.result == "unverifiable" and d.get("condition"):
+        return True
+    if r.result == "pass" and d.get("skipped_reason") == "condition_not_met":
+        cond = d.get("condition")
+        if isinstance(cond, dict):
+            return _condition_values_suspicious(cond.get("values"), cond.get("value"))
+        return False
+    if r.result == "unverifiable" and d.get("evidence"):
+        ev = d.get("evidence") or {}
+        src_docs = (ev.get("source") or {}).get("docs") or []
+        tgt_docs = (ev.get("target") or {}).get("docs") or []
+        return bool(src_docs or tgt_docs)
+    return False
+
+
+def semantic_adjudication_fallback(
+    db,
+    contract,
+    docs: list[Document],
+    results: list[ReviewResult],
+) -> int:
+    """对确定性引擎"判不了/疑似误判"的规则做 LLM 综合裁决（引擎 B-3）。
+
+    结合合同上下文 + 全部文档提取字段，判断条件是否成立并给出最终结论。
+    护栏：
+    - 高置信确认条件不成立 → 保持确定性结论（skip/未核验），补证据；
+    - 改判 pass 要求置信度 >= 0.6，改判 fail 要求 >= 0.8；
+    - 无法确认 → 降级 unverifiable（待人工确认），不静默通过。
+    Returns: 受影响的条数。
+    """
+    targets = [r for r in results if _is_adjudication_candidate(r)]
+    if not targets or not docs:
+        return 0
+
+    aliases = "、".join(contract.alias_list or []) if contract else ""
+    doc_summary = _doc_summary(docs)
+    items: list[dict] = []
+    for i, r in enumerate(targets):
+        d = r.detail or {}
+        cond = d.get("condition")
+        ev = d.get("evidence") or {}
+        items.append(
+            {
+                "index": i,
+                "rule": r.rule_text or "",
+                "check_category": r.check_category,
+                "condition": cond,
+                "source_node": r.graph_source,
+                "target_node": r.graph_target,
+                "source_values": [x.get("value") for x in (ev.get("source") or {}).get("docs", [])],
+                "target_values": [x.get("value") for x in (ev.get("target") or {}).get("docs", [])],
+                "current_result": r.result,
+            }
+        )
+
+    user_prompt = (
+        f"合同号：{contract.contract_no if contract else '-'}（别名：{aliases or '-'}）\n\n"
+        f"文档信息（OCR 提取字段）：\n{json.dumps(doc_summary, ensure_ascii=False)}\n\n"
+        f"待裁决项：\n{json.dumps(items, ensure_ascii=False, default=str)}\n\n"
+        "请输出 JSON。"
+    )
+
+    try:
+        llm = get_llm_client()
+        resp = llm.chat_json(
+            messages=[
+                {"role": "system", "content": get_prompt(db, "llm_review.adjudication_system")},
+                {"role": "user", "content": user_prompt},
+            ],
+            temperature=0.1,
+            max_tokens=4096,
+        )
+    except (LLMError, ValueError, json.JSONDecodeError) as e:
+        logger.warning("LLM 语义裁决失败（保留确定性结论）: %s", e)
+        return 0
+
+    changed = 0
+    raw_results = resp.get("results", [])
+    if not isinstance(raw_results, list):
+        return 0
+    for item in raw_results:
+        if not isinstance(item, dict):
+            continue
+        idx = item.get("index")
+        if not isinstance(idx, int) or not (0 <= idx < len(targets)):
+            continue
+        r = targets[idx]
+        old_result = r.result
+        cond_met = item.get("condition_met")
+        llm_result = str(item.get("result") or "").strip()
+        if llm_result not in ("pass", "fail", "unverifiable"):
+            continue
+        confidence = _to_float(item.get("confidence"))
+        reason = str(item.get("reason") or "").strip()
+
+        detail = dict(r.detail or {})
+        detail["semantic_adjudication"] = True
+        detail["adjudicated_from"] = old_result
+        detail["llm_condition_met"] = cond_met
+        if reason:
+            detail["llm_evidence"] = reason
+
+        new_result = old_result
+        new_issue = r.issue_desc or ""
+        if cond_met is False and confidence is not None and confidence >= EQUIVALENT_CONFIDENCE_THRESHOLD:
+            # 高置信确认条件不成立：保持确定性结论，仅补证据
+            detail["adjudication_outcome"] = "condition_confirmed_not_met"
+        elif (
+            llm_result == "unverifiable"
+            or confidence is None
+            or (llm_result == "pass" and confidence < PASS_CONFIDENCE_THRESHOLD)
+            or (llm_result == "fail" and confidence < FAIL_CONFIDENCE_THRESHOLD)
+        ):
+            # 无法确认 → 降级 unverifiable 待人工确认（护栏，不静默通过）
+            new_result = "unverifiable"
+            new_issue = "确定性结论存在歧义，LLM 裁决未给出明确结论，需人工确认"
+            detail["reason"] = "llm_uncertain_adjudication"
+            detail["adjudication_outcome"] = "uncertain"
+        elif llm_result == "pass":
+            new_result = "pass"
+            new_issue = "条件或断言经 LLM 结合关联单据复核为通过" + (f"（依据：{reason}）" if reason else "")
+            detail["adjudication_outcome"] = "pass"
+        else:
+            new_result = "fail"
+            new_issue = "条件成立但断言不通过（LLM 结合关联单据复核）" + (f"：{reason}" if reason else "")
+            detail["adjudication_outcome"] = "fail"
+
+        if new_result != old_result:
+            detail["original_issue"] = r.issue_desc or ""
+        r.result = new_result
+        r.issue_desc = new_issue
+        r.confidence = confidence
+        r.detail = detail
         r.status = result_meta.default_status(r.result)
         r.severity, r.deviation = result_meta.compute_severity(r.result, r.check_category, detail)
         changed += 1

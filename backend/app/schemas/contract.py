@@ -14,6 +14,12 @@ class DocTypeUpdate(BaseModel):
     doc_type: str
 
 
+class OcrFieldsUpdate(BaseModel):
+    """人工修正 OCR 结构化字段（OCR 对照界面保存）。"""
+    extracted_fields: dict[str, Any] = Field(default_factory=dict)
+    has_stamp: bool | None = None
+
+
 class DocumentBrief(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 

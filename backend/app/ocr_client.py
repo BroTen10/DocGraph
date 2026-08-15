@@ -13,6 +13,12 @@ from typing import Optional
 
 from .llm_client import LLMClient, LLMError
 from .config import settings
+from .prompt_templates import (
+    OCR_IMAGE_SYSTEM,
+    OCR_IMAGE_FIELDS_HINT,
+    OCR_IMAGE_INFER_HINT,
+    OCR_IMAGE_INFER_HINT_FREE,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -48,6 +54,10 @@ class OCRClient:
         image_path: str,
         doc_type_hint: Optional[str] = None,
         field_template: Optional[list[str]] = None,
+        system_prompt: Optional[str] = None,
+        fields_hint: Optional[str] = None,
+        infer_hint: Optional[str] = None,
+        infer_hint_free: Optional[str] = None,
     ) -> dict:
         """对单张图片执行 OCR + 印章检测 + 字段提取。
 
@@ -78,35 +88,16 @@ class OCRClient:
 
         if field_template:
             # 已知文档类型：按模板提取 + 额外推断类型作为辅助信息
-            fields_hint = (
-                "请提取以下字段，字段名严格使用模板名称：" + "、".join(field_template) + "。"
-                "提取规则："
-                "①金额/价税类字段返回纯数字值（保留小数，如 5239994.43），币别另行判断；"
-                "②日期类字段统一为 YYYY-MM-DD；"
-                "③数量/重量类返回纯数字；"
-                "④模板中的每个字段都必须出现在 fields 中，确实无法识别时值为 null 并加入 low_confidence_fields；"
-                "⑤合同号类字段逐位核对，特别注意末位数字，禁止缺位/错位。"
+            fields_hint = (fields_hint or OCR_IMAGE_FIELDS_HINT).format(
+                field_list="、".join(field_template)
             )
-            infer_hint = "额外从文档内容和布局推断当前文件的业务类型名称，填入 inferred_doc_type。"
+            infer_hint = infer_hint or OCR_IMAGE_INFER_HINT
         else:
             # 未知文档类型：自由推断类型 + 自由提取结构化信息
             fields_hint = ""
-            infer_hint = (
-                "该文件业务类型未知。请从文档内容和布局推断文件的业务类型名称"
-                "（如'采购合同'、'装箱单'、'运单'等），填入 inferred_doc_type。"
-                "同时提取文档中任何明显的结构化信息（表格头、键值对、表单字段等），填入 fields 对象。"
-            )
+            infer_hint = infer_hint_free or OCR_IMAGE_INFER_HINT_FREE
 
-        system_prompt = (
-            "你是一个专业的贸易单证 OCR 助手。对图片执行：\n"
-            "1. 识别全部可见文字；\n"
-            "2. 判断图片中是否存在印章（红色圆形/椭圆形印章图形，has_stamp: true=有/false=无/null=无法判断）；\n"
-            "3. 按要求提取结构化字段；\n"
-            "4. 推断当前文档的业务类型名称，填入 inferred_doc_type；\n"
-            "5. 给出整体置信度 confidence（0-1）和低置信度字段列表 low_confidence_fields。\n"
-            "严格输出 JSON，schema: {\"text\":string,\"has_stamp\":bool|null,\"fields\":object,"
-            "\"inferred_doc_type\":string|null,\"confidence\":number,\"low_confidence_fields\":[string]}"
-        )
+        system_prompt = system_prompt or OCR_IMAGE_SYSTEM
         user_prompt = f"{hint}{fields_hint}{infer_hint}请识别这张图片。"
 
         messages = [

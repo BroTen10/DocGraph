@@ -38,6 +38,10 @@ class DocumentType(Base):
     is_required: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     # 关键字段提取模板
     key_fields: Mapped[list] = mapped_column(JSONB, default=list, nullable=False)
+    # 显式别名（批次 11：写时归一）——同义叫法列表，如 出口报关单 aliases=["报关单"]
+    aliases: Mapped[list] = mapped_column(JSONB, default=list, nullable=False)
+    # 字段别名（批次 11）：{"规范字段": 别名 或 {"field":..., "aggregate":...}}
+    field_aliases: Mapped[dict] = mapped_column(JSONB, default=dict, nullable=False)
     # 用印要求
     stamp_required: Mapped[str | None] = mapped_column(String(128), nullable=True)
     # AI 分析的业务含义描述

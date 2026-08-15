@@ -18,6 +18,7 @@ from ..constants import FIELD_TEMPLATES
 from ..llm_client import LLMError, get_llm_client
 from ..models import Document
 from ..ocr_client import get_ocr_client
+from .settings_service import get_prompt
 
 logger = logging.getLogger(__name__)
 
@@ -85,7 +86,10 @@ def _extract_docx(docx_path: str) -> str:
 
 
 def _llm_extract_fields_from_text(
-    text: str, doc_type: str, field_template: list[str]
+    text: str,
+    doc_type: str,
+    field_template: list[str],
+    db=None,
 ) -> dict:
     """对文本型 PDF/DOCX，调用 LLM 提取结构化字段。
 
@@ -101,34 +105,16 @@ def _llm_extract_fields_from_text(
 
     if not field_template:
         # 自由提取模式：无预定义字段模板
-        system_prompt = (
-            "你是贸易单证字段提取助手。从给定文本中识别文档类型并提取结构化信息。\n"
-            "严格输出 JSON: {\"fields\": {字段名: 值}, \"inferred_doc_type\": string|null, "
-            "\"has_stamp\": true|false|null, \"confidence\": 0-1}\n"
-            "inferred_doc_type: 根据文本内容判断本文件是什么业务类型（如'采购合同'、'装箱单'、'运单'等）\n"
-            "fields: 提取文档中所有明显的结构化字段（表头内容、键值对、表单字段等）\n"
-            "has_stamp: 文本中是否提及印章/盖章/用印；无法判断时填 null\n"
-            "confidence: 整体提取置信度"
-        )
-        user_prompt = (
-            f"文件类型未知。请推断文档类型并提取结构化字段。\n"
-            f"文本内容:\n{text[:4000]}"
+        system_prompt = get_prompt(db, "ocr.text.system_free")
+        user_prompt = get_prompt(db, "ocr.text.user_free").format(
+            text=text[:4000],
         )
     else:
-        system_prompt = (
-            "你是贸易单证字段提取助手。从给定文本中按字段列表提取结构化信息。\n"
-            "严格输出 JSON: {\"fields\": {字段名: 值}, \"inferred_doc_type\": string|null, "
-            "\"has_stamp\": true|false|null, \"confidence\": 0-1}\n"
-            "has_stamp: 文本中是否提及印章/盖章/用印；无法判断时填 null。\n"
-            "confidence: 整体提取置信度。\n"
-            "字段提取规则：①金额/价税类返回纯数字（保留小数，如 5239994.43）；②日期类统一 YYYY-MM-DD；"
-            "③数量/重量类返回纯数字；④模板中每个字段都必须出现在 fields 中，无法识别时值为 null；"
-            "⑤合同号类逐位核对，禁止缺位/错位。"
-        )
-        user_prompt = (
-            f"文件类型: {doc_type}\n"
-            f"需提取字段: {', '.join(field_template)}\n"
-            f"文本内容:\n{text[:4000]}"
+        system_prompt = get_prompt(db, "ocr.text.system_template")
+        user_prompt = get_prompt(db, "ocr.text.user_template").format(
+            doc_type=doc_type,
+            field_list=", ".join(field_template),
+            text=text[:4000],
         )
 
     try:
@@ -157,6 +143,7 @@ def _llm_extract_fields_from_text(
 def process_document(
     doc: Document,
     key_fields: list[str] | None = None,
+    db=None,
 ) -> dict:
     """处理单个文档：根据类型选择 OCR 或文本提取，回写 doc 记录。
 
@@ -180,11 +167,11 @@ def process_document(
         if doc.file_type == "pdf":
             if _is_scanned_pdf(str(path)):
                 # 扫描型 PDF：逐页 OCR
-                return _ocr_scanned_pdf(str(path), doc.doc_type, field_template)
+                return _ocr_scanned_pdf(str(path), doc.doc_type, field_template, db=db)
             else:
                 # 文本型 PDF：直接提取 + LLM 字段提取
                 text = _extract_text_pdf(str(path))
-                ext = _llm_extract_fields_from_text(text, doc.doc_type, field_template)
+                ext = _llm_extract_fields_from_text(text, doc.doc_type, field_template, db=db)
                 return {
                     "success": True,
                     "text": text,
@@ -193,10 +180,10 @@ def process_document(
                     "confidence": ext["confidence"],
                 }
         elif doc.file_type in ("png", "jpg"):
-            return _ocr_image(str(path), doc.doc_type, field_template)
+            return _ocr_image(str(path), doc.doc_type, field_template, db=db)
         elif doc.file_type == "docx":
             text = _extract_docx(str(path))
-            ext = _llm_extract_fields_from_text(text, doc.doc_type, field_template)
+            ext = _llm_extract_fields_from_text(text, doc.doc_type, field_template, db=db)
             return {
                 "success": True,
                 "text": text,
@@ -211,14 +198,25 @@ def process_document(
         return {"success": False, "error": f"处理失败: {e}"}
 
 
-def _ocr_image(image_path: str, doc_type: str, field_template: list[str]) -> dict:
+def _ocr_image(image_path: str, doc_type: str, field_template: list[str], db=None) -> dict:
     """对单张图片调用通义千问 VL OCR。"""
     ocr = get_ocr_client()
-    return ocr.recognize(image_path, doc_type_hint=doc_type, field_template=field_template)
+    return ocr.recognize(
+        image_path,
+        doc_type_hint=doc_type,
+        field_template=field_template,
+        system_prompt=get_prompt(db, "ocr.image.system"),
+        fields_hint=get_prompt(db, "ocr.image.fields_hint"),
+        infer_hint=get_prompt(db, "ocr.image.infer_hint"),
+        infer_hint_free=get_prompt(db, "ocr.image.infer_hint_free"),
+    )
 
 
 def _ocr_scanned_pdf(
-    pdf_path: str, doc_type: str, field_template: list[str]
+    pdf_path: str,
+    doc_type: str,
+    field_template: list[str],
+    db=None,
 ) -> dict:
     """扫描型 PDF：逐页转图片 OCR，合并结果。"""
     import tempfile
@@ -237,7 +235,15 @@ def _ocr_scanned_pdf(
         for i, page_bytes in enumerate(pages):
             tmp_img = Path(tmp) / f"page_{i}.png"
             tmp_img.write_bytes(page_bytes)
-            r = ocr.recognize(str(tmp_img), doc_type_hint=doc_type, field_template=field_template)
+            r = ocr.recognize(
+                str(tmp_img),
+                doc_type_hint=doc_type,
+                field_template=field_template,
+                system_prompt=get_prompt(db, "ocr.image.system"),
+                fields_hint=get_prompt(db, "ocr.image.fields_hint"),
+                infer_hint=get_prompt(db, "ocr.image.infer_hint"),
+                infer_hint_free=get_prompt(db, "ocr.image.infer_hint_free"),
+            )
             if r.get("success"):
                 all_text.append(r.get("text", ""))
                 # 多页合并：跳过空值，避免某页未识别出的 null 覆盖其他页已提取的值

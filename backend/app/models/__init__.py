@@ -10,6 +10,7 @@ from .rule_parse_skill import RuleParseSkill
 from .rule_set import RuleSet
 from .rule_snapshot import RuleSnapshot
 from .document_type import DocumentType
+from .system_setting import SystemSetting
 
 __all__ = [
     "Contract",
@@ -22,4 +23,5 @@ __all__ = [
     "RuleParseSkill",
     "RuleSet",
     "RuleSnapshot",
+    "SystemSetting",
 ]

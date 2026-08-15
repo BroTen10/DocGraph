@@ -18,6 +18,7 @@ from sqlalchemy.orm import Session
 
 from ..llm_client import LLMError, get_llm_client
 from ..models import Rule
+from .settings_service import get_prompt
 from .rule_import_task import ImportProgress, update_task
 
 logger = logging.getLogger(__name__)
@@ -54,7 +55,7 @@ severity：
 """
 
 
-def detect_conflicts_in_rules(rules: list[Rule]) -> list[dict]:
+def detect_conflicts_in_rules(rules: list[Rule], db=None) -> list[dict]:
     """对一组规则进行语义冲突检测。
 
     Args:
@@ -102,7 +103,7 @@ def detect_conflicts_in_rules(rules: list[Rule]) -> list[dict]:
     try:
         resp = llm.chat_json(
             messages=[
-                {"role": "system", "content": _CONFLICT_SYSTEM_PROMPT},
+                {"role": "system", "content": get_prompt(db, "conflict_detection.system")},
                 {"role": "user", "content": user_prompt},
             ],
             temperature=0.1,
@@ -167,7 +168,7 @@ def detect_all_conflicts(db: Session, rule_set_id: str, progress: ImportProgress
 
     all_conflicts: list[dict] = []
     for _i, ((_doc_type, _check_category), group) in enumerate(groups.items(), start=1):
-        conflicts = detect_conflicts_in_rules(group)
+        conflicts = detect_conflicts_in_rules(group, db)
         all_conflicts.extend(conflicts)
         if conflicts:
             logger.info(

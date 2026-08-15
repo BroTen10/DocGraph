@@ -14,11 +14,13 @@ import re
 from typing import Any, Optional
 
 from ..constants import (
+    FIELD_ALIASES,
     DOC_RECEIVE_VOUCHER,
     DOC_PAY_VOUCHER,
     DOC_VAT_INVOICE,
 )
 from .contract_normalizer import extract_contract_numbers, normalize_contract_no
+from .doc_normalizer import is_currency_field, normalize_currency_value
 
 logger = logging.getLogger(__name__)
 
@@ -91,15 +93,33 @@ def parse_float(text: str) -> Optional[float]:
     return float(m.group()) if m else None
 
 
-def normalize_fields(doc_type: str, fields: dict) -> dict:
+def normalize_fields(
+    doc_type: str,
+    fields: dict,
+    aliases: dict | None = None,
+) -> dict:
     """规范化字段：日期/金额/数量/合同号统一格式。
 
+    aliases: 字段键别名表（批次 11 写时归一），传入时按别名把键映射到规范字段名；
+    不传则回退 constants.FIELD_ALIASES 内置别名。
     返回规范化后的字段字典（原字段名 + 规范化值）。
     """
     if not fields:
         return {}
 
     out: dict[str, Any] = dict(fields)
+
+    # 0. 字段键别名归一（批次 11）：OCR 返回的别名键 → 规范字段名
+    alias_map = aliases if aliases is not None else FIELD_ALIASES.get(doc_type, {})
+    if alias_map:
+        renamed: dict[str, Any] = {}
+        for k, v in out.items():
+            m = alias_map.get(k)
+            target = m.get("field") if isinstance(m, dict) else (m or k)
+            if target in renamed:
+                continue  # 规范键已存在，保留规范值
+            renamed[target] = v
+        out = renamed
 
     # 1. 合同号归一化
     contract_no_keys = [k for k in out if "合同" in k and "号" in k]
@@ -129,6 +149,14 @@ def normalize_fields(doc_type: str, fields: dict) -> dict:
             amt = parse_amount(str(v))
             if amt is not None:
                 out[k] = amt
+
+    # 3.5 币别值归一（批次 12）：美元/USD/美金 等写法统一为规范中文币名，
+    # 多行分号拼接展开去重（如 币别="美元;美元" → "美元"）
+    currency_keys = [k for k in out if is_currency_field(k)]
+    for k in currency_keys:
+        v = out.get(k)
+        if v is not None:
+            out[k] = normalize_currency_value(v)
 
     # 4. 数量字段规范化
     qty_keys = [k for k in out if "数量" in k or "件数" in k]

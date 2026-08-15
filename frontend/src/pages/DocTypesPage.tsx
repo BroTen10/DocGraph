@@ -244,6 +244,16 @@ export default function DocTypesPage() {
       ),
     },
     {
+      title: '别名',
+      dataIndex: 'aliases',
+      key: 'aliases',
+      render: (aliases: string[]) => (
+        aliases?.length > 0
+          ? <Space size={4} wrap>{aliases.map(a => <Tag color="purple" key={a}>{a}</Tag>)}</Space>
+          : <Text type="secondary">-</Text>
+      ),
+    },
+    {
       title: '业务含义',
       dataIndex: 'business_meaning',
       key: 'business_meaning',
@@ -407,6 +417,9 @@ export default function DocTypesPage() {
           <Form.Item name="key_fields" label="关键字段">
             <Select mode="tags" placeholder="输入字段名后回车添加" tokenSeparators={[',']} />
           </Form.Item>
+          <Form.Item name="aliases" label="别名（同义叫法）" extra="规则/文档中出现这些叫法时，会自动归一到本类型">
+            <Select mode="tags" placeholder="如：报关单" tokenSeparators={[',']} />
+          </Form.Item>
           <Form.Item name="stamp_required" label="用印要求">
             <Input placeholder="如：双方回签用印" />
           </Form.Item>
@@ -432,6 +445,9 @@ export default function DocTypesPage() {
             <TextArea rows={2} />
           </Form.Item>
           <Form.Item name="key_fields" label="关键字段">
+            <Select mode="tags" tokenSeparators={[',']} />
+          </Form.Item>
+          <Form.Item name="aliases" label="别名（同义叫法）" extra="规则/文档中出现这些叫法时，会自动归一到本类型">
             <Select mode="tags" tokenSeparators={[',']} />
           </Form.Item>
           <Form.Item name="stamp_required" label="用印要求">

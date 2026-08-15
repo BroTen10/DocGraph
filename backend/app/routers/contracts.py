@@ -19,6 +19,7 @@ from ..schemas.contract import (
     ContractUploadResponse,
     DocTypeUpdate,
     DocumentBrief,
+    OcrFieldsUpdate,
 )
 from ..services import contract_service
 
@@ -99,6 +100,30 @@ def update_doc_type(
         "doc_type": doc.doc_type,
         "is_required": doc.is_required,
     }
+
+
+@router.put("/documents/{doc_id}/ocr-fields", response_model=DocumentBrief)
+def update_doc_ocr_fields(
+    doc_id: uuid.UUID,
+    payload: OcrFieldsUpdate,
+    db: Session = Depends(get_db),
+) -> DocumentBrief:
+    """人工修正 OCR 结构化字段（OCR 对照界面保存入口）。
+
+    前端把修正后的字段表整体提交，后端按该文档类型的别名/数值规则归一后落库，
+    下次审查直接使用修正后的 extracted_fields。
+    """
+    update_has_stamp = "has_stamp" in payload.model_fields_set
+    doc = contract_service.update_doc_ocr_fields(
+        db,
+        doc_id,
+        payload.extracted_fields,
+        has_stamp=payload.has_stamp if update_has_stamp else None,
+        update_has_stamp=update_has_stamp,
+    )
+    if doc is None:
+        raise HTTPException(status_code=404, detail="文件不存在")
+    return DocumentBrief.model_validate(doc)
 
 
 @router.get("/documents/{doc_id}/file")
