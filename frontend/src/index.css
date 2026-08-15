@@ -186,3 +186,57 @@ mark.doc-highlight-mark {
 .row-unverifiable {
   background: #fffbe6 !important;
 }
+
+/* ===== 系统设置页 ===== */
+.settings-group-card {
+  border-radius: 12px;
+}
+
+.settings-group-card .ant-card-head {
+  border-bottom: 1px solid #f1f5f9;
+  background: #f8fafc;
+}
+
+.settings-group-card .ant-card-body {
+  padding-top: 12px;
+  padding-bottom: 12px;
+}
+
+.settings-item-label {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  width: 100%;
+  padding-right: 8px;
+}
+
+.settings-item-label-main {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  flex-wrap: wrap;
+}
+
+.settings-item-label-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.settings-editor-description {
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: #f8fafc;
+  color: #64748b;
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+@media (max-width: 720px) {
+  .settings-item-label-meta {
+    display: none;
+  }
+}
