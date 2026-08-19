@@ -10,6 +10,7 @@
  * - PDF：通过 react-pdf 文本层 + customTextRenderer 实现高亮
  * - 图片：无坐标信息，点击时显示视觉提示
  * - DOCX：通过 mammoth 转 HTML 后，JS 搜索高亮
+ * - 左侧预览：滚轮缩放，按住左键拖动平移（ZoomableStage）
  */
 
 import { useState, useEffect, useRef, useCallback } from 'react'
@@ -24,6 +25,8 @@ import {
 import { contractsApi, getErrorMessage } from '../api/client'
 import type { DocumentBrief } from '../types'
 import '../pdf-setup'
+import ZoomableStage from './ZoomableStage'
+import type { ZoomPanApi } from './ZoomableStage'
 
 const { Text, Paragraph } = Typography
 
@@ -94,9 +97,6 @@ function highlightTextInContainer(container: HTMLElement, searchText: string): n
       range.setEnd(textNode, Math.min(shortIdx + shortKey.length, text.length))
       const mark = document.createElement('mark')
       mark.className = HIGHLIGHT_CLASS
-      mark.style.backgroundColor = 'rgba(255, 235, 59, 0.7)'
-      mark.style.padding = '1px 0'
-      mark.style.borderRadius = '2px'
       range.surroundContents(mark)
       highlightCount++
     } else {
@@ -105,9 +105,6 @@ function highlightTextInContainer(container: HTMLElement, searchText: string): n
       range.setEnd(textNode, Math.min(idx + searchKey.length, text.length))
       const mark = document.createElement('mark')
       mark.className = HIGHLIGHT_CLASS
-      mark.style.backgroundColor = 'rgba(255, 235, 59, 0.7)'
-      mark.style.padding = '1px 0'
-      mark.style.borderRadius = '2px'
       range.surroundContents(mark)
       highlightCount++
     }
@@ -137,10 +134,12 @@ function PdfViewer({
   fileUrl,
   onReady,
   height,
+  apiRef,
 }: {
   fileUrl: string
   onReady: (container: HTMLElement | null) => void
   height: number | string
+  apiRef: { current: ZoomPanApi | null }
 }) {
   const containerRef = useRef<HTMLDivElement>(null)
   const [numPages, setNumPages] = useState<number>(0)
@@ -166,16 +165,7 @@ function PdfViewer({
   }, [loading, onReady])
 
   return (
-    <div
-      ref={containerRef}
-      style={{
-        height: typeof height === 'number' ? `${height}px` : height,
-        overflow: 'auto',
-        background: '#525659',
-        padding: 16,
-        borderRadius: 6,
-      }}
-    >
+    <ZoomableStage height={height} apiRef={apiRef}>
       {error && (
         <div style={{ textAlign: 'center', padding: 40, color: '#fff' }}>
           <WarningOutlined style={{ fontSize: 32, marginBottom: 12 }} />
@@ -192,46 +182,79 @@ function PdfViewer({
           <Spin size="large" tip="加载 PDF 中..."><div style={{ padding: 40 }} /></Spin>
         </div>
       )}
-      <PdfDocument
-        file={fileUrl}
-        onLoadSuccess={handleDocumentLoad}
-        onLoadError={handleError}
-        loading={null}
-        error={null}
+      <div
+        ref={containerRef}
+        style={{
+          display: 'flex',
+          flexDirection: 'column',
+          alignItems: 'center',
+          gap: 16,
+          padding: 16,
+          width: 'max-content',
+          boxSizing: 'border-box',
+        }}
       >
-        {Array.from(new Array(numPages), (_, i) => (
-          <PdfPage
-            key={i + 1}
-            pageNumber={i + 1}
-            width={600}
-            customTextRenderer={pdfTextRenderer}
-            renderAnnotationLayer={false}
-          />
-        ))}
-      </PdfDocument>
-    </div>
+        <PdfDocument
+          file={fileUrl}
+          onLoadSuccess={handleDocumentLoad}
+          onLoadError={handleError}
+          loading={null}
+          error={null}
+        >
+          {Array.from(new Array(numPages), (_, i) => (
+            <PdfPage
+              key={i + 1}
+              pageNumber={i + 1}
+              width={600}
+              customTextRenderer={pdfTextRenderer}
+              renderAnnotationLayer={false}
+            />
+          ))}
+        </PdfDocument>
+      </div>
+    </ZoomableStage>
   )
 }
 
 /** 图片渲染器 */
 function ImageViewer({ fileUrl, height }: { fileUrl: string; height: number | string }) {
+  const [viewportWidth, setViewportWidth] = useState(0)
+  const [naturalSize, setNaturalSize] = useState<{ w: number; h: number } | null>(null)
+  const [loadError, setLoadError] = useState<string | null>(null)
+
   return (
-    <div
-      style={{
-        height: typeof height === 'number' ? `${height}px` : height,
-        overflow: 'auto',
-        background: '#525659',
-        padding: 16,
-        borderRadius: 6,
-        textAlign: 'center',
-      }}
-    >
-      <img
-        src={fileUrl}
-        alt="原始文档"
-        style={{ maxWidth: '100%', border: '1px solid #374151', borderRadius: 4 }}
-      />
-    </div>
+    <ZoomableStage height={height} onViewportWidth={setViewportWidth}>
+      {loadError && (
+        <div style={{ textAlign: 'center', padding: 40, color: '#fff' }}>
+          <WarningOutlined style={{ fontSize: 32, marginBottom: 12, color: '#faad14' }} />
+          <div>图片加载失败: {loadError}</div>
+          <div style={{ marginTop: 8 }}>
+            <a href={fileUrl} target="_blank" rel="noreferrer" style={{ color: '#60a5fa' }}>
+              点击直接下载查看
+            </a>
+          </div>
+        </div>
+      )}
+      {viewportWidth > 0 && (
+        <img
+          src={fileUrl}
+          alt="原始文档"
+          draggable={false}
+          onLoad={(e) => {
+            setNaturalSize({ w: e.currentTarget.naturalWidth, h: e.currentTarget.naturalHeight })
+            setLoadError(null)
+          }}
+          onError={() => setLoadError('无法加载图片')}
+          style={{
+            // 默认铺满视口宽度；小图保持原始尺寸，避免拉伸变糊
+            width: naturalSize && naturalSize.w < viewportWidth ? naturalSize.w : viewportWidth,
+            display: 'block',
+            background: '#fff',
+            boxShadow: '0 1px 6px rgba(0, 0, 0, 0.3)',
+          }}
+        />
+      )}
+    </ZoomableStage>
   )
 }
 
@@ -240,12 +263,15 @@ function DocxViewer({
   fileUrl,
   onReady,
   height,
+  apiRef,
 }: {
   fileUrl: string
   onReady: (container: HTMLElement | null) => void
   height: number | string
+  apiRef: { current: ZoomPanApi | null }
 }) {
-  const containerRef = useRef<HTMLDivElement>(null)
+  const contentRef = useRef<HTMLDivElement>(null)
+  const [viewportWidth, setViewportWidth] = useState(0)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
 
@@ -259,10 +285,10 @@ function DocxViewer({
       .then(async (arrayBuffer) => {
         const mammoth = await import('mammoth')
         const result = await mammoth.convertToHtml({ arrayBuffer })
-        if (mounted && containerRef.current) {
-          containerRef.current.innerHTML = result.value
+        if (mounted && contentRef.current) {
+          contentRef.current.innerHTML = result.value
           setLoading(false)
-          onReady(containerRef.current)
+          onReady(contentRef.current)
         }
       })
       .catch((err) => {
@@ -278,33 +304,36 @@ function DocxViewer({
   }, [fileUrl, onReady])
 
   return (
-    <div
-      ref={containerRef}
-      style={{
-        height: typeof height === 'number' ? `${height}px` : height,
-        overflow: 'auto',
-        background: '#fff',
-        padding: 24,
-        borderRadius: 6,
-        lineHeight: 1.8,
-        fontSize: 14,
-      }}
-    >
-      {loading && (
-        <div style={{ textAlign: 'center', padding: 40 }}>
-          <Spin size="large" tip="加载 Word 文档中..."><div style={{ padding: 40 }} /></Spin>
-        </div>
-      )}
-      {error && (
-        <div style={{ textAlign: 'center', padding: 40 }}>
-          <WarningOutlined style={{ fontSize: 32, marginBottom: 12, color: '#faad14' }} />
-          <div>Word 文档加载失败: {error}</div>
-          <div style={{ marginTop: 8 }}>
-            <a href={fileUrl} target="_blank" rel="noreferrer">点击下载查看</a>
+    <ZoomableStage height={height} apiRef={apiRef} onViewportWidth={setViewportWidth}>
+      <div
+        ref={contentRef}
+        style={{
+          width: viewportWidth,
+          minHeight: 500,
+          background: '#fff',
+          padding: '24px 32px',
+          boxSizing: 'border-box',
+          lineHeight: 1.8,
+          fontSize: 14,
+          overflow: 'hidden',
+        }}
+      >
+        {loading && (
+          <div style={{ textAlign: 'center', padding: 40 }}>
+            <Spin size="large" tip="加载 Word 文档中..."><div style={{ padding: 40 }} /></Spin>
           </div>
-        </div>
-      )}
-    </div>
+        )}
+        {error && (
+          <div style={{ textAlign: 'center', padding: 40 }}>
+            <WarningOutlined style={{ fontSize: 32, marginBottom: 12, color: '#faad14' }} />
+            <div>Word 文档加载失败: {error}</div>
+            <div style={{ marginTop: 8 }}>
+              <a href={fileUrl} target="_blank" rel="noreferrer">点击下载查看</a>
+            </div>
+          </div>
+        )}
+      </div>
+    </ZoomableStage>
   )
 }
 
@@ -316,6 +345,8 @@ export default function DocumentCompare({ doc, fileUrl, height = 600, onSaved }:
   const [saving, setSaving] = useState(false)
   const [freshDoc, setFreshDoc] = useState<DocumentBrief | null>(null)
   const docContainerRef = useRef<HTMLElement | null>(null)
+  /** 左侧缩放平移组件的 API（用于高亮后定位到可视区中央） */
+  const zoomApiRef = useRef<ZoomPanApi | null>(null)
 
   // 切换文档时清除上一次的高亮目标与编辑状态，避免旧状态残留
   useEffect(() => {
@@ -328,6 +359,16 @@ export default function DocumentCompare({ doc, fileUrl, height = 600, onSaved }:
 
   const handleDocReady = useCallback((container: HTMLElement | null) => {
     docContainerRef.current = container
+  }, [])
+
+  /** 将元素定位到左侧可视区中央（优先走缩放平移，未挂载时回退到滚动） */
+  const locateElement = useCallback((el: HTMLElement | null) => {
+    if (!el) return
+    if (zoomApiRef.current) {
+      zoomApiRef.current.centerOn(el)
+    } else {
+      el.scrollIntoView({ behavior: 'smooth', block: 'center' })
+    }
   }, [])
 
   /** 点击 OCR 文本/字段 → 高亮原始文档中对应位置 */
@@ -367,19 +408,16 @@ export default function DocumentCompare({ doc, fileUrl, height = 600, onSaved }:
             text.slice(0, 10).includes(spanText)
           ) {
             if (!found) {
-              // 只高亮第一个匹配项的样式
+              // 只高亮第一个匹配项
               const mark = document.createElement('mark')
               mark.className = HIGHLIGHT_CLASS
-              mark.style.backgroundColor = 'rgba(255, 235, 59, 0.7)'
-              mark.style.padding = '1px 0'
-              mark.style.borderRadius = '2px'
               // 替换 span 内容为 mark
               while (span.firstChild) {
                 mark.appendChild(span.firstChild)
               }
               span.appendChild(mark)
-              // 滚动到匹配位置
-              span.scrollIntoView({ behavior: 'smooth', block: 'center' })
+              // 定位到可视区中央
+              locateElement(span as HTMLElement)
               found = true
             }
           }
@@ -396,6 +434,8 @@ export default function DocumentCompare({ doc, fileUrl, height = 600, onSaved }:
       // 对 HTML 内容（DOCX）：使用 TreeWalker 高亮
       const count = highlightTextInContainer(container, text)
       if (count > 0) {
+        const firstMark = container.querySelector(`mark.${HIGHLIGHT_CLASS}`)
+        locateElement(firstMark as HTMLElement | null)
         message.success(`找到 ${count} 处匹配，已高亮第一处`)
       } else {
         // 图片：无法高亮文本位置
@@ -407,7 +447,7 @@ export default function DocumentCompare({ doc, fileUrl, height = 600, onSaved }:
         }
       }
     },
-    [],
+    [locateElement],
   )
 
   // ============ 字段人工修正（OCR 对照界面） ============
@@ -557,13 +597,25 @@ export default function DocumentCompare({ doc, fileUrl, height = 600, onSaved }:
           styles={{ body: { padding: 0 } }}
         >
           {doc.file_type === 'pdf' && (
-            <PdfViewer fileUrl={fileUrl} onReady={handleDocReady} height={height} />
+            <PdfViewer
+              key={fileUrl}
+              fileUrl={fileUrl}
+              onReady={handleDocReady}
+              height={height}
+              apiRef={zoomApiRef}
+            />
           )}
           {(doc.file_type === 'png' || doc.file_type === 'jpg' || doc.file_type === 'jpeg') && (
-            <ImageViewer fileUrl={fileUrl} height={height} />
+            <ImageViewer key={fileUrl} fileUrl={fileUrl} height={height} />
           )}
           {doc.file_type === 'docx' && (
-            <DocxViewer fileUrl={fileUrl} onReady={handleDocReady} height={height} />
+            <DocxViewer
+              key={fileUrl}
+              fileUrl={fileUrl}
+              onReady={handleDocReady}
+              height={height}
+              apiRef={zoomApiRef}
+            />
           )}
           {!['pdf', 'png', 'jpg', 'jpeg', 'docx'].includes(doc.file_type) && (
             <div style={{ textAlign: 'center', padding: 40 }}>

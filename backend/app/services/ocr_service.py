@@ -2,8 +2,8 @@
 
 策略：
 - 文本型 PDF：pdfplumber 直接提取文本（不调 OCR）
-- 扫描型 PDF：用 PyMuPDF 把每页渲染成图片，逐页调通义千问 VL
-- 图片（PNG/JPG）：直接调通义千问 VL
+- 扫描型 PDF：用 PyMuPDF 把每页渲染成图片，逐页调通义千问多模态模型
+- 图片（PNG/JPG）：直接调通义千问多模态模型
 - DOCX：python-docx 提取段落文本
 - 提取结果统一为 {text, has_stamp, fields, confidence, success}
 """
@@ -199,7 +199,7 @@ def process_document(
 
 
 def _ocr_image(image_path: str, doc_type: str, field_template: list[str], db=None) -> dict:
-    """对单张图片调用通义千问 VL OCR。"""
+    """对单张图片调用通义千问多模态模型 OCR。"""
     ocr = get_ocr_client()
     return ocr.recognize(
         image_path,

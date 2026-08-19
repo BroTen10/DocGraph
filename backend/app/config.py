@@ -54,10 +54,10 @@ class Settings(BaseSettings):
     llm_model_name: str = "deepseek-chat"
     llm_confidence_threshold: float = 0.9
 
-    # OCR (阿里云百炼 通义千问 VL，OpenAI 兼容端点)
+    # OCR (阿里云百炼 通义千问多模态，OpenAI 兼容端点)
     ocr_api_key: str = ""
     ocr_base_url: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
-    ocr_model_name: str = "qwen-vl-max"
+    ocr_model_name: str = "qwen3.7-plus"
 
     # 审查容差默认值
     allow_same_day_receive_pay: bool = True

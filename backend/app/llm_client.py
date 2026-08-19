@@ -1,4 +1,4 @@
-"""LLM 客户端封装（OpenAI 兼容格式，用于 DeepSeek 与通义千问 VL）。
+"""LLM 客户端封装（OpenAI 兼容格式，用于 DeepSeek 与通义千问）。
 
 参考 MiroFish-Explorer 的 llm_client.py 设计：指数退避重试、JSON 解析容错、单例工厂。
 本模块重新实现，去除对原项目 services 包的耦合，保留关键能力：
@@ -41,7 +41,7 @@ class LLMError(Exception):
 
 
 class LLMClient:
-    """OpenAI 兼容 LLM 客户端。可同时用于 DeepSeek 文本模型和通义千问 VL 多模态模型。"""
+    """OpenAI 兼容 LLM 客户端。可同时用于 DeepSeek 文本模型和通义千问多模态模型。"""
 
     def __init__(
         self,
@@ -67,6 +67,7 @@ class LLMClient:
         max_tokens: Optional[int] = None,
         response_format: Optional[dict] = None,
         model: Optional[str] = None,
+        enable_thinking: Optional[bool] = None,
     ) -> str:
         """带自动重试的聊天请求。返回响应文本。"""
         kwargs: dict[str, Any] = {
@@ -78,6 +79,9 @@ class LLMClient:
             kwargs["max_tokens"] = max_tokens
         if response_format:
             kwargs["response_format"] = response_format
+        # 通义千问 Qwen3+ 系列：enable_thinking 走 extra_body（OpenAI 兼容端点）
+        if enable_thinking is not None:
+            kwargs["extra_body"] = {"enable_thinking": enable_thinking}
 
         last_err: Optional[Exception] = None
         for attempt in range(self._max_retries):
@@ -103,6 +107,7 @@ class LLMClient:
         temperature: Optional[float] = 0.3,
         max_tokens: Optional[int] = None,
         model: Optional[str] = None,
+        enable_thinking: Optional[bool] = None,
     ) -> dict:
         """聊天请求并返回解析后的 JSON。带 markdown 代码块容错。"""
         resp = self.chat(
@@ -111,6 +116,7 @@ class LLMClient:
             max_tokens=max_tokens,
             response_format={"type": "json_object"},
             model=model,
+            enable_thinking=enable_thinking,
         )
         json_str = _extract_json(resp)
         try:

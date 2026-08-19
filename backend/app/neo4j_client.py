@@ -171,18 +171,30 @@ class Neo4jClient:
             # 白名单校验，防止注入
             if rel_type not in _ALLOWED_REL_TYPES:
                 rel_type = "COMPARE_TO"
-            cypher = (
-                "MATCH (a:RuleEntity {name: $src, graph_id: $graph_id}), "
-                "(b:RuleEntity {name: $tgt, graph_id: $graph_id}) "
-                f"MERGE (a)-[r:{rel_type}]->(b) "
-                "SET r += $attrs"
-            )
+            # 带 rule_id 的关系按 (起点, 类型, 终点, rule_id) 幂等：不同规则即使
+            # 引用同一字段对（如 物流/承运人 与 代收方（C/O）都归一为 代收方），
+            # 也各自保留一条边，避免 MERGE 把多条规则折叠成一条。
+            if attrs.get("rule_id"):
+                cypher = (
+                    "MATCH (a:RuleEntity {name: $src, graph_id: $graph_id}), "
+                    "(b:RuleEntity {name: $tgt, graph_id: $graph_id}) "
+                    f"MERGE (a)-[r:{rel_type} {{rule_id: $rule_id}}]->(b) "
+                    "SET r += $attrs"
+                )
+            else:
+                cypher = (
+                    "MATCH (a:RuleEntity {name: $src, graph_id: $graph_id}), "
+                    "(b:RuleEntity {name: $tgt, graph_id: $graph_id}) "
+                    f"MERGE (a)-[r:{rel_type}]->(b) "
+                    "SET r += $attrs"
+                )
             self.execute_write(
                 cypher,
                 {
                     "src": rel["source"],
                     "tgt": rel["target"],
                     "graph_id": graph_id,
+                    "rule_id": attrs.get("rule_id"),
                     "attrs": self._sanitize_props(attrs),
                 },
                 check_string_values=False,

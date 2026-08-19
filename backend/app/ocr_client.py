@@ -1,4 +1,4 @@
-"""OCR 客户端封装（阿里云百炼 - 通义千问 VL，OpenAI 兼容端点）。
+"""OCR 客户端封装（阿里云百炼 - 通义千问多模态，OpenAI 兼容端点）。
 
 一次调用完成：文字识别 + 印章检测 + 字段提取 + 语义理解。
 """
@@ -24,7 +24,7 @@ logger = logging.getLogger(__name__)
 
 
 class OCRClient:
-    """通义千问 VL OCR 客户端。复用 LLMClient 的 OpenAI 兼容调用能力。"""
+    """通义千问多模态 OCR 客户端（当前模型 qwen3.7-plus）。复用 LLMClient 的 OpenAI 兼容调用能力。"""
 
     def __init__(
         self,
@@ -112,7 +112,14 @@ class OCRClient:
         ]
 
         try:
-            result = self._client.chat_json(messages=messages, temperature=0.1, max_tokens=4096)
+            result = self._client.chat_json(
+                messages=messages,
+                temperature=0.1,
+                max_tokens=4096,
+                # 关闭思考模式：OCR 只需要直接输出，不需要推理过程，
+                # 可显著降低输出 token 与延迟（qwen3.7-plus 默认可能开启 thinking）。
+                enable_thinking=False,
+            )
         except LLMError as e:
             logger.error("OCR 调用失败 %s: %s", image_path, e)
             return {"success": False, "error": f"OCR 调用失败: {e}"}

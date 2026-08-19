@@ -22,6 +22,35 @@ const SOURCE_LABEL: Record<string, string> = {
   manual: '手动创建',
 }
 
+interface FieldAliasRow {
+  alias?: string
+  field?: string
+  aggregate?: string
+}
+
+// field_aliases: {"别名": "规范字段"} 或 {"别名": {"field": "规范字段", "aggregate": "SUM"}}
+function fieldAliasesToPairs(fa?: Record<string, unknown>): FieldAliasRow[] {
+  return Object.entries(fa || {}).map(([alias, v]) => {
+    if (v && typeof v === 'object') {
+      const obj = v as { field?: string; aggregate?: string }
+      return { alias, field: obj.field || '', aggregate: obj.aggregate }
+    }
+    return { alias, field: v == null ? '' : String(v) }
+  })
+}
+
+function fieldAliasesFromPairs(pairs?: FieldAliasRow[]): Record<string, unknown> {
+  const out: Record<string, unknown> = {}
+  for (const p of pairs || []) {
+    const alias = p.alias?.trim()
+    const field = p.field?.trim()
+    if (!alias || !field) continue
+    if (p.aggregate) out[alias] = { field, aggregate: p.aggregate }
+    else out[alias] = field
+  }
+  return out
+}
+
 export default function DocTypesPage() {
   const [activeTab, setActiveTab] = useState('active')
   const [docTypes, setDocTypes] = useState<DocTypeItem[]>([])
@@ -71,9 +100,10 @@ export default function DocTypesPage() {
   }, [loadData])
 
   // ============ CRUD handlers ============
-  const handleCreate = async (values: DocTypeCreate) => {
+  const handleCreate = async (values: DocTypeCreate & { field_aliases_list?: FieldAliasRow[] }) => {
     try {
-      await docTypesApi.create(values)
+      const { field_aliases_list, ...rest } = values
+      await docTypesApi.create({ ...rest, field_aliases: fieldAliasesFromPairs(field_aliases_list) })
       message.success('文档类型已创建')
       setCreateOpen(false)
       form.resetFields()
@@ -83,10 +113,11 @@ export default function DocTypesPage() {
     }
   }
 
-  const handleEdit = async (values: DocTypeUpdate) => {
+  const handleEdit = async (values: DocTypeUpdate & { field_aliases_list?: FieldAliasRow[] }) => {
     if (!editingType) return
     try {
-      await docTypesApi.update(editingType.id, values)
+      const { field_aliases_list, ...rest } = values
+      await docTypesApi.update(editingType.id, { ...rest, field_aliases: fieldAliasesFromPairs(field_aliases_list) })
       message.success('已更新')
       setEditOpen(false)
       setEditingType(null)
@@ -254,6 +285,25 @@ export default function DocTypesPage() {
       ),
     },
     {
+      title: '字段别名',
+      dataIndex: 'field_aliases',
+      key: 'field_aliases',
+      render: (fa?: Record<string, unknown>) => {
+        const pairs = fieldAliasesToPairs(fa)
+        return pairs.length > 0
+          ? (
+            <Space size={4} wrap>
+              {pairs.map((p, i) => (
+                <Tag color="geekblue" key={i}>
+                  {p.alias} → {p.field}{p.aggregate ? ` (${p.aggregate})` : ''}
+                </Tag>
+              ))}
+            </Space>
+          )
+          : <Text type="secondary">-</Text>
+      },
+    },
+    {
       title: '业务含义',
       dataIndex: 'business_meaning',
       key: 'business_meaning',
@@ -274,7 +324,12 @@ export default function DocTypesPage() {
       width: 200,
       render: (_: unknown, record: DocTypeItem) => (
         <Space size="small">
-          <Button size="small" onClick={() => { setEditingType(record); editForm.setFieldsValue(record); setEditOpen(true) }}>
+          <Button size="small" onClick={() => {
+            setEditingType(record)
+            const { field_aliases, ...rest } = record
+            editForm.setFieldsValue({ ...rest, field_aliases_list: fieldAliasesToPairs(field_aliases) })
+            setEditOpen(true)
+          }}>
             编辑
           </Button>
           <Button size="small" icon={<AimOutlined />} onClick={() => openAnalyze(record.name, record.id, record.status)}>
@@ -420,6 +475,41 @@ export default function DocTypesPage() {
           <Form.Item name="aliases" label="别名（同义叫法）" extra="规则/文档中出现这些叫法时，会自动归一到本类型">
             <Select mode="tags" placeholder="如：报关单" tokenSeparators={[',']} />
           </Form.Item>
+          <Form.Item label="字段别名" extra="规则/OCR 中出现这些字段名时，会自动归一到右侧的规范字段">
+            <Form.List name="field_aliases_list">
+              {(fields, { add, remove }) => (
+                <>
+                  {fields.map(({ key, name }) => (
+                    <Space key={key} align="baseline" style={{ display: 'flex', marginBottom: 8 }}>
+                      <Form.Item name={[name, 'alias']} noStyle rules={[{ required: true, message: '请输入别名' }]}>
+                        <Input placeholder="字段别名，如：总价" style={{ width: 210 }} />
+                      </Form.Item>
+                      <span>→</span>
+                      <Form.Item name={[name, 'field']} noStyle rules={[{ required: true, message: '请输入规范字段' }]}>
+                        <Input placeholder="规范字段，如：总金额" style={{ width: 210 }} />
+                      </Form.Item>
+                      <Form.Item name={[name, 'aggregate']} noStyle>
+                        <Select
+                          placeholder="聚合"
+                          allowClear
+                          style={{ width: 110 }}
+                          options={[
+                            { value: 'SUM', label: 'SUM' },
+                            { value: 'ANY', label: 'ANY' },
+                            { value: 'ALL', label: 'ALL' },
+                          ]}
+                        />
+                      </Form.Item>
+                      <Button type="text" danger icon={<DeleteOutlined />} onClick={() => remove(name)} />
+                    </Space>
+                  ))}
+                  <Button type="dashed" onClick={() => add()} icon={<PlusOutlined />} block>
+                    添加字段别名
+                  </Button>
+                </>
+              )}
+            </Form.List>
+          </Form.Item>
           <Form.Item name="stamp_required" label="用印要求">
             <Input placeholder="如：双方回签用印" />
           </Form.Item>
@@ -449,6 +539,41 @@ export default function DocTypesPage() {
           </Form.Item>
           <Form.Item name="aliases" label="别名（同义叫法）" extra="规则/文档中出现这些叫法时，会自动归一到本类型">
             <Select mode="tags" tokenSeparators={[',']} />
+          </Form.Item>
+          <Form.Item label="字段别名" extra="规则/OCR 中出现这些字段名时，会自动归一到右侧的规范字段">
+            <Form.List name="field_aliases_list">
+              {(fields, { add, remove }) => (
+                <>
+                  {fields.map(({ key, name }) => (
+                    <Space key={key} align="baseline" style={{ display: 'flex', marginBottom: 8 }}>
+                      <Form.Item name={[name, 'alias']} noStyle rules={[{ required: true, message: '请输入别名' }]}>
+                        <Input placeholder="字段别名，如：总价" style={{ width: 210 }} />
+                      </Form.Item>
+                      <span>→</span>
+                      <Form.Item name={[name, 'field']} noStyle rules={[{ required: true, message: '请输入规范字段' }]}>
+                        <Input placeholder="规范字段，如：总金额" style={{ width: 210 }} />
+                      </Form.Item>
+                      <Form.Item name={[name, 'aggregate']} noStyle>
+                        <Select
+                          placeholder="聚合"
+                          allowClear
+                          style={{ width: 110 }}
+                          options={[
+                            { value: 'SUM', label: 'SUM' },
+                            { value: 'ANY', label: 'ANY' },
+                            { value: 'ALL', label: 'ALL' },
+                          ]}
+                        />
+                      </Form.Item>
+                      <Button type="text" danger icon={<DeleteOutlined />} onClick={() => remove(name)} />
+                    </Space>
+                  ))}
+                  <Button type="dashed" onClick={() => add()} icon={<PlusOutlined />} block>
+                    添加字段别名
+                  </Button>
+                </>
+              )}
+            </Form.List>
           </Form.Item>
           <Form.Item name="stamp_required" label="用印要求">
             <Input />

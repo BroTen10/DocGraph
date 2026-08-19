@@ -49,7 +49,7 @@ from .field_extraction_service import (
     parse_date,
 )
 from .ocr_service import process_document, resolve_field_template
-from .doc_normalizer import resolve_field_aliases
+from .doc_normalizer import normalize_party_name, resolve_field_aliases
 from .settings_service import get_setting
 from .suggestion_service import build_suggestion_llm
 from . import result_meta
@@ -663,13 +663,28 @@ def _check_accuracy(
         if receiver is None:
             results.append(_make_result(rule, d_list[0], "unverifiable", issue_desc=f"{dt} 收货方字段无法提取"))
         elif str(receiver).strip() != str(entrust_customer).strip():
-            results.append(
-                _make_result(
-                    rule, d_list[0], "fail",
-                    issue_desc=f"{dt} 收货方 [{receiver}] 与委托单客户 [{entrust_customer}] 不一致",
-                    detail={"receiver": receiver, "customer": entrust_customer},
+            # 主体类字段归一：地址/法律形式后缀详略不同视为同一收货主体（与图谱引擎一致）
+            receiver_core = normalize_party_name(receiver)
+            customer_core = normalize_party_name(entrust_customer)
+            if receiver_core and customer_core and receiver_core == customer_core:
+                results.append(
+                    _make_result(
+                        rule, d_list[0], "pass",
+                        detail={
+                            "receiver": receiver,
+                            "customer": entrust_customer,
+                            "party_name_norm": receiver_core,
+                        },
+                    )
                 )
-            )
+            else:
+                results.append(
+                    _make_result(
+                        rule, d_list[0], "fail",
+                        issue_desc=f"{dt} 收货方 [{receiver}] 与委托单客户 [{entrust_customer}] 不一致",
+                        detail={"receiver": receiver, "customer": entrust_customer},
+                    )
+                )
         else:
             results.append(_make_result(rule, d_list[0], "pass"))
 
@@ -816,13 +831,24 @@ _UNEXTRACTABLE_PATTERN = re.compile(
 
 
 def _dedup_key(item: dict) -> tuple:
-    """生成去重键：同一 (result, check_category, doc_type, issue_desc, doc_id) 视为重复。"""
+    """生成去重键：同一 (result, check_category, doc_type, issue_desc, doc_id) 且
+    规则身份一致（rule_id / 图谱节点 / 规则文本）才视为重复。
+
+    修复：不同规则（如多条"两个订单文档的 X 必须一致"）即使结果/类目/文档类型/
+    issue_desc/doc_id 相同，也不能互相折叠——否则 pass 项会被去重吞掉。
+    """
+    rule_identity = (
+        item.get("rule_id") or item.get("graph_source") or "",
+        item.get("graph_target") or "",
+        item.get("rule_text") or "",
+    )
     return (
         item.get("result"),
         item.get("check_category"),
         item.get("doc_type"),
         item.get("issue_desc"),
         str(item.get("doc_id") or ""),
+        rule_identity,
     )
 
 
