@@ -24,12 +24,19 @@ _BACKEND_DIR = os.path.normpath(os.path.join(_TEST_DIR, "..", "backend"))
 sys.path.insert(0, _BACKEND_DIR)
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
-from app.services.graph_review_service import _evaluate_criterion, _expand_multi_values  # noqa: E402
-from app.services.doc_normalizer import is_currency_field, normalize_currency_value  # noqa: E402
+from app.services.graph_review_service import _evaluate_criterion, _expand_multi_values, _cmp_eq  # noqa: E402
+from app.services.doc_normalizer import (  # noqa: E402
+    is_currency_field,
+    is_party_field,
+    normalize_currency_value,
+    normalize_party_name,
+)
 from app.services.field_extraction_service import normalize_fields  # noqa: E402
 from app.services.llm_review_service import (  # noqa: E402
     _is_adjudication_candidate,
+    _is_string_mismatch_item,
     semantic_adjudication_fallback,
+    semantic_equivalence_fallback,
 )
 import app.services.llm_review_service as llm_review_module  # noqa: E402
 from app.models import ReviewResult  # noqa: E402
@@ -205,6 +212,176 @@ def main() -> None:
     check("场景3 受影响 1 条", changed == 1)
     check("场景3 改为 fail", r3.result == "fail", r3.result)
     check("场景3 状态 open", r3.status == "open", r3.status)
+
+    print("LLM 语义复核：多文档同字段一致性（代收方详略不同假阳性）")
+    consignee_a = "Schenker International, Av. Guadalupe 920-B, Zapopan, Jalisco 985010, Mexico"
+    consignee_b = "Schenker International, SA CV"
+
+    # 候选识别：self_consistency 字符串值进入复核；数值/日期仍走确定性结论
+    cand = ReviewResult(
+        result="fail",
+        detail={"src_vals": [consignee_a, consignee_b], "tgt_vals": [consignee_a, consignee_b], "self_consistency": True},
+        source="graph",
+    )
+    check("self_consistency 字符串不一致进入复核", _is_string_mismatch_item(cand) is True)
+    numeric = ReviewResult(
+        result="fail",
+        detail={"src_vals": [100, 23600], "tgt_vals": [100, 23600], "self_consistency": True},
+        source="graph",
+    )
+    check("self_consistency 数值不一致不进入复核", _is_string_mismatch_item(numeric) is False)
+    no_self = ReviewResult(
+        result="fail",
+        detail={"src_vals": [consignee_a, consignee_b], "tgt_vals": [consignee_a, consignee_b]},
+        source="graph",
+    )
+    check("缺少 self_consistency 标记不进入复核", _is_string_mismatch_item(no_self) is False)
+
+    # 场景A：同一公司，一份含完整地址、一份仅法律主体名 → LLM 高置信判同义 → pass
+    ra = ReviewResult(
+        rule_text="订单多份文档的代收方必须一致",
+        check_category="信息准确性",
+        result="fail",
+        issue_desc=f"订单 多份文档的代收方不一致: {[consignee_a, consignee_b]}",
+        detail={
+            "src_vals": [consignee_a, consignee_b],
+            "tgt_vals": [consignee_a, consignee_b],
+            "self_consistency": True,
+        },
+        source="graph",
+    )
+    llm_review_module.get_llm_client = lambda: _FakeLLM(
+        {
+            "results": [
+                {
+                    "index": 0,
+                    "equivalent": True,
+                    "confidence": 0.95,
+                    "reason": "两值均为 Schenker International，地址/法律形式后缀差异不影响同一收货主体",
+                }
+            ]
+        }
+    )
+    changed = semantic_equivalence_fallback(None, fake_contract, fake_docs, [ra])
+    check("场景A 受影响 1 条", changed == 1)
+    check("场景A 同义 → pass", ra.result == "pass", ra.result)
+    check("场景A 状态 closed", ra.status == "closed", ra.status)
+    check("场景A 记录语义复核证据", ra.detail.get("semantic_fallback") is True and "Schenker" in ra.detail.get("llm_evidence", ""))
+
+    # 场景B：确实不同主体 → LLM 高置信判不同 → 保持 fail 并补充证据
+    rb = ReviewResult(
+        rule_text="订单多份文档的代收方必须一致",
+        check_category="信息准确性",
+        result="fail",
+        issue_desc="订单 多份文档的代收方不一致: [甲, 乙]",
+        detail={"src_vals": ["甲", "乙"], "tgt_vals": ["甲", "乙"], "self_consistency": True},
+        source="graph",
+    )
+    llm_review_module.get_llm_client = lambda: _FakeLLM(
+        {"results": [{"index": 0, "equivalent": False, "confidence": 0.9, "reason": "甲与乙为不同公司"}]}
+    )
+    changed = semantic_equivalence_fallback(None, fake_contract, fake_docs, [rb])
+    check("场景B 受影响 1 条", changed == 1)
+    check("场景B 确认不同 → 保持 fail", rb.result == "fail", rb.result)
+    check("场景B 状态 open", rb.status == "open", rb.status)
+    check("场景B 补充确认不一致", "确认不一致" in rb.issue_desc)
+
+    # 场景C：LLM 无法确认 → 降级 unverifiable 待人工确认（护栏）
+    rc = ReviewResult(
+        rule_text="订单多份文档的代收方必须一致",
+        check_category="信息准确性",
+        result="fail",
+        detail={"src_vals": [consignee_a, consignee_b], "tgt_vals": [consignee_a, consignee_b], "self_consistency": True},
+        source="graph",
+    )
+    llm_review_module.get_llm_client = lambda: _FakeLLM(
+        {"results": [{"index": 0, "equivalent": None, "confidence": 0.4, "reason": "无法确认"}]}
+    )
+    changed = semantic_equivalence_fallback(None, fake_contract, fake_docs, [rc])
+    check("场景C 受影响 1 条", changed == 1)
+    check("场景C 无法确认 → unverifiable", rc.result == "unverifiable", rc.result)
+    check("场景C 标记人工确认", rc.detail.get("reason") == "llm_uncertain_semantic")
+
+    # 场景D：三份文档，任一对无法确认 → 整体 unverifiable（不贸然 pass/fail）
+    rd = ReviewResult(
+        rule_text="订单多份文档的代收方必须一致",
+        check_category="信息准确性",
+        result="fail",
+        detail={
+            "src_vals": [consignee_a, consignee_b, "Schenker International de Mexico"],
+            "tgt_vals": [consignee_a, consignee_b, "Schenker International de Mexico"],
+            "self_consistency": True,
+        },
+        source="graph",
+    )
+    llm_review_module.get_llm_client = lambda: _FakeLLM(
+        {
+            "results": [
+                {"index": 0, "equivalent": True, "confidence": 0.95, "reason": "同一主体"},
+                {"index": 1, "equivalent": None, "confidence": 0.5, "reason": "无法确认"},
+            ]
+        }
+    )
+    changed = semantic_equivalence_fallback(None, fake_contract, fake_docs, [rd])
+    check("场景D 受影响 1 条", changed == 1)
+    check("场景D 任一对不确定 → unverifiable", rd.result == "unverifiable", rd.result)
+    check("场景D 置信度取最低", rd.confidence == 0.5, str(rd.confidence))
+
+    print("主体名称归一：代收方/承运人地址与法律后缀详略差异")
+    schenker_addr = "Schenker International, Av. Guadalupe 920-B, Zapopan, Jalisco 985010, Mexico"
+    schenker_suffix = "Schenker International, SA CV"
+    core = normalize_party_name(schenker_addr)
+    check("代收方 是主体字段", is_party_field("代收方") is True)
+    check("承运人 是主体字段", is_party_field("承运人") is True)
+    check("卖方名称 是主体字段", is_party_field("卖方名称") is True)
+    check("买方订单号 不是主体字段", is_party_field("买方订单号") is False)
+    check("买方地址 不是主体字段", is_party_field("买方地址") is False)
+    check("商品名称 不是主体字段", is_party_field("商品名称") is False)
+    check("完整地址 vs 法律后缀 归一相同", normalize_party_name(schenker_suffix) == core,
+          f"{normalize_party_name(schenker_suffix)!r} vs {core!r}")
+    check("无逗号写法也归一相同", normalize_party_name("Schenker International SA CV") == core)
+    check("大小写差异归一相同", normalize_party_name("schenker INTERNATIONAL") == core)
+    check("空值返回 None", normalize_party_name(None) is None)
+    check("纯标点返回 None", normalize_party_name("---") is None)
+
+    def _party_doc(name, val, doc_type="订单", field="代收方"):
+        return SimpleNamespace(
+            file_name=name, doc_type=doc_type,
+            extracted_fields={field: val},
+            has_stamp=False, ocr_confidence=1.0,
+        )
+
+    # 端到端：_cmp_eq 多文档一致性直接判 pass（确定性，不再依赖 LLM）
+    res, desc, det = _cmp_eq(
+        "订单", "代收方", "订单", "代收方",
+        [_party_doc("订单A.pdf", schenker_addr), _party_doc("订单B.pdf", schenker_suffix)],
+    )
+    check("代收方地址/后缀详略不同 → pass", res == "pass", desc)
+    check("记录主体归一证据", det.get("party_name_norm") == [core, core], str(det.get("party_name_norm")))
+
+    # 跨文档（不同文件类型同主体字段）同样归一判等
+    res2, desc2, _ = _cmp_eq(
+        "订单", "代收方", "运单", "收货方",
+        [
+            _party_doc("订单.pdf", schenker_addr, "订单", "代收方"),
+            _party_doc("运单.pdf", schenker_suffix, "运单", "收货方"),
+        ],
+    )
+    check("跨文档主体详略不同 → pass", res2 == "pass", desc2)
+
+    # 不同主体仍 fail（归一化不掩盖真实差异）
+    res3, desc3, _ = _cmp_eq(
+        "订单", "代收方", "订单", "代收方",
+        [_party_doc("订单A.pdf", schenker_suffix), _party_doc("订单B.pdf", "DHL Global Forwarding")],
+    )
+    check("不同承运人仍 fail", res3 == "fail", desc3)
+
+    # 非主体字段不受归一化影响（数值/单号类保持原判）
+    res4, desc4, _ = _cmp_eq(
+        "订单", "数量", "订单", "数量",
+        [_party_doc("订单A.pdf", 100, field="数量"), _party_doc("订单B.pdf", 200, field="数量")],
+    )
+    check("数值字段不一致仍 fail", res4 == "fail", desc4)
 
     print("全部通过")
 

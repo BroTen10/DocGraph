@@ -104,6 +104,71 @@ def normalize_currency_value(value: Any) -> Any:
     return canonical[0] if len(canonical) == 1 else ";".join(canonical)
 
 
+# ---------- 主体类字段（公司/机构名，值归一为公司核心名） ----------
+
+PARTY_ROLE_KEYWORDS: tuple[str, ...] = (
+    "代收方", "收货方", "承运人", "物流", "发货方", "收件人",
+    "客户", "委托方", "供应商", "卖方", "买方", "协议方",
+    "收付款对象", "单位名称", "公司",
+)
+_NON_PARTY_HINTS: tuple[str, ...] = (
+    "订单号", "单号", "编号", "地址", "邮编", "电话", "税号",
+    "联系人", "日期", "数量", "金额", "价格", "银行",
+)
+
+# 法律形式后缀（去标点、小写后精确匹配），如 "SA CV" -> "sacv"、
+# "S.A. DE C.V." -> "sadecv"。命中即视为公司名附属结构，不进入核心名。
+_LEGAL_SUFFIX_TOKENS: frozenset[str] = frozenset(
+    {
+        "sa", "sacv", "sadecv", "cv", "bv", "bvba", "nv", "ag", "gmbh",
+        "kg", "inc", "incorporated", "ltd", "limited", "llc", "llp",
+        "plc", "corp", "corporation", "company", "co", "srl", "spa",
+        "sas", "oy", "ab", "as", "ooo", "sca", "kgaa", "pt", "pte",
+        "pvt", "sro", "tva", "sociedad", "anonima", "capital", "variable",
+    }
+)
+
+
+def is_party_field(field: Any) -> bool:
+    """判断字段是否主体类字段（公司/收货方/承运人等），值可按公司核心名归一。"""
+    if not field:
+        return False
+    s = str(field).strip()
+    if not s or any(h in s for h in _NON_PARTY_HINTS):
+        return False
+    return any(k in s for k in PARTY_ROLE_KEYWORDS)
+
+
+def normalize_party_name(value: Any) -> Optional[str]:
+    """主体值归一：提取公司/机构核心名，去除地址、法律形式后缀与大小写/标点差异。
+
+    例（均归一为 'schenkerinternational'）：
+      'Schenker International, Av. Guadalupe 920-B, Zapopan, Jalisco 985010, Mexico'
+      'Schenker International, SA CV'
+      'Schenker International SA CV'
+    无法识别核心名（空值等）返回 None，调用方回退字面比较 / LLM 语义复核。
+    """
+    if value is None:
+        return None
+    s = str(value).strip()
+    if not s:
+        return None
+    # 单证中主体通常排版为 '公司名, 地址…'，取首个逗号前片段作为核心名
+    head = s.split(",", 1)[0].strip()
+    if not head:
+        return None
+    tokens = re.split(r"[\s/]+", head)
+    core_parts: list[str] = []
+    for tok in tokens:
+        cleaned = re.sub(r"[^\w\u4e00-\u9fff]+", "", tok, flags=re.UNICODE).lower()
+        if not cleaned or cleaned in _LEGAL_SUFFIX_TOKENS:
+            continue
+        core_parts.append(cleaned)
+    if not core_parts:
+        return None
+    return "".join(core_parts)
+
+
 def _registry_rows(db: Optional[Session]) -> list[DocumentType]:
     """读取文档类型注册表；db 不可用时返回空（纯常量兜底）。"""
     if db is None:

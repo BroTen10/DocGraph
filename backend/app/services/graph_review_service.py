@@ -30,7 +30,12 @@ from sqlalchemy.orm import Session
 from ..models import Contract, Document, ReviewResult, RuleSnapshot
 from ..neo4j_client import Neo4jClient, get_neo4j_client
 from .contract_normalizer import extract_contract_numbers, normalize_contract_no
-from .doc_normalizer import is_currency_field, normalize_currency_value
+from .doc_normalizer import (
+    is_currency_field,
+    is_party_field,
+    normalize_currency_value,
+    normalize_party_name,
+)
 from . import result_meta
 
 logger = logging.getLogger(__name__)
@@ -772,6 +777,51 @@ def _cmp_eq(
             },
         )
 
+    # 同类型同字段自比对 = 多文档一致性校验（如"两个订单文档的数量必须一致"）。
+    # 源/目标采集自同一字段集合，跨集比较恒等（求和/任一匹配都恒 pass，会把
+    # 23600 vs 100 这类真实不一致漏掉）；正确语义是集合内所有值一致，且任一份
+    # 文档缺失该字段都按"数据缺失"处理（防空满足）。
+    if src_doc_type == tgt_doc_type and src_field == tgt_field:
+        values, missing = _collect_field_evidence(docs, src_doc_type, src_field)
+        if missing or not values:
+            return (
+                "unverifiable",
+                f"{src_doc_type}.{src_field} 字段数据缺失",
+                {
+                    "reason": "field_data_missing",
+                    "missing_fields": missing
+                    or _collect_missing(docs, [(src_doc_type, src_field)]),
+                },
+            )
+        vals = [v for _, v in values]
+        detail = {"src_vals": vals, "tgt_vals": vals, "self_consistency": True}
+        nums = _to_numeric_list(vals)
+        if nums is not None:
+            if max(nums) - min(nums) < 1e-9:
+                return "pass", "", detail
+            return (
+                "fail",
+                f"{src_doc_type} 多份文档的{src_field}不一致: {vals}",
+                detail,
+            )
+        # 主体类字段（代收方/承运人/收货方等）多文档一致性：公司核心名归一判等，
+        # 吸收 '公司名, 完整地址' vs '公司名, 法律形式后缀' 这类详略/格式差异，
+        # 避免 "Schenker International, ...Mexico" vs "Schenker International, SA CV" 假阳性。
+        if is_party_field(src_field) or is_party_field(tgt_field):
+            party_norms = [normalize_party_name(v) for v in vals]
+            if party_norms and all(n is not None for n in party_norms):
+                detail["party_name_norm"] = party_norms
+                if len(set(party_norms)) == 1:
+                    return "pass", "", detail
+        strs = {str(v).strip() for v in vals}
+        if len(strs) <= 1:
+            return "pass", "", detail
+        return (
+            "fail",
+            f"{src_doc_type} 多份文档的{src_field}不一致: {vals}",
+            detail,
+        )
+
     # 两侧全部为数值 → 按总和比较
     src_nums, tgt_nums = _to_numeric_list(src_vals), _to_numeric_list(tgt_vals)
     if src_nums is not None and tgt_nums is not None:
@@ -785,6 +835,22 @@ def _cmp_eq(
             f"{src_doc_type}.{src_field} 合计 [{src_sum}] 与 {tgt_doc_type}.{tgt_field} 合计 [{tgt_sum}] 不一致",
             detail,
         )
+
+    # 主体类字段跨文档比对：先按公司核心名归一判等，吸收地址/法律后缀详略差异
+    if is_party_field(src_field) or is_party_field(tgt_field):
+        src_party = [normalize_party_name(v) for v in src_vals]
+        tgt_party = [normalize_party_name(v) for v in tgt_vals]
+        if all(n is not None for n in src_party) and all(n is not None for n in tgt_party):
+            detail = {
+                "src_vals": src_vals,
+                "tgt_vals": tgt_vals,
+                "party_name_norm": {"src": src_party, "tgt": tgt_party},
+            }
+            if aggregate == "ALL":
+                if set(src_party) == set(tgt_party):
+                    return "pass", "", detail
+            elif set(src_party) & set(tgt_party):
+                return "pass", "", detail
 
     # 字符串集合：任一匹配
     src_set = {str(v).strip() for v in src_vals}

@@ -195,7 +195,10 @@ LLM_SEMANTIC_SYSTEM = """你是贸易单证字段一致性核验专家。两个�
 }
 
 规则：
-1. equivalent=true 仅当语义明确指向同一实体/同一表述（如"上海XX物流有限公司" vs "上海XX物流"）；
+1. equivalent=true 仅当语义明确指向同一实体/同一表述（如"上海XX物流有限公司" vs "上海XX物流"；
+   同一公司名的"公司名+完整地址"与"公司名+法律形式后缀"——如
+   "Schenker International, Av. Guadalupe 920-B, Zapopan, Jalisco 985010, Mexico"
+   与 "Schenker International, SA CV"——应视为同一收货主体）；
 2. 无法确定 → equivalent=null 且 confidence 给低值；
 3. confidence < 0.8 一律视为无法确认。"""
 

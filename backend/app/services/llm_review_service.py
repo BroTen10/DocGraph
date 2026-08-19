@@ -218,13 +218,38 @@ def review_unstructured_rules(
 
 _NUMBER_RE = re.compile(r"^[+-]?(\d+\.?\d*|\.\d+)([%％]|[千万元]|元)?$")
 _DATE_RE = re.compile(r"^\d{4}[-/]\d{1,2}[-/]\d{1,2}$")
+_UNCERTAIN_REASON_HINTS = (
+    "无法确认", "无法确定", "不能确定", "不确定", "无法判断",
+    "难以判断", "不能判断", "无法判定", "难以确定",
+)
+
+
+def _reason_says_uncertain(reason: str) -> bool:
+    """LLM reason 是否明确表达"无法确认"（用于拦截自相矛盾的 equivalent=false）。"""
+    return any(h in reason for h in _UNCERTAIN_REASON_HINTS)
 
 
 def _is_string_mismatch_item(r: ReviewResult) -> bool:
-    """是否适合做 LLM 语义复核：确定性"字符串相等"失败的单项比对。"""
+    """是否适合做 LLM 语义复核：确定性"字符串相等"失败的单项比对。
+
+    覆盖两类：
+    1. 常规双向比对：detail["src"]/["tgt"] 各为单值列表；
+    2. 图谱多文档同字段一致性（self_consistency）：detail["src_vals"] 含 >=2 个
+       字符串值，须全部语义同指。此前只认 src/tgt 键，导致"订单 多份文档的
+       代收方不一致"这类地址/公司名详略不同的假阳性漏过语义复核。
+    """
     if r.result != "fail":
         return False
     d = r.detail or {}
+    if d.get("self_consistency") is True:
+        vals = d.get("src_vals") or d.get("tgt_vals")
+        if not isinstance(vals, list) or len(vals) < 2:
+            return False
+        for v in vals:
+            s = str(v).strip()
+            if not s or _NUMBER_RE.match(s) or _DATE_RE.match(s):
+                return False
+        return True
     src, tgt = d.get("src"), d.get("tgt")
     if not (isinstance(src, list) and isinstance(tgt, list)):
         return False
@@ -256,7 +281,10 @@ _SEMANTIC_SYSTEM_PROMPT = """你是贸易单证字段一致性核验专家。两
 }
 
 规则：
-1. equivalent=true 仅当语义明确指向同一实体/同一表述（如"上海XX物流有限公司" vs "上海XX物流"）；
+1. equivalent=true 仅当语义明确指向同一实体/同一表述（如"上海XX物流有限公司" vs "上海XX物流"；
+   同一公司名的"公司名+完整地址"与"公司名+法律形式后缀"——如
+   "Schenker International, Av. Guadalupe 920-B, Zapopan, Jalisco 985010, Mexico"
+   与 "Schenker International, SA CV"——应视为同一收货主体）；
 2. 无法确定 → equivalent=null 且 confidence 给低值；
 3. confidence < 0.8 一律视为无法确认。"""
 
@@ -272,28 +300,51 @@ def semantic_equivalence_fallback(
     - 判为同义（高置信）→ 结果改为 pass；
     - 判为确实不同（高置信）→ 保持 fail，补充证据；
     - 无法确认 → 降级 unverifiable（待人工确认，护栏）。
+
+    多文档同字段一致性（self_consistency）：以首值为基准逐对核验，全部判为
+    同义才通过；任一对确认不同则保持 fail；有无法确认的对则降级 unverifiable。
     Returns: 受影响的条数。
     """
     targets = [r for r in results if _is_string_mismatch_item(r)]
     if not targets:
         return 0
 
-    pairs = [
-        {
-            "index": i,
-            "src": str(r.detail["src"][0]),
-            "tgt": str(r.detail["tgt"][0]),
-            "rule": r.rule_text or "",
-            "check_category": r.check_category,
-        }
-        for i, r in enumerate(targets)
-    ]
+    # 把每个目标结果展开为 LLM 待核验的"字符串对"：
+    # - 常规比对：每结果 1 对（src[0] vs tgt[0]）；
+    # - self_consistency：以首值为基准逐对核验，多对同属一个结果。
+    tasks: list[dict] = []
+    for i, r in enumerate(targets):
+        d = r.detail or {}
+        if d.get("self_consistency") is True:
+            vals = [str(v).strip() for v in (d.get("src_vals") or d.get("tgt_vals") or [])]
+            for v in vals[1:]:
+                tasks.append(
+                    {
+                        "index": len(tasks),
+                        "result_idx": i,
+                        "src": vals[0],
+                        "tgt": v,
+                        "rule": r.rule_text or "",
+                        "check_category": r.check_category,
+                    }
+                )
+        else:
+            tasks.append(
+                {
+                    "index": len(tasks),
+                    "result_idx": i,
+                    "src": str(d["src"][0]),
+                    "tgt": str(d["tgt"][0]),
+                    "rule": r.rule_text or "",
+                    "check_category": r.check_category,
+                }
+            )
     user_prompt = (
         "待核验的字符串对：\n"
         + "\n".join(
             f"{p['index']}. 文档A值: {p['src']}  vs  文档B值: {p['tgt']}"
             + (f"（规则：{p['rule']}）" if p["rule"] else "")
-            for p in pairs
+            for p in tasks
         )
         + "\n\n请输出 JSON。"
     )
@@ -312,27 +363,55 @@ def semantic_equivalence_fallback(
         logger.warning("LLM 语义复核失败（保留确定性结论）: %s", e)
         return 0
 
-    changed = 0
+    # 按目标结果聚合 LLM 判定（self_consistency 一个结果对应多对）
+    verdicts: dict[int, list[dict]] = {}
     for item in resp.get("results", []):
         if not isinstance(item, dict):
             continue
         idx = item.get("index")
-        if not isinstance(idx, int) or not (0 <= idx < len(targets)):
+        if not isinstance(idx, int) or not (0 <= idx < len(tasks)):
             continue
-        r = targets[idx]
-        equivalent = item.get("equivalent")
-        confidence = _to_float(item.get("confidence"))
-        reason = str(item.get("reason") or "").strip()
+        verdicts.setdefault(tasks[idx]["result_idx"], []).append(item)
+
+    changed = 0
+    for result_idx, items in verdicts.items():
+        r = targets[result_idx]
+        item_verdicts = []
+        for it in items:
+            eq = it.get("equivalent")
+            reason = str(it.get("reason") or "").strip()
+            # 护栏：reason 明确表达"无法确认"却返回 equivalent=false（自相矛盾）
+            # → 按不确定处理，降级 unverifiable，避免把不确定误判为"确认不一致"。
+            if eq is False and _reason_says_uncertain(reason):
+                eq = None
+            item_verdicts.append(
+                {
+                    "equivalent": eq,
+                    "confidence": _to_float(it.get("confidence")),
+                    "reason": reason,
+                }
+            )
+        equivalents = [v["equivalent"] for v in item_verdicts]
+        confidences = [v["confidence"] for v in item_verdicts]
+        reasons = [v["reason"] for v in item_verdicts if v["reason"]]
         detail = dict(r.detail or {})
         detail["semantic_fallback"] = True
-        if reason:
-            detail["llm_evidence"] = reason
+        if reasons:
+            detail["llm_evidence"] = "；".join(reasons)
 
-        if equivalent is True and confidence is not None and confidence >= EQUIVALENT_CONFIDENCE_THRESHOLD:
+        all_same = all(
+            eq is True and conf is not None and conf >= EQUIVALENT_CONFIDENCE_THRESHOLD
+            for eq, conf in zip(equivalents, confidences)
+        )
+        any_different = any(
+            eq is False and conf is not None and conf >= EQUIVALENT_CONFIDENCE_THRESHOLD
+            for eq, conf in zip(equivalents, confidences)
+        )
+        if all_same:
             # 同义 → 改为 pass（确定性 fail 被 LLM 复核推翻，需要高置信）
             r.result = "pass"
             r.issue_desc = "字符串字面不一致，但经 LLM 语义复核判断为同义/别名/格式差异，判定通过"
-        elif equivalent is False and confidence is not None and confidence >= EQUIVALENT_CONFIDENCE_THRESHOLD:
+        elif any_different:
             # 确认不同 → 保持 fail，仅增强证据
             r.issue_desc = (r.issue_desc or "") + "（LLM 语义复核确认不一致）"
         else:
@@ -340,7 +419,8 @@ def semantic_equivalence_fallback(
             r.result = "unverifiable"
             r.issue_desc = "字符串一致性无法由程序确定，LLM 语义复核未给出明确结论，需人工确认"
             detail["reason"] = "llm_uncertain_semantic"
-        r.confidence = confidence
+        valid_confs = [c for c in confidences if c is not None]
+        r.confidence = min(valid_confs) if valid_confs else None
         r.detail = detail
         # 结果变化后重算状态/严重度
         r.status = result_meta.default_status(r.result)

@@ -1,0 +1,177 @@
+- generic [ref=e13]:
+  - complementary [ref=e14]:
+    - generic [ref=e15]:
+      - generic [ref=e16]:
+        - generic [ref=e17]: 审
+        - generic [ref=e18]:
+          - generic [ref=e19]: 文档审查智能体
+          - generic [ref=e20]: Knowledge Graph Reviewer
+      - menu [ref=e21]:
+        - menuitem "upload 文档上传" [ref=e22] [cursor=pointer]:
+          - img "upload" [ref=e23]
+          - generic [ref=e26]: 文档上传
+        - menuitem "setting 规则管理" [ref=e27] [cursor=pointer]:
+          - img "setting" [ref=e28]
+          - generic [ref=e31]: 规则管理
+        - menuitem "file-text 文档类型" [ref=e32] [cursor=pointer]:
+          - img "file-text" [ref=e33]
+          - generic [ref=e36]: 文档类型
+        - menuitem "apartment 图谱确认" [ref=e37] [cursor=pointer]:
+          - img "apartment" [ref=e38]
+          - generic [ref=e41]: 图谱确认
+        - menuitem "file-search 审查执行" [ref=e42] [cursor=pointer]:
+          - img "file-search" [ref=e43]
+          - generic [ref=e46]: 审查执行
+        - menuitem "check-circle 结果展示" [ref=e47] [cursor=pointer]:
+          - img "check-circle" [ref=e48]
+          - generic [ref=e52]: 结果展示
+        - menuitem "setting 系统设置" [ref=e53] [cursor=pointer]:
+          - img "setting" [ref=e54]
+          - generic [ref=e57]: 系统设置
+      - generic [ref=e58]:
+        - img "user" [ref=e60]
+        - generic [ref=e63]:
+          - generic [ref=e64]: 审查员
+          - generic [ref=e65]: 在线
+  - generic [ref=e66]:
+    - banner [ref=e67]:
+      - generic [ref=e68]:
+        - button [ref=e69] [cursor=pointer]:
+          - img "menu-fold" [ref=e70]
+        - generic [ref=e73]: 文档上传
+      - generic [ref=e76]:
+        - button "appstore 方正测试2-20260819 down" [ref=e78] [cursor=pointer]:
+          - img "appstore" [ref=e79]
+          - generic [ref=e82]: 方正测试2-20260819
+          - img "down" [ref=e83]
+        - button [ref=e87] [cursor=pointer]:
+          - img "plus" [ref=e89]
+        - button [ref=e94] [cursor=pointer]:
+          - img "minus" [ref=e96]
+    - main [ref=e99]:
+      - generic [ref=e101]:
+        - generic [ref=e104]:
+          - img "upload" [ref=e106]
+          - generic [ref=e109]:
+            - heading "文档上传与合同识别" [level=1] [ref=e110]
+            - generic [ref=e111]: 选择本地合同文件夹上传（支持 PDF / PNG / JPG / DOCX），系统自动识别文件类型与合同号归一化
+        - generic [ref=e112]:
+          - generic [ref=e114]:
+            - generic [ref=e116]:
+              - generic [ref=e117]: 上传合同文件夹
+              - generic [ref=e119]:
+                - button "reload 刷新列表" [ref=e121] [cursor=pointer]:
+                  - img "reload" [ref=e123]
+                  - generic [ref=e126]: 刷新列表
+                - button "开始上传" [disabled] [ref=e128]
+            - generic [ref=e130]:
+              - button [ref=e134] [cursor=pointer]:
+                - generic [ref=e135]:
+                  - paragraph [ref=e136]:
+                    - img "inbox" [ref=e137]
+                  - paragraph [ref=e140]: 点击或拖拽文件到此区域
+                  - paragraph [ref=e141]: 支持同时选择多个文件（一个合同的所有文件），选择后点击右上角"开始上传"
+              - generic [ref=e142]: 选择文件后,此处显示待上传清单
+          - generic [ref=e145]:
+            - generic [ref=e146]: 合同列表
+            - generic [ref=e154]:
+              - table [ref=e156]:
+                - rowgroup [ref=e164]:
+                  - row [ref=e165]:
+                    - columnheader "合同号" [ref=e166]
+                    - columnheader "别名" [ref=e167]
+                    - columnheader "文件数" [ref=e168]
+                    - columnheader "上传时间" [ref=e169]
+                    - columnheader "状态" [ref=e170]
+                    - columnheader "操作" [ref=e171]
+              - table [ref=e173]:
+                - rowgroup [ref=e181]:
+                  - row [ref=e182] [cursor=pointer]:
+                    - cell [ref=e183]:
+                      - strong [ref=e185]: UNKNOWN-a4e245e2
+                    - cell "UNKNOWN-a4e245e2" [ref=e186]
+                    - cell "2" [ref=e188]
+                    - cell "2026-08-19 06:29" [ref=e189]
+                    - cell "uploaded" [ref=e190]
+                    - cell [ref=e192]:
+                      - generic [ref=e193]:
+                        - button "查 看" [active] [ref=e195]
+                        - button "edit 归一化" [ref=e198]:
+                          - img "edit" [ref=e200]
+                          - generic [ref=e203]: 归一化
+                        - button "delete 删除" [ref=e205]:
+                          - img "delete" [ref=e207]
+                          - generic [ref=e210]: 删除
+          - generic [ref=e212]:
+            - generic [ref=e214]:
+              - generic [ref=e223]:
+                - strong [ref=e226]: UNKNOWN-a4e245e2
+                - generic [ref=e227]: uploaded
+              - button "thunderbolt 全部 OCR" [disabled] [ref=e230]:
+                - generic:
+                  - img "thunderbolt"
+                - generic: 全部 OCR
+            - generic [ref=e216]:
+              - generic [ref=e231]:
+                - generic [ref=e233]:
+                  - generic [ref=e234]: 合同号
+                  - strong [ref=e236]: UNKNOWN-a4e245e2
+                - generic [ref=e238]:
+                  - generic [ref=e239]: 别名
+                  - generic [ref=e240]: UNKNOWN-a4e245e2
+                - generic [ref=e244]:
+                  - generic [ref=e245]: 状态
+                  - generic [ref=e246]: uploaded
+              - generic [ref=e248]:
+                - generic [ref=e249]:
+                  - generic [ref=e250]:
+                    - strong [ref=e253]: "完成: 成功 2/2, 失败 0"
+                    - generic [ref=e254]: 批量 · completed
+                  - generic [ref=e256]: 进度 2/2 · 成功 2 · 失败 0
+                - progressbar [ref=e258]:
+                  - img "check-circle" [ref=e263]
+              - generic [ref=e270]:
+                - table [ref=e272]:
+                  - rowgroup [ref=e281]:
+                    - row [ref=e282]:
+                      - columnheader "文件名" [ref=e283]
+                      - columnheader "业务类型" [ref=e284]
+                      - columnheader "必备" [ref=e285]
+                      - columnheader "格式" [ref=e286]
+                      - columnheader "OCR" [ref=e287]
+                      - columnheader "印章" [ref=e288]
+                      - columnheader "操作" [ref=e289]
+                - table [ref=e291]:
+                  - rowgroup [ref=e300]:
+                    - row [ref=e301]:
+                      - cell "比对组.pdf" [ref=e302]
+                      - 'cell "订单 模型推测: 采购订单" [ref=e303]':
+                        - generic [ref=e304]:
+                          - generic [ref=e307] [cursor=pointer]:
+                            - combobox [ref=e309]
+                            - generic "订单" [ref=e310]
+                          - generic [ref=e311]: "模型推测: 采购订单"
+                      - cell "非必备" [ref=e312]
+                      - cell "PDF" [ref=e314]
+                      - cell "done" [ref=e316]
+                      - cell "无" [ref=e318]
+                      - cell [ref=e320]:
+                        - button "file-search OCR对照" [ref=e323] [cursor=pointer]:
+                          - img "file-search" [ref=e325]
+                          - generic [ref=e328]: OCR对照
+                    - row [ref=e329]:
+                      - cell "测试组.pdf" [ref=e330]
+                      - 'cell "订单 模型推测: purchase_order" [ref=e331]':
+                        - generic [ref=e332]:
+                          - generic [ref=e335] [cursor=pointer]:
+                            - combobox [ref=e337]
+                            - generic "订单" [ref=e338]
+                          - generic [ref=e339]: "模型推测: purchase_order"
+                      - cell "非必备" [ref=e340]
+                      - cell "PDF" [ref=e342]
+                      - cell "done" [ref=e344]
+                      - cell "无" [ref=e346]
+                      - cell [ref=e348]:
+                        - button "file-search OCR对照" [ref=e351] [cursor=pointer]:
+                          - img "file-search" [ref=e353]
+                          - generic [ref=e356]: OCR对照
