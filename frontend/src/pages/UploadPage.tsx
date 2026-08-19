@@ -310,7 +310,7 @@ export default function UploadPage() {
   const docColumns = [
     { title: '文件名', dataIndex: 'file_name', key: 'file_name', ellipsis: true },
     {
-      title: '业务类型', dataIndex: 'doc_type', key: 'doc_type', width: 180,
+      title: '文档类型', dataIndex: 'doc_type', key: 'doc_type', width: 180,
       render: (v: string, row: any) => {
         const inferred = (row.extracted_fields as Record<string, unknown>)?.['__inferred_doc_type__'] as string | undefined
         return (
