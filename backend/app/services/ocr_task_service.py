@@ -19,13 +19,50 @@ from typing import Optional
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from ..constants import DOC_OTHER
 from ..database import SessionLocal
-from ..models import Contract, Document, OcrTask
+from ..models import Contract, Document, DocumentType, OcrTask
+from .doc_normalizer import normalize_doc_type, resolve_field_aliases
 from .field_extraction_service import normalize_fields
-from .doc_normalizer import resolve_field_aliases
 from .ocr_service import process_document, resolve_field_template
 
 logger = logging.getLogger(__name__)
+
+
+def _apply_inferred_doc_type(db: Session, doc: Document, fields: dict) -> None:
+    """OCR 完成后自动关联模型推测的文档类型（仅当当前类型为「其他」时）。
+
+    规则：把模型推测的类型名（含显式别名）与已定义且激活（status=active）的
+    文档类型做精确匹配，命中则更新 doc.doc_type 并同步 is_required；
+    未命中任何已激活类型则保持原值，留给用户人工修改。
+    """
+    if doc.doc_type != DOC_OTHER:
+        return
+    inferred = (fields or {}).get("__inferred_doc_type__")
+    if not inferred:
+        return
+    # 轻量清洗：去掉常见 LLM 输出尾巴（句号/顿号/空白等），再做规范名映射
+    inferred_clean = str(inferred).strip().rstrip("。.，,、:：;； ")
+    if not inferred_clean:
+        return
+    canonical = normalize_doc_type(db, inferred_clean)
+    if not canonical:
+        return
+    active = db.execute(
+        select(DocumentType.name, DocumentType.is_required).where(
+            DocumentType.status == "active"
+        )
+    ).all()
+    active_map = {name: bool(is_required) for name, is_required in active}
+    if canonical in active_map and canonical != doc.doc_type:
+        doc.doc_type = canonical
+        doc.is_required = active_map[canonical]
+        logger.info(
+            "文档 %s 模型推测类型「%s」命中已激活类型，自动更新为「%s」",
+            doc.file_name,
+            inferred_clean,
+            canonical,
+        )
 
 
 # ============ 触发入口 ============
@@ -127,6 +164,8 @@ def _run_single_doc(task_id: uuid.UUID, doc_id: uuid.UUID) -> None:
             db=db,
         )
         if r.get("success"):
+            # OCR 完成后自动将模型推测类型关联到已激活的文档类型（命中则更新 doc_type）
+            _apply_inferred_doc_type(db, doc, r.get("fields", {}))
             doc.ocr_status = "done"
             doc.ocr_text = r.get("text", "")
             doc.has_stamp = r.get("has_stamp")
@@ -212,6 +251,8 @@ def _run_batch(task_id: uuid.UUID, doc_ids: list[uuid.UUID]) -> None:
                     db=db,
                 )
                 if r.get("success"):
+                    # OCR 完成后自动将模型推测类型关联到已激活的文档类型（命中则更新 doc_type）
+                    _apply_inferred_doc_type(db, doc, r.get("fields", {}))
                     doc.ocr_status = "done"
                     doc.ocr_text = r.get("text", "")
                     doc.has_stamp = r.get("has_stamp")
