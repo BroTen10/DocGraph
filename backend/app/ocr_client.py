@@ -1,4 +1,4 @@
-"""OCR 客户端封装（阿里云百炼 - 通义千问多模态，OpenAI 兼容端点）。
+"""OCR 客户端封装（DeepSeek 多模态，OpenAI 兼容端点）。
 
 一次调用完成：文字识别 + 印章检测 + 字段提取 + 语义理解。
 """
@@ -24,7 +24,7 @@ logger = logging.getLogger(__name__)
 
 
 class OCRClient:
-    """通义千问多模态 OCR 客户端（当前模型 qwen3.7-plus）。复用 LLMClient 的 OpenAI 兼容调用能力。"""
+    """DeepSeek 多模态 OCR 客户端。复用 LLMClient 的 OpenAI 兼容调用能力。"""
 
     def __init__(
         self,
@@ -33,7 +33,7 @@ class OCRClient:
         model: Optional[str] = None,
     ) -> None:
         self._client = LLMClient(
-            api_key=api_key or settings.ocr_api_key,
+            api_key=api_key or settings.effective_ocr_api_key,
             base_url=base_url or settings.ocr_base_url,
             model=model or settings.ocr_model_name,
         )
@@ -58,6 +58,7 @@ class OCRClient:
         fields_hint: Optional[str] = None,
         infer_hint: Optional[str] = None,
         infer_hint_free: Optional[str] = None,
+        layout_hint: Optional[str] = None,
     ) -> dict:
         """对单张图片执行 OCR + 印章检测 + 字段提取。
 
@@ -98,7 +99,7 @@ class OCRClient:
             infer_hint = infer_hint_free or OCR_IMAGE_INFER_HINT_FREE
 
         system_prompt = system_prompt or OCR_IMAGE_SYSTEM
-        user_prompt = f"{hint}{fields_hint}{infer_hint}请识别这张图片。"
+        user_prompt = f"{hint}{fields_hint}{infer_hint}{layout_hint or ''}请识别这张图片。"
 
         messages = [
             {"role": "system", "content": system_prompt},
@@ -115,10 +116,8 @@ class OCRClient:
             result = self._client.chat_json(
                 messages=messages,
                 temperature=0.1,
-                max_tokens=4096,
-                # 关闭思考模式：OCR 只需要直接输出，不需要推理过程，
-                # 可显著降低输出 token 与延迟（qwen3.7-plus 默认可能开启 thinking）。
-                enable_thinking=False,
+                max_tokens=8192,
+                disable_thinking=True,
             )
         except LLMError as e:
             logger.error("OCR 调用失败 %s: %s", image_path, e)

@@ -111,23 +111,33 @@ def run_import_task(
     异常会被捕获并写入 task.error，不会导致进程崩溃。
     """
     from ..database import SessionLocal
-    from .rule_document_import_service import extract_text_from_file
+    from .rule_document_import_service import extract_document_from_file
     from .rule_import_service import import_rules_with_skills
 
     db = SessionLocal()
     try:
         # 阶段 1：提取文本
         update_task(task, status="extracting", message="正在提取文档文本…")
-        text = extract_text_from_file(file_path, filename)
-        if not text or not text.strip():
+        document = extract_document_from_file(file_path, filename)
+        if not document.text or not document.text.strip():
             update_task(task, status="error", error="文件内容为空，无法提取规则文本")
             return
 
         # 阶段 2+3：解析 → 入库 → 冲突检测（带进度）
         update_task(task, status="parsing", message="正在调用大模型解析规则…")
         result = import_rules_with_skills(
-            db, task.rule_set_id, text, skill_ids=skill_ids, progress=task
+            db,
+            task.rule_set_id,
+            document.text,
+            skill_ids=skill_ids,
+            progress=task,
+            source_rows=document.source_rows,
+            source_meta={"filename": filename, **document.metadata},
         )
+        if document.warnings:
+            result["import_warnings"] = list(dict.fromkeys(
+                list(result.get("import_warnings") or []) + document.warnings
+            ))
         update_task(
             task,
             status="done",

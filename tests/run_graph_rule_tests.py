@@ -84,9 +84,12 @@ def create_rule_set(db, name: str) -> RuleSet:
 
 def insert_rules(db, rule_set_id) -> None:
     """灌入测试规则（直接写库，跳过 LLM 解析；结构字段保证图谱确定性转换）。"""
+    from app.services.rule_service import allocate_rule_no
+
     for spec in RULES:
         rule = Rule(
             rule_set_id=rule_set_id,
+            rule_no=allocate_rule_no(db, rule_set_id),
             doc_type=spec["doc_type"],
             check_category=spec["check_category"],
             rule_text=spec["rule_text"],

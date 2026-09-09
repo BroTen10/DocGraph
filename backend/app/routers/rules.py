@@ -179,10 +179,10 @@ def detect_conflicts(
     rule_set_id: uuid.UUID = Query(..., description="规则集 ID"),
     db: Session = Depends(get_db),
 ) -> ConflictDetectionResponse:
-    """检测指定规则集内所有启用规则的语义冲突。
+    """检测指定规则集内所有规则的语义冲突。
 
     按 (doc_type, check_category) 分组后逐组用 LLM 检测矛盾关系，
-    结果写入各规则的 defects 字段，并返回冲突报告。
+    结果写入各规则的 defects 字段，并将受影响规则回落到待确认/禁用，返回冲突报告。
     """
     result = rule_conflict_detector.run_conflict_detection(db, str(rule_set_id))
     return ConflictDetectionResponse(**result)

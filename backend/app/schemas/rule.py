@@ -16,7 +16,9 @@ class DefectItem(BaseModel):
     severity: str = Field(description="严重程度：error|warning|info")
     description: str = Field(description="问题描述")
     rule_index: int | None = Field(default=None, description="对应 rules 数组中的索引")
+    rule_code: str | None = Field(default=None, description="所属规则流水号，如 R0001")
     related_rule_ids: list[str] | None = Field(default=None, description="关联的冲突规则 ID")
+    related_rule_codes: list[str] | None = Field(default=None, description="关联的冲突规则流水号")
 
 
 class RuleBase(BaseModel):
@@ -88,6 +90,9 @@ class RuleImportResponse(BaseModel):
     conflict_report: ConflictReport | None = None
     # 批次 10：本次导入新发现的文件类型（前端据此提示用户做样本分析）
     new_doc_types: list[str] = Field(default_factory=list)
+    # 表格行覆盖率与导入告警（合并单元格展开/漏行/来源行校验）
+    import_warnings: list[str] = Field(default_factory=list)
+    source_coverage: dict[str, Any] | None = None
 
 
 class RuleOut(RuleBase):
@@ -95,6 +100,8 @@ class RuleOut(RuleBase):
 
     id: UUID
     rule_set_id: UUID
+    rule_no: int
+    rule_code: str
     status: str
     confidence: float | None = None
     defects: list[DefectItem] = Field(default_factory=list)
@@ -118,6 +125,7 @@ class RuleBatchConfirmRequest(BaseModel):
 class ConflictItem(BaseModel):
     """规则间冲突项。"""
     rule_ids: list[str] = Field(description="参与冲突的规则 ID 列表")
+    rule_codes: list[str] = Field(default_factory=list, description="参与冲突的规则流水号列表")
     type: str = Field(description="冲突类型")
     severity: str = Field(description="严重程度")
     description: str = Field(description="冲突描述")

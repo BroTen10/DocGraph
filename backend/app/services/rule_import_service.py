@@ -7,12 +7,14 @@
      doc_type / check_category 为可选派生标签（缺失时由结构断言/scope/intents 推导）
    - ontology 登记新文件类型/字段/检查意图
 3. 校验放宽：rule_text 与 structure.assertion 至少其一存在
-4. 规则集内语义级去重（按文本相似度 + 结构化断言签名），合并后批量写入 rules 表
+4. 规则集内语义级去重（scope/condition/exceptions 边界 + 文本相似度 + 结构化断言签名），
+   合并后批量写入 rules 表
 5. 新文档类型注册为 pending_review（key_fields 由 ontology.fields 预填），返回导入结果
 """
 
 from __future__ import annotations
 
+import copy
 import logging
 import re
 import uuid
@@ -56,6 +58,7 @@ _SYSTEM_PROMPT = """你是单证审查规则解析助手。任务：把用户提
       "check_category": "主检查项（可选派生标签，见规则2）",
       "scope": {"doc_types": ["涉及的多个文件类型"] 或 "ALL"（整批合同/全部文件）或 null, "intents": ["检查意图列表"]},
       "rule_text": "规则文本（简洁、可执行的自然语言描述）",
+      "source_ref": "来源行引用（如 规则!2；仅当输入行带 [SOURCE_ROW=...] 时填写，否则省略）",
       "structure": {
         "condition": {"text": "触发条件原文或null", "field": "条件涉及字段名或null", "operator": "等于/包含于等或null", "value": "条件取值或null"},
         "assertion": {
@@ -103,6 +106,9 @@ _SYSTEM_PROMPT = """你是单证审查规则解析助手。任务：把用户提
 9. confidence 反映你对这条规则确信程度：规则描述非常清楚、无歧义则接近 1.0；含模糊表述（如"部分情况""一般""可能"）则适当降低；完全不确定或不合理则为 0.0
 10. 为减少输出体积，值为 null 的字段省略不输出（客户端自动补全），confidence 字段值为 1.0 时同理省略；defects 无缺陷时整个数组省略；ontology 无新概念时省略
 11. 紧凑输出（防止长清单被 max_tokens 截断）：rules 数组按"每行一条规则"输出、逗号分隔，不输出多余空行、注释或解释文字；structure/tolerance 仅在有内容时输出
+12. 输入行若带 `[SOURCE_ROW=...]`，该行是一个独立的规则候选：必须逐行解析，并在输出中原样回填 `source_ref`；禁止因为多行规则描述相似而把不同行合并成一条
+13. 表格行中的“文件类型/单据类型/适用单据”等列必须写入该规则的 scope；多行共享同一合并单元格时，该合并值已经展开到每个数据行，必须逐行继承
+14. 表格行中的“业务条件/场景/模式”等条件列必须写入 structure.condition；描述相似但 scope 或 condition 不同的规则必须分别输出，禁止合并
 
 ### 缺陷检测指令
 对每条被解析的规则，执行以下检查，将结果填入 `defects` 数组：
@@ -119,6 +125,7 @@ _SYSTEM_PROMPT = """你是单证审查规则解析助手。任务：把用户提
 - missing_value：缺少关键数值参数
 - contradiction：规则间存在矛盾
 - uncertainty：存在理解上的不确定
+- description 禁止写“规则0/规则1”等数组序号；如需引用其他规则，请引用规则原文。系统入库后会补充规则流水号。
 
 severity 说明：
 - error：大概率有问题的规则，需要用户处理
@@ -135,7 +142,14 @@ _USER_PROMPT_TEMPLATE = """已知文件类型（建议复用，不强制；规�
 {raw_text}
 ---
 
-请输出 JSON。"""
+若输入行带 `[SOURCE_ROW=...]`，请逐行解析并原样回填 source_ref。请输出 JSON。"""
+
+
+_TABLE_ROW_SYSTEM_ADDITION = """### 表格行解析约束（系统注入，优先于其他提示词）
+- 输入中每行 `[SOURCE_ROW=...]` 代表一个独立的规则候选，必须逐行解析并原样回填 `source_ref`。
+- 禁止因为多行规则描述相似而把不同行合并成一条规则。
+- 行内的文件类型/单据类型/适用单据字段写入 scope；业务条件/场景/模式字段写入 structure.condition。
+- 合并单元格的值已经展开到每个数据行；描述相似但 scope、condition 或 exceptions 不同的规则必须分别输出。"""
 
 
 # 单次 LLM 调用允许的最大输入文本长度（字符）。超过则分段解析，避免输出截断。
@@ -178,6 +192,14 @@ def _split_text(text: str, max_chars: int = _MAX_CHUNK_CHARS) -> list[str]:
                 for line in para.split("\n"):
                     line = line.strip()
                     if not line:
+                        continue
+                    # 表格行是带 source_ref 的 JSON，宁可单行超长也不要按分隔符拆坏。
+                    if line.startswith("[SOURCE_ROW="):
+                        if len(buf) + len(line) + 1 <= max_chars:
+                            buf = (buf + "\n" + line) if buf else line
+                        else:
+                            flush()
+                            buf = line
                         continue
                     if len(line) > max_chars:
                         # 批次 4-1：表格行超长时优先按单元格分隔符 '|' 切（不切断单元格内容）
@@ -226,6 +248,69 @@ def _text_similarity(a: str, b: str) -> float:
     return len(set_a & set_b) / len(set_a | set_b)
 
 
+def _freeze_value(value: Any) -> Any:
+    """把 scope/condition/exceptions 转为可比较的稳定结构。"""
+    if value is None:
+        return ()
+    if isinstance(value, str):
+        normalized = " ".join(value.split()).strip().lower()
+        return normalized or ()
+    if isinstance(value, dict):
+        items = []
+        for key in sorted(value):
+            frozen = _freeze_value(value.get(key))
+            if frozen != ():
+                items.append((str(key), frozen))
+        return tuple(items)
+    if isinstance(value, (list, tuple)):
+        return tuple(
+            frozen
+            for item in value
+            for frozen in (_freeze_value(item),)
+            if frozen != ()
+        )
+    return value
+
+
+def _scope_key(scope: dict | None) -> tuple:
+    """提取 scope 的文档类型边界，不把 intents 纳入去重身份。"""
+    if not isinstance(scope, dict):
+        return ("__MISSING__",)
+    doc_types = scope.get("doc_types")
+    if doc_types == "ALL":
+        return ("ALL",)
+    if isinstance(doc_types, list):
+        names = tuple(sorted({
+            str(name).strip().lower()
+            for name in doc_types
+            if str(name).strip()
+        }))
+        return names or ("__EMPTY__",)
+    if isinstance(doc_types, str):
+        name = doc_types.strip().lower()
+        if name in ("all", "整批", "全部"):
+            return ("ALL",)
+        return (name,) if name else ("__EMPTY__",)
+    return ("__EMPTY__",)
+
+
+def _semantic_context_signature(
+    structure: dict | None,
+    scope: dict | None,
+) -> tuple:
+    """去重身份中的适用范围：scope + condition + exceptions。
+
+    同一描述但文件类型/业务条件/例外不同的规则必须保留为独立规则，不能靠
+    文本相似度直接合并。
+    """
+    structure = structure or {}
+    return (
+        _scope_key(scope),
+        _freeze_value(structure.get("condition")),
+        _freeze_value(structure.get("exceptions") or []),
+    )
+
+
 def _structure_signature(structure: dict | None) -> tuple | None:
     """提取结构化断言的特征签名（operator + source/target 的 doc_type/field）。
     用于跨标签识别同一条规则（批次 10：语义级去重）。"""
@@ -252,14 +337,20 @@ def _find_similar_rule(
     existing_rules: list,
     threshold: float = 0.75,
     new_structure: dict | None = None,
+    new_scope: dict | None = None,
 ):
     """在规则集内查找与新规则高度相似的规则（批次 10：不再按格子分组）。
     匹配策略：
+    0. 先要求 scope + condition + exceptions 的语义边界一致；
     1. 文本相似度 >= threshold 直接命中；
     2. 结构化断言签名一致（operator + 源/目标类型与字段）且文本相似度 >= 0.6 也命中。
     """
     new_sig = _structure_signature(new_structure)
+    new_context = _semantic_context_signature(new_structure, new_scope)
     for rule in existing_rules:
+        old_context = _semantic_context_signature(rule.structure, rule.scope)
+        if old_context != new_context:
+            continue
         existing_normed = _normalize_text(rule.rule_text)
         sim = _text_similarity(new_normed, existing_normed)
         if sim >= threshold:
@@ -355,6 +446,19 @@ def _merge_ontology(target: dict, source: dict) -> None:
             target[key].append(x)
 
 
+def _merge_missing_structure(base: dict | None, incoming: dict | None) -> dict:
+    """递归合并结构字段：保留已有值，仅用新值补齐缺失项。"""
+    merged = copy.deepcopy(base) if isinstance(base, dict) else {}
+    if not isinstance(incoming, dict):
+        return merged
+    for key, value in incoming.items():
+        if key not in merged or merged[key] in (None, "", [], {}):
+            merged[key] = copy.deepcopy(value)
+        elif isinstance(merged[key], dict) and isinstance(value, dict):
+            merged[key] = _merge_missing_structure(merged[key], value)
+    return merged
+
+
 def _merge_into_existing(
     db,
     existing_rule,
@@ -367,6 +471,7 @@ def _merge_into_existing(
     new_intents: list[str] | None = None,
     new_doc_type: str | None = None,
     new_check_category: str | None = None,
+    new_structure: dict | None = None,
 ) -> int:
     """将新规则合并到已有规则中。返回合并的字段数。
 
@@ -378,6 +483,7 @@ def _merge_into_existing(
     - priority: 保留较小的（更优先）
     - scope/intents: 并集合并
     - doc_type/check_category: 旧值为空时补全（批次 10）
+    - structure: 仅在语义边界一致时补齐缺失字段（由调用方保证）
     """
     changes = 0
 
@@ -422,6 +528,14 @@ def _merge_into_existing(
             existing_rule.intents = merged_ints
             changes += 1
 
+    # structure：补齐已有规则缺失的条件/断言/例外字段。
+    if new_structure:
+        old_structure = existing_rule.structure or {}
+        merged_structure = _merge_missing_structure(old_structure, new_structure)
+        if merged_structure != old_structure:
+            existing_rule.structure = merged_structure
+            changes += 1
+
     # confidence: 取较高值
     if new_confidence is not None:
         old_conf = existing_rule.confidence
@@ -451,20 +565,30 @@ def _merge_into_existing(
     # defects: 去重合并
     old_defects = existing_rule.defects or []
     old_keys = {(d.get("type"), d.get("description")) for d in old_defects}
+    added_real_defect = False
     for d in (new_defects or []):
+        d = dict(d)
+        d["rule_code"] = getattr(existing_rule, "rule_code", None)
         key = (d.get("type"), d.get("description"))
         if key not in old_keys:
             old_defects.append(d)
             old_keys.add(key)
             changes += 1
+            if d.get("severity") in ("error", "warning"):
+                added_real_defect = True
     if changes > 0:
         existing_rule.defects = old_defects
-        # 重新评估规则健康状态：合并后如果仍有缺陷，保持 pending/disabled
+        # 重新评估规则健康状态：新并入实质缺陷时回落到待确认/禁用。
         has_defects = any(
             d.get("severity") in ("error", "warning")
             for d in old_defects
         )
-        if not has_defects and existing_rule.status != "confirmed":
+        if added_real_defect:
+            existing_rule.status = "pending"
+            existing_rule.enabled = False
+            existing_rule.confirmed_at = None
+            existing_rule.confirmed_by = None
+        elif not has_defects and existing_rule.status != "confirmed":
             existing_rule.status = "confirmed"
             existing_rule.enabled = True
             changes += 1
@@ -539,10 +663,80 @@ def _known_check_categories(db: Session, rule_set_id: uuid.UUID) -> list[str]:
     return names
 
 
+_SOURCE_REF_RE = re.compile(r"\[SOURCE_ROW=([^\]\n]+)\]")
+
+
+def _source_refs_in_text(text: str) -> list[str]:
+    """提取一个 chunk 中出现的来源行引用（用于 LLM 未回填 source_ref 时兜底）。"""
+    return [match.group(1).strip() for match in _SOURCE_REF_RE.finditer(text or "")]
+
+
+def _resolve_source_ref(raw_ref: Any, source_row_map: dict[str, dict]) -> str:
+    """把 LLM 返回的 source_ref/source_row 归一为 source_ref。"""
+    raw = str(raw_ref or "").strip().strip("[]")
+    if not raw:
+        return ""
+    if raw.upper().startswith("SOURCE_ROW="):
+        raw = raw.split("=", 1)[1].strip()
+    if raw in source_row_map:
+        return raw
+    if raw.isdigit():
+        matches = [
+            ref
+            for ref, row in source_row_map.items()
+            if str(row.get("row")) == raw
+        ]
+        if len(matches) == 1:
+            return matches[0]
+    return raw
+
+
+def _compute_source_coverage(
+    source_rows: list[dict[str, Any]],
+    covered_refs: set[str],
+) -> tuple[dict[str, Any] | None, list[str]]:
+    """计算源表行覆盖率，返回 (coverage, warnings)。"""
+    expected_refs = {
+        str(row.get("source_ref") or "").strip()
+        for row in source_rows
+        if str(row.get("source_ref") or "").strip()
+    }
+    if not expected_refs:
+        return None, []
+
+    missing = sorted(expected_refs - covered_refs)
+    unexpected = sorted(covered_refs - expected_refs)
+    warnings: list[str] = []
+    if missing:
+        preview = "、".join(missing[:10])
+        suffix = " 等" if len(missing) > 10 else ""
+        warnings.append(
+            f"源表有 {len(missing)} 行未解析出规则（{preview}{suffix}），可能存在漏行或错误合并"
+        )
+    if unexpected:
+        preview = "、".join(unexpected[:10])
+        suffix = " 等" if len(unexpected) > 10 else ""
+        warnings.append(
+            f"LLM 返回了 {len(unexpected)} 个不存在的来源行（{preview}{suffix}）"
+        )
+    if not covered_refs:
+        warnings.append("LLM 未返回任何来源行引用，无法校验规则行覆盖率")
+
+    coverage = {
+        "expected_rows": len(expected_refs),
+        "covered_rows": len(expected_refs & covered_refs),
+        "missing_rows": missing,
+        "unexpected_rows": unexpected,
+    }
+    return coverage, warnings
+
+
 def import_rules_from_text(
     db: Session, rule_set_id: uuid.UUID, raw_text: str,
     directive: RuleParseDirective | None = None,
     progress: ImportProgress | None = None,
+    source_rows: list[dict[str, Any]] | None = None,
+    source_meta: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """从自然语言规则清单文本批量导入规则。
 
@@ -551,6 +745,8 @@ def import_rules_from_text(
         rule_set_id: 规则集 ID（导入规则归到该规则集下）
         raw_text: 自然语言规则清单文本
         directive: Skill 编译后的解析指令（可选），指定后应用预处理/字段映射/默认值等
+        source_rows: 结构化来源行（Excel 等表格格式），用于来源追溯与覆盖率校验
+        source_meta: 来源文件元数据（文件名、提取器信息等）
 
     Returns:
         {"total": 解析总数, "imported": 入库成功数, "skipped": 跳过数, "rules": [入库的规则],
@@ -559,6 +755,15 @@ def import_rules_from_text(
     raw_text = (raw_text or "").strip()
     if not raw_text:
         raise ValueError("规则清单文本为空")
+
+    source_rows = source_rows or []
+    source_row_map = {
+        str(row.get("source_ref") or "").strip(): row
+        for row in source_rows
+        if str(row.get("source_ref") or "").strip()
+    }
+    covered_source_refs: set[str] = set()
+    source_warnings: list[str] = []
 
     # 应用文本预处理（如果指定了 directive）
     if directive:
@@ -578,8 +783,10 @@ def import_rules_from_text(
     all_defects: list[dict] = []  # 收集所有段的 defects
     chunk_errors: list[str] = []
     rule_chunks: list[int] = []  # 每条 raw_rule 所属分段（用于 provenance）
+    rule_chunk_source_refs: list[list[str]] = []  # 每条 raw_rule 所属分段中的来源行引用
     ontology: dict[str, list] = {"doc_types": [], "fields": [], "check_intents": []}
     for idx, chunk in enumerate(chunks, start=1):
+        chunk_source_refs = _source_refs_in_text(chunk)
         user_prompt = get_prompt(db, "rule_import.user").format(
             doc_types=doc_types_str,
             check_categories=check_categories_str,
@@ -587,6 +794,8 @@ def import_rules_from_text(
         )
         # 构建动态 System Prompt（附加 Skill 指令 + 领域上下文）
         system_content = get_prompt(db, "rule_import.system")
+        if source_rows:
+            system_content += "\n\n" + _TABLE_ROW_SYSTEM_ADDITION
         if directive:
             if directive.prompt_additions:
                 system_content += "\n\n### 用户自定义解析指令\n" + "\n".join(f"- {a}" for a in directive.prompt_additions)
@@ -610,6 +819,7 @@ def import_rules_from_text(
                 ],
                 temperature=0.1,
                 max_tokens=8192,
+                disable_thinking=True,
             )
         except (LLMError, ValueError) as e:
             logger.error("规则导入 第 %d/%d 段 LLM 解析失败: %s", idx, len(chunks), e)
@@ -631,6 +841,7 @@ def import_rules_from_text(
                 if isinstance(r, dict):
                     raw_rules.append(r)
                     rule_chunks.append(idx)
+                    rule_chunk_source_refs.append(list(chunk_source_refs))
             # 收集 ontology（新文件类型/字段/检查意图）
             ont = resp.get("ontology")
             if isinstance(ont, dict):
@@ -776,10 +987,33 @@ def import_rules_from_text(
                 "description": d.get("description", ""),
             })
 
-        # 来源追溯（批次 10）
+        # 来源追溯（批次 10 / 表格行级）
+        raw_source_ref = item.get("source_ref") or item.get("source_row")
+        source_ref = _resolve_source_ref(raw_source_ref, source_row_map)
+        chunk_refs = (
+            rule_chunk_source_refs[i - 1]
+            if i - 1 < len(rule_chunk_source_refs)
+            else []
+        )
+        if not source_ref and len(chunk_refs) == 1:
+            source_ref = chunk_refs[0]
+        source_row = source_row_map.get(source_ref) if source_ref else None
+        if source_ref:
+            covered_source_refs.add(source_ref)
+            if source_row_map and source_row is None:
+                source_warnings.append(
+                    f"第 {i} 条规则返回了不存在的来源行 {source_ref}"
+                )
+
         provenance: dict[str, Any] | None = {
             "chunk_index": rule_chunks[i - 1] if i - 1 < len(rule_chunks) else None,
             "text": rule_text[:200],
+            "source_ref": source_ref or None,
+            "source_file": (source_meta or {}).get("filename"),
+            "sheet": (source_row or {}).get("sheet"),
+            "row": (source_row or {}).get("row"),
+            "row_values": (source_row or {}).get("values"),
+            "merged_from": (source_row or {}).get("merged_from"),
         }
 
         # ----- 2. 规则集内语义去重+智能合并（批次 10：不再按 (doc_type, check_category) 格子分组）-----
@@ -787,17 +1021,27 @@ def import_rules_from_text(
         existing_rules = db.execute(
             select(Rule).where(Rule.rule_set_id == rule_set_id)
         ).scalars().all()
-        dup_rule = _find_similar_rule(rule_text, normed, existing_rules, new_structure=structure)
+        dup_rule = _find_similar_rule(
+            rule_text,
+            normed,
+            existing_rules,
+            new_structure=structure,
+            new_scope=scope,
+        )
         if dup_rule:
             merged_count = _merge_into_existing(
                 db, dup_rule, rule_text, confidence, tolerance, priority, clean_defects,
                 new_scope=scope, new_intents=intents,
                 new_doc_type=doc_type or None, new_check_category=check_category or None,
+                new_structure=structure,
             )
             label = f"{doc_type or '整批/全部'}/{check_category or '未分类'}"
             logger.info("同集合并: [%s] %s... -> %s (合并数=%d)",
                         label, rule_text[:40], dup_rule.id, merged_count)
-            skipped_detail = f"第 {i} 条：与已有规则 [{label}] 相似，已自动合并（{rule_text[:30]}...）"
+            skipped_detail = (
+                f"第 {i} 条：与已有规则 {dup_rule.rule_code} [{label}] 相似，"
+                f"已自动合并（{rule_text[:30]}...）"
+            )
             errors.append(skipped_detail)
             continue
 
@@ -833,6 +1077,8 @@ def import_rules_from_text(
             )
             rule_out = create_rule(db, rule_set_id, payload)
             rule_dict = rule_out.model_dump(mode="json")
+            rule_dict["source_ref"] = source_ref or None
+            rule_dict["source_row"] = (source_row or {}).get("row")
             # 原文对照：记录该规则来源的分段原文，供前端"原文 ↔ 解析结果"视图
             ci = rule_chunks[i - 1] if i - 1 < len(rule_chunks) else None
             if isinstance(ci, int) and 0 <= ci - 1 < len(chunks):
@@ -959,6 +1205,11 @@ def import_rules_from_text(
         defects=all_clean_defects,
     )
 
+    source_coverage, coverage_warnings = _compute_source_coverage(
+        source_rows, covered_source_refs
+    )
+    import_warnings = list(dict.fromkeys(source_warnings + coverage_warnings))
+
     return {
         "total": len(raw_rules),
         "imported": len(imported),
@@ -967,6 +1218,8 @@ def import_rules_from_text(
         "errors": errors,
         "conflict_report": conflict_report.model_dump(mode="json") if conflict_report.total_defects > 0 else None,
         "new_doc_types": list(new_doc_types),
+        "import_warnings": import_warnings,
+        "source_coverage": source_coverage,
     }
 
 
@@ -976,6 +1229,8 @@ def import_rules_with_skills(
     raw_text: str,
     skill_ids: list[uuid.UUID] | None = None,
     progress: ImportProgress | None = None,
+    source_rows: list[dict[str, Any]] | None = None,
+    source_meta: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """从文本导入规则，自动加载并应用 Skill。
 
@@ -986,6 +1241,8 @@ def import_rules_with_skills(
         rule_set_id: 规则集 ID
         raw_text: 规则文本
         skill_ids: 指定应用的 Skill ID，不传则使用该规则集所有已启用的 Skill
+        source_rows: 结构化来源行（Excel 等表格格式）
+        source_meta: 来源文件元数据
 
     Returns:
         同 import_rules_from_text 的返回
@@ -1015,7 +1272,15 @@ def import_rules_with_skills(
         from .rule_parse_engine import compile_directive
         directive = compile_directive(db, rule_set_id)
 
-    result = import_rules_from_text(db, rule_set_id, raw_text, directive=directive, progress=progress)
+    result = import_rules_from_text(
+        db,
+        rule_set_id,
+        raw_text,
+        directive=directive,
+        progress=progress,
+        source_rows=source_rows,
+        source_meta=source_meta,
+    )
 
     # 导入完成后自动触发冲突检测
     if result.get("imported", 0) > 0:

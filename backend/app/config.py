@@ -51,13 +51,14 @@ class Settings(BaseSettings):
     # LLM (DeepSeek, OpenAI 兼容)
     llm_api_key: str = ""
     llm_base_url: str = "https://api.deepseek.com/v1"
-    llm_model_name: str = "deepseek-chat"
+    llm_model_name: str = "deepseek-v4.1-flash-expires-on-0910"
     llm_confidence_threshold: float = 0.9
 
-    # OCR (阿里云百炼 通义千问多模态，OpenAI 兼容端点)
+    # OCR (DeepSeek 多模态，OpenAI 兼容端点)
+    # OCR_API_KEY 留空时自动复用 LLM_API_KEY。
     ocr_api_key: str = ""
-    ocr_base_url: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
-    ocr_model_name: str = "qwen3.7-plus"
+    ocr_base_url: str = "https://api.deepseek.com/v1"
+    ocr_model_name: str = "deepseek-v4.1-flash-expires-on-0910"
 
     # 审查容差默认值
     allow_same_day_receive_pay: bool = True
@@ -79,6 +80,11 @@ class Settings(BaseSettings):
     @property
     def neo4j_auth(self) -> tuple[str, str]:
         return (self.neo4j_user, self.neo4j_password)
+
+    @property
+    def effective_ocr_api_key(self) -> str:
+        """OCR Key：优先使用 OCR_API_KEY，未配置时复用 DeepSeek LLM Key。"""
+        return self.ocr_api_key or self.llm_api_key
 
     def ensure_upload_root(self) -> Path:
         p = Path(self.upload_root)

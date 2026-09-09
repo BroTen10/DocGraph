@@ -43,6 +43,8 @@ class Document(Base):
     has_stamp: Mapped[bool | None] = mapped_column(nullable=True)
     # 原始 OCR 文本（用于审查推理）
     ocr_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # OCR 文本行坐标（归一化 bbox，用于扫描 PDF/图片的前端高亮定位）
+    ocr_layout: Mapped[dict] = mapped_column(JSONB, default=dict, nullable=False)
     # 提取时间
     extracted_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[datetime] = mapped_column(

@@ -9,7 +9,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 
-from sqlalchemy import Boolean, DateTime, String, Text, func
+from sqlalchemy import Boolean, DateTime, Integer, String, Text, func
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -44,6 +44,10 @@ class RuleSet(Base):
     # 是否默认规则集（同一时刻只能有一个默认）
     is_default: Mapped[bool] = mapped_column(
         Boolean, default=False, nullable=False, index=True
+    )
+    # 下一个可分配的规则流水号（删除规则后也不回退，避免编号复用）
+    next_rule_no: Mapped[int] = mapped_column(
+        Integer, default=1, nullable=False
     )
     created_at: Mapped[datetime] = mapped_column(
         DateTime, server_default=func.now(), nullable=False

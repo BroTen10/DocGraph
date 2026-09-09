@@ -1,0 +1,51 @@
+name: docgraph
+
+services:
+  postgres:
+    image: public.ecr.aws/docker/library/postgres:16-alpine
+    container_name: doc-review-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${PG_DB:-doc_review}
+      POSTGRES_USER: ${PG_USER:-postgres}
+      POSTGRES_PASSWORD: ${PG_PASSWORD:-postgres}
+      TZ: Asia/Shanghai
+    ports:
+      - "${PG_PORT:-15432}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  neo4j:
+    image: public.ecr.aws/docker/library/neo4j:5.26.0-community
+    container_name: doc-review-neo4j
+    restart: unless-stopped
+    environment:
+      NEO4J_AUTH: ${NEO4J_USER:-neo4j}/${NEO4J_PASSWORD:-neo4jpassword}
+      HEALTHCHECK_USER: ${NEO4J_USER:-neo4j}
+      HEALTHCHECK_PASSWORD: ${NEO4J_PASSWORD:-neo4jpassword}
+      NEO4J_server_memory_heap_initial__size: 512m
+      NEO4J_server_memory_heap_max__size: 1G
+      NEO4J_server_memory_pagecache_size: 512m
+      TZ: Asia/Shanghai
+    ports:
+      - "7474:7474"
+      - "${NEO4J_BOLT_PORT:-17687}:7687"
+    volumes:
+      - neo4j_data:/data
+      - neo4j_logs:/logs
+    healthcheck:
+      test: ["CMD-SHELL", "cypher-shell -a bolt://localhost:7687 -u $$HEALTHCHECK_USER -p $$HEALTHCHECK_PASSWORD 'RETURN 1' >/dev/null 2>&1"]
+      interval: 10s
+      timeout: 10s
+      retries: 20
+      start_period: 30s
+
+volumes:
+  postgres_data:
+  neo4j_data:
+  neo4j_logs:

@@ -4,7 +4,7 @@
 - 单文档触发 (scope=single_doc)
 - 合同级批量触发 (scope=contract_batch)
 
-OCR 调用通义千问 VL，单页耗时 10-60 秒，必须异步后台执行。
+OCR 调用 DeepSeek 多模态模型，单页耗时 10-60 秒，必须异步后台执行。
 后台线程使用独立 SessionLocal()，不复用请求 session，避免连接冲突。
 """
 
@@ -170,6 +170,7 @@ def _run_single_doc(task_id: uuid.UUID, doc_id: uuid.UUID) -> None:
             doc.ocr_text = r.get("text", "")
             doc.has_stamp = r.get("has_stamp")
             doc.ocr_confidence = r.get("confidence", 0.0)
+            doc.ocr_layout = r.get("layout", {}) or {}
             doc.extracted_fields = normalize_fields(
                 doc.doc_type,
                 r.get("fields", {}),
@@ -257,6 +258,7 @@ def _run_batch(task_id: uuid.UUID, doc_ids: list[uuid.UUID]) -> None:
                     doc.ocr_text = r.get("text", "")
                     doc.has_stamp = r.get("has_stamp")
                     doc.ocr_confidence = r.get("confidence", 0.0)
+                    doc.ocr_layout = r.get("layout", {}) or {}
                     doc.extracted_fields = normalize_fields(
                         doc.doc_type,
                         r.get("fields", {}),

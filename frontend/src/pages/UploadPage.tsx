@@ -262,8 +262,8 @@ export default function UploadPage() {
   const openCompare = async (doc: DocumentBrief) => {
     setCompareDoc(doc)
     setCompareOpen(true)
-    // 若文档已有 OCR 文本则直接展示；否则请求后端获取最新 OCR
-    if (!doc.ocr_text && doc.ocr_status === 'done') {
+    // 坐标数据可能是在列表加载后才生成；缺失时始终拉取最新 OCR 详情。
+    if (doc.ocr_status === 'done' && (!doc.ocr_text || !doc.ocr_layout?.pages?.length)) {
       setCompareLoading(true)
       try {
         const fresh = await contractsApi.getOcr(doc.id)
@@ -345,7 +345,7 @@ export default function UploadPage() {
       render: (v: boolean | null) => v === true ? <Tag color="green">有</Tag> : v === false ? <Tag color="red">无</Tag> : <Tag color="gold">未验</Tag>,
     },
     {
-      title: '操作', key: 'action', width: 180, align: 'center' as const,
+      title: '操作', key: 'action', width: 220, align: 'center' as const,
       render: (_: unknown, row: DocumentBrief) => (
         <Space size={4}>
           {row.ocr_status !== 'done' && (
@@ -370,6 +370,17 @@ export default function UploadPage() {
             >
               OCR对照
             </Button>
+          )}
+          {row.ocr_status === 'done' && !row.ocr_layout?.pages?.length && (
+            <Tooltip title="重新 OCR（生成定位坐标）">
+              <Button
+                size="small"
+                type="link"
+                icon={<ReRunIcon />}
+                onClick={() => triggerDocOcr(row.id, row.file_name)}
+                disabled={docOcrLoading[row.id]}
+              />
+            </Tooltip>
           )}
         </Space>
       ),

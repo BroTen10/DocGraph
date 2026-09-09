@@ -1,5 +1,6 @@
 """Postgres 数据库连接与 SQLAlchemy 会话管理。"""
 
+import json
 import logging
 from collections.abc import Generator
 
@@ -79,6 +80,8 @@ def init_db() -> None:
 
     # 增量迁移：新增列与表（create_all 不处理已有表的列变更）
     _run_migrations(engine)
+    # 规则流水号回填与存量提示清洗
+    _migrate_rule_numbering()
     # 种子数据：内置默认 Skill + 文档类型
     _seed_builtin_skill()
     _seed_doc_types()
@@ -114,11 +117,147 @@ def _run_migrations(engine) -> None:
         # 批次 11：文档类型显式别名（写时归一）
         "ALTER TABLE document_types ADD COLUMN IF NOT EXISTS aliases JSONB NOT NULL DEFAULT '[]'::jsonb;",
         "ALTER TABLE document_types ADD COLUMN IF NOT EXISTS field_aliases JSONB NOT NULL DEFAULT '{}'::jsonb;",
+        # OCR 文本行坐标：扫描 PDF/图片在原件上的高亮定位
+        "ALTER TABLE documents ADD COLUMN IF NOT EXISTS ocr_layout JSONB NOT NULL DEFAULT '{}'::jsonb;",
+        # 规则流水号：规则集内单调递增，对外展示为 R0001/R0002
+        "ALTER TABLE rules ADD COLUMN IF NOT EXISTS rule_no INTEGER;",
+        "ALTER TABLE rule_sets ADD COLUMN IF NOT EXISTS next_rule_no INTEGER NOT NULL DEFAULT 1;",
+        """
+        WITH numbered AS (
+            SELECT id,
+                   ROW_NUMBER() OVER (
+                       PARTITION BY rule_set_id
+                       ORDER BY created_at, id
+                   ) AS rn
+            FROM rules
+            WHERE rule_no IS NULL OR rule_no <= 0
+        )
+        UPDATE rules AS r
+        SET rule_no = numbered.rn
+        FROM numbered
+        WHERE r.id = numbered.id;
+        """,
+        "ALTER TABLE rules ALTER COLUMN rule_no SET NOT NULL;",
+        "CREATE UNIQUE INDEX IF NOT EXISTS uq_rules_rule_set_rule_no ON rules (rule_set_id, rule_no);",
+        """
+        UPDATE rule_sets AS rs
+        SET next_rule_no = GREATEST(
+            COALESCE(rs.next_rule_no, 1),
+            COALESCE((
+                SELECT MAX(r.rule_no) + 1
+                FROM rules AS r
+                WHERE r.rule_set_id = rs.id
+            ), 1)
+        );
+        """,
     ]
     with engine.begin() as conn:
         for sql in migrations:
             conn.execute(text(sql))
     logger.info("增量迁移完成: %d 条", len(migrations))
+
+
+def _migrate_rule_numbering() -> None:
+    """回填规则流水号相关提示，修复历史"规则0/规则1"式歧义。
+
+    - 为存量缺陷补充所属规则流水号；
+    - 为冲突缺陷补充关联规则流水号；
+    - 将描述中的数组下标改写为可定位的规则流水号。
+    """
+    import re
+
+    with SessionLocal() as db:
+        rules = list(db.execute(text("SELECT id, rule_set_id, rule_no FROM rules")).mappings())
+        code_by_id = {
+            str(row["id"]): f"R{int(row['rule_no']):04d}"
+            for row in rules
+        }
+        changed = 0
+
+        for row in db.execute(
+            text("SELECT id, defects FROM rules WHERE defects IS NOT NULL AND defects != '[]'::jsonb")
+        ).mappings():
+            rule_id = str(row["id"])
+            own_code = code_by_id.get(rule_id)
+            defects = list(row["defects"] or [])
+            next_defects: list[dict] = []
+            dirty = False
+            for raw in defects:
+                defect = dict(raw) if isinstance(raw, dict) else {}
+                if not defect:
+                    next_defects.append(raw)
+                    continue
+
+                related_ids = [
+                    str(x)
+                    for x in (defect.get("related_rule_ids") or [])
+                    if str(x) in code_by_id
+                ]
+                related_codes = sorted(
+                    {code_by_id[x] for x in related_ids},
+                    key=lambda code: int(code[1:]),
+                )
+                if own_code and defect.get("rule_code") != own_code:
+                    defect["rule_code"] = own_code
+                    dirty = True
+                if related_codes and defect.get("related_rule_codes") != related_codes:
+                    defect["related_rule_codes"] = related_codes
+                    dirty = True
+
+                description = str(defect.get("description") or "")
+                has_ambiguous_ref = bool(
+                    re.search(r"规则\s*\d+", description)
+                    or re.search(r"相关规则(?:\s*[、,，和及]\s*\d+)+", description)
+                    or re.search(r"[（(]\s*索引\s*\d+\s*[)）]", description)
+                )
+                if has_ambiguous_ref:
+                    referenced_codes = sorted(
+                        {
+                            code_by_id[rule_id],
+                            *(code_by_id[x] for x in related_ids),
+                        },
+                        key=lambda code: int(code[1:]),
+                    )
+                    # 历史描述里的序号是分组内下标，无法稳定还原到具体规则；
+                    # 统一去掉歧义序号，改为显式列出涉及规则流水号。
+                    cleaned = re.sub(
+                        r"规则\s*\d+(?:\s*[、,，和及]\s*\d+)*"
+                        r"(?:\s*[（(]\s*索引\s*\d+\s*[)）])?",
+                        "相关规则",
+                        description,
+                    )
+                    cleaned = re.sub(
+                        r"相关规则(?:\s*[、,，和及]\s*\d+)+",
+                        "相关规则",
+                        cleaned,
+                    )
+                    cleaned = re.sub(
+                        r"[（(]\s*索引\s*\d+\s*[)）]",
+                        "",
+                        cleaned,
+                    )
+                    if re.search(r"涉及规则\s+R\d{4}", cleaned):
+                        defect["description"] = cleaned
+                    else:
+                        defect["description"] = (
+                            f"涉及规则 {'、'.join(referenced_codes)}：{cleaned}"
+                        )
+                    dirty = True
+                next_defects.append(defect)
+
+            if dirty:
+                db.execute(
+                    text(
+                        "UPDATE rules SET defects = CAST(:defects AS jsonb) "
+                        "WHERE id = CAST(:id AS uuid)"
+                    ),
+                    {"defects": json.dumps(next_defects, ensure_ascii=False), "id": rule_id},
+                )
+                changed += 1
+
+        if changed:
+            db.commit()
+            logger.info("规则流水号提示迁移完成: 已更新 %d 条规则", changed)
 
 
 def _seed_builtin_skill() -> None:
@@ -146,6 +285,9 @@ def _seed_builtin_skill() -> None:
                     "rule_text 用简洁中文描述，如'报关单数量应不大于委托单数量'",
                     "将自然语言规则拆分为单条规则时，保留原文的业务含义",
                     "如果原始文档使用英文术语，保留英文术语并在括号内附中文翻译",
+                    "输入行带 [SOURCE_ROW=...] 时逐行解析并回填 source_ref；禁止因描述相似跨行合并",
+                    "表格的文件类型列写入 scope，业务条件列写入 structure.condition；合并单元格值已展开到每个数据行",
+                    "描述相似但 scope 或 condition 不同时必须拆成独立规则，禁止合并",
                 ],
                 "field_mappings": {},
                 "defaults": {

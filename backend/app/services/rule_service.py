@@ -12,13 +12,45 @@ from typing import Optional
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from ..models import Rule, RuleSnapshot
+from ..models import Rule, RuleSet, RuleSnapshot
 from ..schemas.rule import RuleCreate, RuleOut, RuleUpdate
 from .doc_normalizer import (
     normalize_doc_type,
     normalize_scope,
     normalize_structure,
 )
+
+
+def format_rule_code(rule_no: int) -> str:
+    """规则流水号统一格式：R0001、R0002。"""
+    return f"R{int(rule_no):04d}"
+
+
+def allocate_rule_no(db: Session, rule_set_id: uuid.UUID) -> int:
+    """为规则集分配下一个流水号（行锁串行化，删除后不复用）。"""
+    rule_set = db.execute(
+        select(RuleSet)
+        .where(RuleSet.id == rule_set_id)
+        .with_for_update()
+    ).scalars().first()
+    if rule_set is None:
+        raise ValueError(f"规则集不存在: {rule_set_id}")
+    rule_no = int(rule_set.next_rule_no or 1)
+    rule_set.next_rule_no = rule_no + 1
+    db.flush()
+    return rule_no
+
+
+def _stamp_defect_rule_code(defects: list[dict] | None, rule_code: str) -> list[dict]:
+    """确保缺陷项带所属规则流水号。"""
+    stamped: list[dict] = []
+    for raw in defects or []:
+        if not isinstance(raw, dict):
+            continue
+        defect = dict(raw)
+        defect["rule_code"] = rule_code
+        stamped.append(defect)
+    return stamped
 
 
 def list_rules(
@@ -34,7 +66,7 @@ def list_rules(
     stmt = (
         select(Rule)
         .where(Rule.rule_set_id == rule_set_id)
-        .order_by(Rule.doc_type, Rule.check_category, Rule.priority)
+        .order_by(Rule.doc_type, Rule.check_category, Rule.priority, Rule.rule_no)
     )
     if doc_type:
         stmt = stmt.where(Rule.doc_type == doc_type)
@@ -72,19 +104,27 @@ def get_rule(db: Session, rule_id: uuid.UUID) -> Optional[Rule]:
 
 def create_rule(db: Session, rule_set_id: uuid.UUID, payload: RuleCreate) -> RuleOut:
     """创建规则（必须挂在指定规则集下）。"""
-    data = payload.model_dump()
-    # 批次 11：写时归一——手工创建/导入的规则同样归一文档类型与字段名
-    if data.get("doc_type"):
-        data["doc_type"] = normalize_doc_type(db, data["doc_type"]) or data["doc_type"]
-    if data.get("scope"):
-        data["scope"] = normalize_scope(db, data["scope"])
-    if data.get("structure"):
-        data["structure"] = normalize_structure(db, data["structure"], data.get("doc_type"))
-    rule = Rule(rule_set_id=rule_set_id, **data)
-    db.add(rule)
-    db.commit()
-    db.refresh(rule)
-    return RuleOut.model_validate(rule)
+    try:
+        data = payload.model_dump()
+        rule_no = allocate_rule_no(db, rule_set_id)
+        rule_code = format_rule_code(rule_no)
+        data["rule_no"] = rule_no
+        data["defects"] = _stamp_defect_rule_code(data.get("defects"), rule_code)
+        # 批次 11：写时归一——手工创建/导入的规则同样归一文档类型与字段名
+        if data.get("doc_type"):
+            data["doc_type"] = normalize_doc_type(db, data["doc_type"]) or data["doc_type"]
+        if data.get("scope"):
+            data["scope"] = normalize_scope(db, data["scope"])
+        if data.get("structure"):
+            data["structure"] = normalize_structure(db, data["structure"], data.get("doc_type"))
+        rule = Rule(rule_set_id=rule_set_id, **data)
+        db.add(rule)
+        db.commit()
+        db.refresh(rule)
+        return RuleOut.model_validate(rule)
+    except Exception:
+        db.rollback()
+        raise
 
 
 def update_rule(
@@ -203,7 +243,7 @@ def get_enabled_rules_for_snapshot(
         .where(Rule.rule_set_id == rule_set_id)
         .where(Rule.enabled.is_(True))
         .where(Rule.status == "confirmed")
-        .order_by(Rule.doc_type, Rule.check_category, Rule.priority)
+        .order_by(Rule.doc_type, Rule.check_category, Rule.priority, Rule.rule_no)
     )
     return list(db.execute(stmt).scalars().all())
 

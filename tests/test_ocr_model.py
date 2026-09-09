@@ -1,4 +1,4 @@
-"""OCR 模型冒烟测试：用真实样本校验当前 OCR 配置（阿里云百炼 qwen3.7-plus）可正常调用。
+"""OCR 模型冒烟测试：用真实样本校验当前 DeepSeek 多模态 OCR 配置可正常调用。
 
 用法（仓库根目录执行）：
     backend\\.venv\\Scripts\\python.exe tests\\test_ocr_model.py
@@ -30,13 +30,16 @@ SAMPLES = [
 def main() -> int:
     print(f"[OCR] base_url = {settings.ocr_base_url}")
     print(f"[OCR] model    = {settings.ocr_model_name}")
-    print(f"[OCR] api_key  = {'已配置' if settings.ocr_api_key else '未配置'}")
+    print(f"[OCR] api_key  = {'已配置' if settings.effective_ocr_api_key else '未配置'}")
 
-    if settings.ocr_model_name != "qwen3.7-plus":
-        print(f"[FAIL] 当前 OCR 模型不是 qwen3.7-plus: {settings.ocr_model_name}")
+    if settings.ocr_model_name != "deepseek-v4.1-flash-expires-on-0910":
+        print(
+            "[FAIL] 当前 OCR 模型不是 "
+            f"deepseek-v4.1-flash-expires-on-0910: {settings.ocr_model_name}"
+        )
         return 1
-    if not settings.ocr_api_key:
-        print("[FAIL] OCR API key 未配置")
+    if not settings.effective_ocr_api_key:
+        print("[FAIL] OCR API key 未配置（OCR_API_KEY 与 LLM_API_KEY 均为空）")
         return 1
 
     client = get_ocr_client()

@@ -1,4 +1,4 @@
-"""LLM 客户端封装（OpenAI 兼容格式，用于 DeepSeek 与通义千问）。
+"""LLM 客户端封装（OpenAI 兼容格式，用于 DeepSeek 文本与多模态模型）。
 
 参考 MiroFish-Explorer 的 llm_client.py 设计：指数退避重试、JSON 解析容错、单例工厂。
 本模块重新实现，去除对原项目 services 包的耦合，保留关键能力：
@@ -41,7 +41,7 @@ class LLMError(Exception):
 
 
 class LLMClient:
-    """OpenAI 兼容 LLM 客户端。可同时用于 DeepSeek 文本模型和通义千问多模态模型。"""
+    """OpenAI 兼容 LLM 客户端。可同时用于 DeepSeek 文本与多模态模型。"""
 
     def __init__(
         self,
@@ -68,6 +68,7 @@ class LLMClient:
         response_format: Optional[dict] = None,
         model: Optional[str] = None,
         enable_thinking: Optional[bool] = None,
+        disable_thinking: bool = False,
     ) -> str:
         """带自动重试的聊天请求。返回响应文本。"""
         kwargs: dict[str, Any] = {
@@ -79,16 +80,24 @@ class LLMClient:
             kwargs["max_tokens"] = max_tokens
         if response_format:
             kwargs["response_format"] = response_format
-        # 通义千问 Qwen3+ 系列：enable_thinking 走 extra_body（OpenAI 兼容端点）
+        # 部分 OpenAI 兼容模型（如通义千问 Qwen3+）支持 enable_thinking 扩展参数
         if enable_thinking is not None:
             kwargs["extra_body"] = {"enable_thinking": enable_thinking}
+        # 部分推理模型需通过 thinking.type=disabled 关闭思考，否则可能耗尽
+        # max_tokens 后返回空 content（reasoning_content 有内容但无法解析）。
+        if disable_thinking:
+            extra_body = dict(kwargs.get("extra_body") or {})
+            extra_body["thinking"] = {"type": "disabled"}
+            kwargs["extra_body"] = extra_body
 
         last_err: Optional[Exception] = None
         for attempt in range(self._max_retries):
             try:
                 resp = self.client.chat.completions.create(**kwargs)
+                if not resp.choices:
+                    raise LLMError("模型返回空响应", "invalid_response")
                 content = resp.choices[0].message.content
-                if content is None:
+                if content is None or not content.strip():
                     raise LLMError("模型返回空响应", "invalid_response")
                 return content
             except RETRYABLE_ERRORS as e:
@@ -97,6 +106,14 @@ class LLMClient:
                     break
                 _sleep_with_jitter(attempt)
                 logger.warning("LLM 第 %d 次重试: %s", attempt + 1, e)
+            except LLMError as e:
+                # 部分多模态/推理模型偶发返回空 content；这通常是瞬时问题，重试一次以上。
+                if e.error_type == "invalid_response" and attempt < self._max_retries - 1:
+                    last_err = e
+                    _sleep_with_jitter(attempt)
+                    logger.warning("LLM 返回空响应，第 %d 次重试", attempt + 1)
+                    continue
+                raise
             except Exception as e:
                 raise LLMError(f"LLM 调用失败: {e}", _classify_error(e)) from e
         raise LLMError(f"LLM 重试 {self._max_retries} 次后仍失败: {last_err}", "retryable") from last_err
@@ -108,6 +125,7 @@ class LLMClient:
         max_tokens: Optional[int] = None,
         model: Optional[str] = None,
         enable_thinking: Optional[bool] = None,
+        disable_thinking: bool = False,
     ) -> dict:
         """聊天请求并返回解析后的 JSON。带 markdown 代码块容错。"""
         resp = self.chat(
@@ -117,6 +135,7 @@ class LLMClient:
             response_format={"type": "json_object"},
             model=model,
             enable_thinking=enable_thinking,
+            disable_thinking=disable_thinking,
         )
         json_str = _extract_json(resp)
         try:

@@ -84,3 +84,18 @@ backend\.venv\Scripts\python.exe tests\run_graph_rule_tests.py
 
 > 说明：本测试集聚焦"图谱规则是否正确被调用"，不覆盖 OCR、LLM 语义审查、
 > 旧逻辑 fallback 的完整行为（由仓库根目录 `acceptance_run.py` 等端到端验收脚本覆盖）。
+
+## 规则导入颗粒度单测
+
+`tests/test_rule_import_granularity.py` 覆盖：
+
+- Excel 纵向合并单元格展开到每个数据行；
+- 多级表头扁平化；
+- 同描述但 `scope` / `condition` / `exceptions` 不同的规则不被误合并；
+- `source_ref` 写入 provenance，以及源表行覆盖率告警。
+
+运行方式（无需启动数据库或后端服务）：
+
+```bat
+backend\.venv\Scripts\python.exe tests\test_rule_import_granularity.py
+```

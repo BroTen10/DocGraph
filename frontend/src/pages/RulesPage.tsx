@@ -25,6 +25,7 @@ const UNCATEGORIZED = '未分类'
 /** 冲突检测结果分组 */
 type ConflictGroup = {
   rule_ids: string[]
+  rule_codes: string[]
   type: string
   severity: string
   description: string
@@ -40,9 +41,10 @@ function ImportResultRules({ rules }: { rules: Array<Record<string, unknown>> })
   }
   const rows = rules.map((r, i) => ({
     key: i,
+    code: get(r, 'rule_code') || '-',
     source: get(r, 'source_text') || get(r, 'rule_text'),
     rule: get(r, 'rule_text'),
-    meta: [get(r, 'doc_type'), get(r, 'check_category')].filter(Boolean).join(' / ') || '-',
+    meta: [get(r, 'source_ref'), get(r, 'doc_type'), get(r, 'check_category')].filter(Boolean).join(' / ') || '-',
   }))
   if (rows.length === 0) return null
   return (
@@ -55,6 +57,12 @@ function ImportResultRules({ rules }: { rules: Array<Record<string, unknown>> })
         pagination={false}
         dataSource={rows}
         columns={[
+          {
+            title: '规则号',
+            dataIndex: 'code',
+            width: 88,
+            render: (v: string) => <Tag color="blue">{v}</Tag>,
+          },
           {
             title: '原文片段',
             dataIndex: 'source',
@@ -181,7 +189,7 @@ export default function RulesPage() {
   // 冲突检测
   const [conflictDetecting, setConflictDetecting] = useState(false)
   const [conflictModalOpen, setConflictModalOpen] = useState(false)
-  const [conflictData, setConflictData] = useState<Array<{ rule_ids: string[]; type: string; severity: string; description: string; rules: Rule[] }>>([])
+  const [conflictData, setConflictData] = useState<Array<{ rule_ids: string[]; rule_codes: string[]; type: string; severity: string; description: string; rules: Rule[] }>>([])
   // 缺陷详情侧边栏（统一展示冲突/错误/警告）
   const [defectDrawerOpen, setDefectDrawerOpen] = useState(false)
   const [defectDrawerTab, setDefectDrawerTab] = useState<'conflict' | 'error' | 'warning'>('error')
@@ -782,7 +790,7 @@ export default function RulesPage() {
                                     color={isActive ? 'blue' : r.status === 'confirmed' ? 'default' : 'orange'}
                                     style={{ marginRight: 6, fontSize: 10 }}
                                   >
-                                    #{i + 1}
+                                    {r.rule_code}
                                   </Tag>
                                   <Text type={isActive ? undefined : 'secondary'} style={{ fontSize: 12 }}>
                                     {r.rule_text}
@@ -823,11 +831,11 @@ export default function RulesPage() {
 
   // 批次 5-6：错误/警告 Tab 共用缺陷表格渲染（消除重复）
   const renderDefectTable = (severity: 'error' | 'warning', rowPrefix: string) => {
-    const entries: Array<{ ruleId: string; docType: string | null; checkCategory: string | null; ruleText: string; type: string; description: string }> = []
+    const entries: Array<{ ruleId: string; ruleCode: string; docType: string | null; checkCategory: string | null; ruleText: string; type: string; description: string }> = []
     rules.forEach((r) => {
       ;(r.defects || []).filter((d) => d.severity === severity).forEach((d) => {
         entries.push({
-          ruleId: r.id, docType: r.doc_type, checkCategory: r.check_category,
+          ruleId: r.id, ruleCode: r.rule_code, docType: r.doc_type, checkCategory: r.check_category,
           ruleText: r.rule_text, type: d.type, description: d.description,
         })
       })
@@ -839,6 +847,7 @@ export default function RulesPage() {
         size="small"
         pagination={{ pageSize: 20, showSizeChanger: true, pageSizeOptions: ['10', '20', '50'], size: 'small' }}
         columns={[
+          { title: '规则号', dataIndex: 'ruleCode', width: 88, render: (v: string) => <Tag color="blue">{v}</Tag> },
           { title: '文件类型', dataIndex: 'docType', width: 100 },
           { title: '检查项', dataIndex: 'checkCategory', width: 80 },
           { title: '规则文本', dataIndex: 'ruleText', ellipsis: true },
@@ -872,6 +881,10 @@ export default function RulesPage() {
   const fileNameStyle: React.CSSProperties = { display: 'inline-block', maxWidth: 132, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontWeight: 600, fontSize: 12, verticalAlign: 'middle' }
 
   const ruleColumns = [
+    {
+      title: '规则号', dataIndex: 'rule_code', key: 'rule_code', width: 92,
+      render: (v: string) => <Tag color="blue">{v}</Tag>,
+    },
     {
       title: '文件类型', dataIndex: 'doc_type', key: 'doc_type', width: 140,
       render: (v: string | null) => v || <Text type="secondary">整批/全部</Text>,
@@ -1150,7 +1163,9 @@ export default function RulesPage() {
                     message={
                       activeRuleFilter === 'conflict'
                         ? '以下规则存在语义冲突，默认为禁用状态。请逐条确认后手动启用，确认后的规则将参与图谱构建'
-                        : '以下规则存在缺陷，默认为禁用状态。请逐条确认后手动启用，确认后的规则将参与图谱构建'
+                        : activeRuleFilter === 'info'
+                          ? '以下规则包含提示信息；其中语义冲突规则默认为禁用状态，其余提示不影响规则执行'
+                          : '以下规则存在缺陷，默认为禁用状态。请逐条确认后手动启用，确认后的规则将参与图谱构建'
                     }
                   />
                 )}
@@ -1379,6 +1394,23 @@ export default function RulesPage() {
                           }
                         />
                       )}
+                      {(importResult.import_warnings?.length ?? 0) > 0 && (
+                        <Alert
+                          type="warning"
+                          showIcon
+                          style={{ marginTop: 8 }}
+                          message={
+                            importResult.source_coverage
+                              ? `导入校验提示（源表 ${importResult.source_coverage.expected_rows} 行，覆盖 ${importResult.source_coverage.covered_rows} 行）`
+                              : '导入校验提示'
+                          }
+                          description={
+                            <ul style={{ margin: 0, paddingLeft: 20, fontSize: 12 }}>
+                              {(importResult.import_warnings || []).map((warn, i) => <li key={i}>{warn}</li>)}
+                            </ul>
+                          }
+                        />
+                      )}
                       {importResult.conflict_report && importResult.conflict_report.total_defects > 0 && (
                         <Alert
                           type="warning"
@@ -1486,6 +1518,23 @@ export default function RulesPage() {
                           }
                         />
                       )}
+                      {(fileImportResult.import_warnings?.length ?? 0) > 0 && (
+                        <Alert
+                          type="warning"
+                          showIcon
+                          style={{ marginTop: 8 }}
+                          message={
+                            fileImportResult.source_coverage
+                              ? `导入校验提示（源表 ${fileImportResult.source_coverage.expected_rows} 行，覆盖 ${fileImportResult.source_coverage.covered_rows} 行）`
+                              : '导入校验提示'
+                          }
+                          description={
+                            <ul style={{ margin: 0, paddingLeft: 20, fontSize: 12 }}>
+                              {(fileImportResult.import_warnings || []).map((warn, i) => <li key={i}>{warn}</li>)}
+                            </ul>
+                          }
+                        />
+                      )}
                       {fileImportResult.conflict_report && fileImportResult.conflict_report.total_defects > 0 && (
                         <Alert
                           type="warning"
@@ -1555,8 +1604,13 @@ export default function RulesPage() {
                       </Button>,
                     ]}
                   >
-                    <List.Item.Meta
-                      title={<Tag color="blue">{r.doc_type || GLOBAL_DOC_TYPE} / {r.check_category || UNCATEGORIZED}</Tag>}
+                      <List.Item.Meta
+                      title={
+                        <Space size={4}>
+                          <Tag color="blue">{r.rule_code}</Tag>
+                          <Tag>{r.doc_type || GLOBAL_DOC_TYPE} / {r.check_category || UNCATEGORIZED}</Tag>
+                        </Space>
+                      }
                       description={<Text style={{ fontSize: 12 }}>{r.rule_text}</Text>}
                     />
                   </List.Item>
@@ -1634,6 +1688,16 @@ export default function RulesPage() {
                                 ),
                               },
                               { title: '描述', dataIndex: 'description', ellipsis: true },
+                              {
+                                title: '规则号', width: 150,
+                                render: (_: unknown, group: ConflictGroup) => (
+                                  <Space size={2} wrap>
+                                    {(group.rule_codes || []).map((code) => (
+                                      <Tag key={code} color="blue">{code}</Tag>
+                                    ))}
+                                  </Space>
+                                ),
+                              },
                               {
                                 title: '涉及规则', width: 80,
                                 render: (_: unknown, group: ConflictGroup) => <Tag>{group.rules.length} 条</Tag>,
