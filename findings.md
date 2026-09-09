@@ -198,21 +198,41 @@
 - 调研：docs/research_审查算法与图谱审查案例调研.md（批次 0.5 产出）
 - 外部参照：arxiv 2511.06618（GRAPH-GRPO-LEX）、arxiv 2606.03326（Violation Situation Pattern）、arxiv 2510.16309（MedRule-KG）、github.com/neo4j-product-examples/graphrag-contract-review、journal.hep.com.cn/fem/EN/10.1007/s42524-026-4237-0（天大合同问答）
 
-## 2026-08-13 全面体检结论
+## 2026-08-13 全面体检结论（历史）
+> 以下为当时的体检快照；2026-09-09 已按当前代码复核，最新有效结论见文末。
 - Git：master 工作区干净，116 个已跟踪文件。
 - 运行测试：tests/run_graph_rule_tests.py 全绿，14 项通过；tsc --noEmit 通过。
-- 前端依赖：npm audit 发现 react-router（间接依赖）高危 CSRF 绕过，范围 7.12.0-7.18.1，建议升级 react-router-dom 到 >=7.18.2 后重新 lock。
-- 后端依赖：pip-audit 发现 5 个包共 42 条已知漏洞：python-multipart 0.0.20、Pillow 11.0.0、python-dotenv 1.0.1、pdfminer-six 20231228、starlette 0.41.3；升级需做回归验证。
+- 前端依赖（历史）：npm audit 曾发现 react-router 高危 CSRF 绕过，范围 7.12.0-7.18.1；当前 pnpm 锁文件已为 7.18.3。
+- 后端依赖（历史）：pip-audit 曾发现 5 个包共 42 条已知漏洞；`requirements.txt` 尚未升级，需重新审计后再决定。
 - 后端安全扫描：源码未发现硬编码真实密钥；.env.example 中 PG_PASSWORD/NEO4J_PASSWORD 缺少注释，NEO4J_URI 与密钥占位值建议改成明显 placeholder。
-- 静态质量：ruff 共 352 条问题，其中 F 类 49 条（31 条未使用 import、graph_builder_service.py:432 缺少 Any、若干未使用变量/被遮蔽 import）；另有大量 Optional 现代语法、宽异常、导入排序等风格问题。
-- 关键潜在问题：frontend/vite.config.ts 兜底代理目标写为 18800，疑似应为 8800；main.py 与 config.py 仍保留默认数据库口令作为兜底；API 无鉴权/限流，MVP 可接受但生产前需处理。
+- 静态质量（历史）：ruff 曾报 352 条问题；当前项目 venv 未安装 ruff，已从排期清单移出。
+- 关键潜在问题（历史）：vite 兜底端口已修复；`config.py` 仍保留默认数据库口令；API 仍无鉴权/限流。
 - 清理：已把 frontend/dist、tsconfig.tsbuildinfo、_extracted_imgs、acceptance_output、backend 阶段日志、项目内 __pycache__（排除 .venv）移动到系统临时目录，Git 仍干净。
 - 未清理候选（需用户确认）：backend/uploads 有 214 个文件/约 93 MB 且存在多轮重复上传；根目录 analyze.py/check_dupes.py/cleanup_dupes.py/ocr_verify.py/test_import_doc.py/duplicate_report.md 为一次性调试产物；backend/.venv 与 frontend/node_modules 可由安装命令重建；20260710资料样本/需求相关文档/.workbuddy 属于用户数据与记忆，不建议自动删除。
 
-## 2026-08-13 用户确认后的执行结果
+## 2026-08-13 用户确认后的执行结果（历史）
 - 依赖与安全项按用户要求保持不动（MVP 本机环境，暂不升级版本）。
 - 已删除 backend/uploads（214 个文件）与 6 个根目录一次性调试文件，Git 显示对应删除状态。
 - 已清空临时目录；项目内缓存/构建产物/日志/提取图片/验收产物均已移除。
 - 低风险代码优化已执行：移除 31 个未使用 import；补 graph_builder_service.py 的 Any；修复 ocr_service/review_service/rule_parse_engine 中未使用局部变量与被遮蔽的 field 循环变量；修复 vite 兜底端口 18800 → 8800。
 - 验证：py_compile 全过、前端 tsc --noEmit 通过、tests/run_graph_rule_tests.py PASS=14 / FAIL=0。
 - 剩余 ruff F 类仅 14 个 SQLAlchemy 字符串前向引用（模型间 Mapped["..."]），非运行期错误，暂不改。
+
+## 2026-09-09 排期清单复核（当前有效）
+> 系统崩溃后以当前工作区代码重新核验；本节结论优先于上面的历史记录。
+
+| 事项 | 当前结论 | 处理 |
+|---|---|---|
+| 前端 `react-router` 漏洞 | `pnpm-lock.yaml` 已锁定 `7.18.3`，`node_modules/react-router-dom` 也是 `7.18.3`；但 `package-lock.json` 仍是 `7.18.1` | 漏洞项移除，保留“统一 npm/pnpm 锁文件”待排期 |
+| 后端依赖漏洞 | `backend/requirements.txt` 版本未变，旧审计结论需重新执行 `pip-audit` 验证 | 保留 P1 待排期 |
+| API 鉴权/限流、默认数据库口令 | 当前代码仍无鉴权/限流，`config.py` 仍保留默认 PG/Neo4j 口令 | 保留 P1 生产化安全待排期 |
+| 审查结果状态流转 UI | 后端接口 `PATCH /api/reviews/results/{id}/status` 存在；前端只有状态标签，无操作入口 | 保留 P2 待排期 |
+| 规则 `structure` 编辑 | 前端类型有字段，但规则编辑器不维护条件/断言/例外 | 保留 P2 待排期 |
+| 多值字符串语义兜底 | `llm_review_service._is_string_mismatch_item` 已支持多文档同字段一致性 `self_consistency`；普通多值聚合仍不交给 LLM | 从主要待办收窄为远期设计边界 |
+| 文档值入 Neo4j、violation 节点 | 当前审查仍从 Postgres `extracted_fields` 取数；Neo4j 未建文档字段节点/违规节点 | 标记为远期可选能力，不占用当前排期 |
+| ruff 清理 | 当前 venv 未安装 ruff；旧 F 类问题不影响运行 | 从排期清单移出 |
+| 大篇幅制度文件与多模态来源的规则拆解 | 现有 Excel 行级追溯是基础，但长文本、扫描图片、关系图仍缺统一的“来源结构 → 原子规则 → 图谱规则”设计 | 新增 P1 长期核心排期事项 |
+
+补充说明：该事项是永久性能力建设，不等同于某个具体文件格式的解析 bug。设计时应把“来源格式适配”和“规则颗粒度判定”分开：前者解决怎么读，后者解决读出来后如何形成可执行的原子审查规则；两者通过统一的来源定位和规则结构契约连接。
+
+GitHub 当前无未关闭 Issue/PR；主清单没有批次 12。

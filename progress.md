@@ -215,7 +215,8 @@
   - task_plan.md（更新：3 项决策落盘 + 批次 0.5 complete + 新增批次 7/8/9）
   - findings.md（更新：调研摘要 + 资源链接）
 
-### 待办（下一轮）
+### 待办（历史，已由后续批次取代）
+- 2026-09-09 复核：以下两项均已完成，保留作历史记录；最新排期见 task_plan.md。
 - 等待用户确认执行顺序后启动批次 1（图谱审查链路修复，6 项子任务）
 - 批次 1-3 实施时应用研究结论：1-3 多单汇总语义与 8-2 聚合比对联动设计
 
@@ -455,7 +456,7 @@
   - task_plan.md / findings.md / progress.md（追加本批次记录）
 - Risks / notes:
   - 本次未修改业务代码，未删除用户业务文档、依赖目录和 .workbuddy。
-  - 待办优先级：前端 react-router 升级 > 后端依赖升级与回归 > ruff 清理（至少修 graph_builder_service.py 缺少 Any）。
+  - 历史待办优先级（已被 2026-09-09 复核取代）：前端 react-router 升级 > 后端依赖升级与回归 > ruff 清理；其中 react-router 已由 pnpm 锁文件解决，ruff 已移出排期。
 
 ### 用户确认后的清理与低风险优化
 - **Status:** complete
@@ -471,3 +472,36 @@
   - task_plan.md / findings.md / progress.md。
 - Risks / notes:
   - 依赖与安全项未动；backend/uploads 已按用户确认删除，若后续还需要原始上传文件，需从资料样本重新上传。
+
+## Session: 2026-09-09
+
+### 排期清单复核与清理
+- **Status:** complete
+- Actions taken:
+  - 按当前仓库代码重新核验旧排期结论，不再沿用 2026-08-13 的历史快照。
+  - 核对前端依赖锁文件：pnpm-lock 为 react-router 7.18.3；package-lock 仍为 7.18.1，保留锁文件统一待办。
+  - 核对后端配置与审查服务：API 鉴权/限流、默认数据库口令、状态流转 UI、structure 编辑仍缺；多值字符串语义兜底已收窄为远期设计边界。
+  - 清理 task_plan.md 的过期 Current Phase、已完成的研究待办，并建立当前有效排期表。
+  - 更新 findings.md 历史段落标记与最新复核结论。
+- Verification:
+  - 当前 Git 工作区基于最新提交 2457a52。
+  - 未发现 GitHub 未关闭 Issue/PR。
+  - 文档中的当前排期项均以现有代码/配置文件为证据。
+- Files created/modified:
+  - task_plan.md / findings.md / progress.md
+  - docs/research_审查算法与图谱审查案例调研.md
+- Risks / notes:
+  - 后端依赖漏洞需要重新运行 pip-audit 后才能确定具体升级范围；本轮只清理排期记录，未升级依赖。
+  - 前端 package-lock.json 与 pnpm-lock.yaml 仍并存，需后续决定唯一包管理器。
+
+### 新增长期排期：制度性文件与多模态来源的规则拆解
+- **Status:** pending（长期核心设计，待专项排期）
+- 用户新增要求：
+  - 针对大篇幅自然语言描述的制度性文件，研究如何正确拆解为符合审查要求颗粒度的一条条详细规则。
+  - 未来来源包括 Excel、PDF 制度文件、图片，甚至关系图；需要统一转化为符合图谱审查要求的详细规则。
+  - 该问题是永久性话题，应作为长期能力建设持续迭代。
+- 已记录内容：
+  - task_plan.md 新增专项设计卡：来源范围、核心难点、分阶段实施建议、首期验收标准。
+  - findings.md 补充“来源格式适配”与“规则颗粒度判定”分离的设计判断。
+- Risks / notes:
+  - 该事项不阻塞当前图谱审查与规则导入功能，但会持续影响泛化能力、规则质量和人工确认成本。
