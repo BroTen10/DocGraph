@@ -206,6 +206,7 @@ def _run_review_pipeline(
             doc.ocr_text = r.get("text", "")
             doc.has_stamp = r.get("has_stamp")
             doc.ocr_confidence = r.get("confidence", 0.0)
+            doc.ocr_layout = r.get("layout", {}) or {}
             # 规范化字段 + 文件名 ground truth 交叉校验（防 OCR 合同号末位误识假阳性）
             doc.extracted_fields = cross_validate_contract_no(
                 doc.file_name,

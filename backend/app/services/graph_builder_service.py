@@ -58,7 +58,7 @@ _SYSTEM_PROMPT = """你是规则图谱构建助手。任务：把自然语言审
   ],
   "relationships": [
     {"source": "文件类型.字段名", "target": "文件类型.字段名", "type": "COMPARE_TO",
-     "attributes": {"operator": "等于|不大于|不小于|时间早于|时间不晚于|总额等于|包含于", "tolerance": 0, "rule_id": "R001"}}
+     "attributes": {"operator": "等于|不大于|不小于|时间早于|时间不晚于|总额等于|包含于", "tolerance": 0, "rule_id": "R0001"}}
   ],
   "confidence": 0.0-1.0
 }
@@ -68,7 +68,7 @@ _SYSTEM_PROMPT = """你是规则图谱构建助手。任务：把自然语言审
 2. 关系类型固定为 COMPARE_TO（比对关系）
 3. operator 必须是上述枚举之一
 4. tolerance 为数值容差（百分比、千克、天数等，0 表示严格相等）
-5. rule_id 用规则在规则集中的序号（如 R001、R002）
+5. rule_id 必须原样使用输入的规则流水号（如 R0001、R0002），不得自行重编号
 6. 一条规则可拆出多个实体和关系
 7. confidence 反映你对规则理解的确信度（0-1）"""
 
@@ -90,7 +90,7 @@ def _convert_one_rule(
 ) -> RuleGraphConvertResult:
     """调用 LLM 将单条规则转换为图谱结构。"""
     llm = get_llm_client()
-    rule_id_str = f"R{rule_index:03d}"
+    rule_id_str = rule.rule_code
     user_prompt = get_prompt(db, "graph_builder.user").format(
         rule_id=rule_id_str,
         doc_type=rule.doc_type or "",
@@ -177,7 +177,7 @@ def _convert_structured_rule(rule: Rule, rule_index: int) -> RuleGraphConvertRes
     LLM 解析产出，此处确定性映射为 Field 节点 + COMPARE_TO 边，置信度恒 1.0。
     无 structure 的旧规则仍走 LLM 转换路径。
     """
-    rule_id_str = f"R{rule_index:03d}"
+    rule_id_str = rule.rule_code
     structure = rule.structure or {}
     assertion = structure.get("assertion") or {}
     source = assertion.get("source") or {}
@@ -268,7 +268,7 @@ def _convert_completeness_rule(rule: Rule, rule_index: int) -> RuleGraphConvertR
     节点: {name: doc_type, type: "RequiredDoc"}
     关系: {source: "齐套性检查", target: doc_type, type: "REQUIRED"}
     """
-    rule_id_str = f"R{rule_index:03d}"
+    rule_id_str = rule.rule_code
     doc_type = rule.doc_type
     # 根节点
     root_ent = EntityData(
@@ -314,7 +314,7 @@ def _convert_stamp_rule(rule: Rule, rule_index: int) -> RuleGraphConvertResult:
     节点: {name: doc_type, type: "StampRequirement"}
     关系: {source: doc_type, target: "印章要求", type: "MUST_STAMP"}
     """
-    rule_id_str = f"R{rule_index:03d}"
+    rule_id_str = rule.rule_code
     doc_type = rule.doc_type
     doc_ent = EntityData(
         name=doc_type,
@@ -484,7 +484,7 @@ def build_graph(
 
     for idx, rule in enumerate(rules, start=1):
         # ----- 本体层：规则节点与类型/意图/字段关联（与执行层共用同一 R 编号）-----
-        rid = f"R{idx:03d}"
+        rid = rule.rule_code
         rule_node = f"规则:{rid}"
         ontology_entities.append(
             EntityData(

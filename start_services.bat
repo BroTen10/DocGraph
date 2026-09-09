@@ -1,6 +1,6 @@
 @echo off
 chcp 65001 >nul
-title DocGraph - Starting Frontend & Backend
+title DocGraph - Starting Frontend ^& Backend
 
 cd /d "%~dp0"
 
@@ -20,10 +20,10 @@ echo ========================================
 echo.
 
 echo [1/2] Starting Backend (FastAPI, port %APP_PORT%)...
-start "DocGraph-Backend" cmd /k "chcp 65001 >nul && cd /d %~dp0backend && .venv\Scripts\python.exe run.py"
+start "DocGraph-Backend" /D "%~dp0backend" cmd /k "chcp 65001 >nul && .venv\Scripts\python.exe run.py"
 
 echo [2/2] Starting Frontend (Vite, port 5173)...
-start "DocGraph-Frontend" cmd /k "chcp 65001 >nul && set VITE_API_TARGET=http://localhost:%APP_PORT% && cd /d %~dp0frontend && node_modules\.bin\vite.cmd"
+start "DocGraph-Frontend" /D "%~dp0frontend" cmd /k "chcp 65001 >nul && set VITE_API_TARGET=http://localhost:%APP_PORT% && node_modules\.bin\vite.cmd"
 
 echo.
 echo Both services started in separate windows.

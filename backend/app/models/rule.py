@@ -5,7 +5,17 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 
-from sqlalchemy import Boolean, DateTime, Float, ForeignKey, String, Text, func
+from sqlalchemy import (
+    Boolean,
+    DateTime,
+    Float,
+    ForeignKey,
+    Integer,
+    String,
+    Text,
+    UniqueConstraint,
+    func,
+)
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -16,6 +26,9 @@ class Rule(Base):
     """审查规则：按"文件类型 × 检查项"二维组织，自然语言描述 + 容差参数。"""
 
     __tablename__ = "rules"
+    __table_args__ = (
+        UniqueConstraint("rule_set_id", "rule_no", name="uq_rules_rule_set_rule_no"),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
@@ -27,6 +40,8 @@ class Rule(Base):
         index=True,
         nullable=False,
     )
+    # 规则集内规则流水号（从 1 开始，删除后不复用）；对外展示为 R0001/R0002
+    rule_no: Mapped[int] = mapped_column(Integer, nullable=False)
     # 文件类型（批次 10 起为可选派生标签）：代理协议 / 委托出口确认单 / 出口报关单 / 运单 / 签收单 / ...
     # 规则明确指向单一文件类型时填写；跨文件/整批规则可为空（用 scope 表达）
     doc_type: Mapped[str | None] = mapped_column(String(64), index=True, nullable=True)
@@ -75,5 +90,14 @@ class Rule(Base):
     # 反向关系
     rule_set: Mapped["RuleSet"] = relationship("RuleSet", back_populates="rules")
 
+    @property
+    def rule_code(self) -> str:
+        """人类可读规则流水号。"""
+        return f"R{self.rule_no:04d}"
+
     def __repr__(self) -> str:  # pragma: no cover
-        return f"<Rule [{self.doc_type or '整批/全部'}/{self.check_category or '未分类'}] status={self.status}>"
+        return (
+            f"<Rule {self.rule_code} "
+            f"[{self.doc_type or '整批/全部'}/{self.check_category or '未分类'}] "
+            f"status={self.status}>"
+        )

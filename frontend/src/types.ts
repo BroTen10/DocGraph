@@ -51,8 +51,26 @@ export interface DocumentBrief {
   extracted_fields: Record<string, unknown>
   /** OCR 识别的原始文本 */
   ocr_text: string | null
+  /** OCR 文本行坐标（相对页面 0-1，扫描 PDF/图片定位用） */
+  ocr_layout: OcrLayout
   /** 字段提取时间 */
   extracted_at: string | null
+}
+
+export interface OcrLayoutLine {
+  text: string
+  /** [left, top, right, bottom]，均为相对页面宽高的 0-1 比例 */
+  bbox: [number, number, number, number]
+}
+
+export interface OcrLayoutPage {
+  page: number
+  lines: OcrLayoutLine[]
+}
+
+export interface OcrLayout {
+  version?: number
+  pages?: OcrLayoutPage[]
 }
 
 export interface ContractDetail extends ContractBrief {
@@ -79,7 +97,9 @@ export interface DefectItem {
   severity: 'error' | 'warning' | 'info'
   description: string
   rule_index?: number | null
+  rule_code?: string | null
   related_rule_ids?: string[] | null
+  related_rule_codes?: string[] | null
 }
 
 export interface ConflictReport {
@@ -90,6 +110,7 @@ export interface ConflictReport {
 
 export interface ConflictItem {
   rule_ids: string[]
+  rule_codes: string[]
   type: string
   severity: string
   description: string
@@ -103,6 +124,8 @@ export interface ConflictDetectionResponse {
 
 export interface Rule {
   id: string
+  rule_no: number
+  rule_code: string
   doc_type: string | null
   check_category: string | null
   rule_text: string
@@ -144,6 +167,13 @@ export interface RuleImportResponse {
   conflict_report: ConflictReport | null
   conflict_detected?: number
   new_doc_types?: string[]
+  import_warnings?: string[]
+  source_coverage?: {
+    expected_rows: number
+    covered_rows: number
+    missing_rows: string[]
+    unexpected_rows: string[]
+  } | null
 }
 
 export interface GraphNode {
@@ -214,6 +244,8 @@ export interface RuleDocumentImportResponse {
   extracted_text_preview: string
   extracted_text_length: number
   source_filename: string
+  import_warnings?: string[]
+  source_coverage?: RuleImportResponse['source_coverage']
 }
 
 /** 异步导入任务状态与进度（前端轮询用） */

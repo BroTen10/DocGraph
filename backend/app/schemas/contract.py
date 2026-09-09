@@ -34,6 +34,8 @@ class DocumentBrief(BaseModel):
     extracted_fields: dict[str, Any] = Field(default_factory=dict)
     # OCR 识别的原始文本（用于前端对照查看）
     ocr_text: str | None = None
+    # OCR 文本行坐标（扫描 PDF/图片定位用；坐标为相对页面的 0-1 比例）
+    ocr_layout: dict[str, Any] = Field(default_factory=dict)
     # 字段提取时间
     extracted_at: datetime | None = None
 

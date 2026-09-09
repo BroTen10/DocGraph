@@ -2,8 +2,8 @@
 
 策略：
 - 文本型 PDF：pdfplumber 直接提取文本（不调 OCR）
-- 扫描型 PDF：用 PyMuPDF 把每页渲染成图片，逐页调通义千问多模态模型
-- 图片（PNG/JPG）：直接调通义千问多模态模型
+- 扫描型 PDF：用 PyMuPDF 把每页渲染成图片，逐页调 DeepSeek 多模态模型
+- 图片（PNG/JPG）：直接调 DeepSeek 多模态模型
 - DOCX：python-docx 提取段落文本
 - 提取结果统一为 {text, has_stamp, fields, confidence, success}
 """
@@ -18,6 +18,7 @@ from ..constants import FIELD_TEMPLATES
 from ..llm_client import LLMError, get_llm_client
 from ..models import Document
 from ..ocr_client import get_ocr_client
+from .ocr_layout_service import extract_layout_lines
 from .settings_service import get_prompt
 
 logger = logging.getLogger(__name__)
@@ -85,6 +86,52 @@ def _extract_docx(docx_path: str) -> str:
     return "\n".join(p.text for p in doc.paragraphs if p.text.strip())
 
 
+def _build_layout(pages: list[list[dict]]) -> dict:
+    """把逐页文本行坐标包装为统一的 OCR layout 结构。"""
+    return {
+        "version": 1,
+        "pages": [
+            {"page": index + 1, "lines": lines}
+            for index, lines in enumerate(pages)
+            if lines
+        ],
+    }
+
+
+def _has_extracted_fields(fields: dict | None) -> bool:
+    """判断是否包含除内部推断类型以外的真实字段值。"""
+    if not fields:
+        return False
+    return any(
+        key != "__inferred_doc_type__" and value not in (None, "")
+        for key, value in fields.items()
+    )
+
+
+def _ensure_fields(
+    result: dict,
+    doc_type: str,
+    field_template: list[str],
+    db=None,
+) -> dict:
+    """多模态返回文字但漏掉字段时，用已识别文本再走一次字段提取。"""
+    if not result.get("success") or _has_extracted_fields(result.get("fields")):
+        return result
+    text = str(result.get("text") or "").strip()
+    if not text:
+        return result
+
+    fallback = _llm_extract_fields_from_text(text, doc_type, field_template, db=db)
+    if _has_extracted_fields(fallback.get("fields")):
+        result["fields"] = fallback.get("fields") or {}
+        if result.get("has_stamp") is None:
+            result["has_stamp"] = fallback.get("has_stamp")
+        if not result.get("confidence"):
+            result["confidence"] = fallback.get("confidence", 0.0)
+        logger.info("多模态 OCR 未返回字段，已从识别文本补提字段: %s", doc_type)
+    return result
+
+
 def _llm_extract_fields_from_text(
     text: str,
     doc_type: str,
@@ -125,6 +172,7 @@ def _llm_extract_fields_from_text(
             ],
             temperature=0.1,
             max_tokens=4096,
+            disable_thinking=True,
         )
         fields = resp.get("fields", {}) or {}
         inferred = resp.get("inferred_doc_type") or ""
@@ -180,7 +228,12 @@ def process_document(
                     "confidence": ext["confidence"],
                 }
         elif doc.file_type in ("png", "jpg"):
-            return _ocr_image(str(path), doc.doc_type, field_template, db=db)
+            return _ensure_fields(
+                _ocr_image(str(path), doc.doc_type, field_template, db=db),
+                doc.doc_type,
+                field_template,
+                db=db,
+            )
         elif doc.file_type == "docx":
             text = _extract_docx(str(path))
             ext = _llm_extract_fields_from_text(text, doc.doc_type, field_template, db=db)
@@ -199,9 +252,9 @@ def process_document(
 
 
 def _ocr_image(image_path: str, doc_type: str, field_template: list[str], db=None) -> dict:
-    """对单张图片调用通义千问多模态模型 OCR。"""
+    """对单张图片调用 DeepSeek 多模态模型 OCR。"""
     ocr = get_ocr_client()
-    return ocr.recognize(
+    result = ocr.recognize(
         image_path,
         doc_type_hint=doc_type,
         field_template=field_template,
@@ -210,6 +263,9 @@ def _ocr_image(image_path: str, doc_type: str, field_template: list[str], db=Non
         infer_hint=get_prompt(db, "ocr.image.infer_hint"),
         infer_hint_free=get_prompt(db, "ocr.image.infer_hint_free"),
     )
+    if result.get("success"):
+        result["layout"] = _build_layout([extract_layout_lines(image_path)])
+    return result
 
 
 def _ocr_scanned_pdf(
@@ -227,9 +283,11 @@ def _ocr_scanned_pdf(
         return {"success": False, "error": "PDF 无页面"}
 
     all_text: list[str] = []
+    page_layouts: list[list[dict]] = []
     merged_fields: dict = {}
     has_stamp_any: Optional[bool] = None
     confidences: list[float] = []
+    success_pages = 0
 
     with tempfile.TemporaryDirectory() as tmp:
         for i, page_bytes in enumerate(pages):
@@ -245,7 +303,9 @@ def _ocr_scanned_pdf(
                 infer_hint_free=get_prompt(db, "ocr.image.infer_hint_free"),
             )
             if r.get("success"):
+                success_pages += 1
                 all_text.append(r.get("text", ""))
+                page_layouts.append(extract_layout_lines(str(tmp_img)))
                 # 多页合并：跳过空值，避免某页未识别出的 null 覆盖其他页已提取的值
                 for k, v in (r.get("fields", {}) or {}).items():
                     if v is None or v == "":
@@ -257,11 +317,15 @@ def _ocr_scanned_pdf(
                     has_stamp_any = False
                 confidences.append(float(r.get("confidence", 0.0)))
 
+    if success_pages == 0:
+        return {"success": False, "error": "扫描 PDF 所有页面 OCR 均失败"}
+
     avg_conf = sum(confidences) / len(confidences) if confidences else 0.0
-    return {
+    return _ensure_fields({
         "success": True,
         "text": "\n".join(all_text),
         "has_stamp": has_stamp_any,
         "fields": merged_fields,
         "confidence": avg_conf,
-    }
+        "layout": _build_layout(page_layouts),
+    }, doc_type, field_template, db=db)

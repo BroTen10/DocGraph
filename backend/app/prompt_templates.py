@@ -7,7 +7,7 @@
 
 from __future__ import annotations
 
-# ============ OCR 图像识别（通义千问 VL） ============
+# ============ OCR 图像识别（DeepSeek 多模态） ============
 OCR_IMAGE_SYSTEM = """你是一个专业的贸易单证 OCR 助手。对图片执行：
 1. 识别全部可见文字；
 2. 判断图片中是否存在印章（红色圆形/椭圆形印章图形，has_stamp: true=有/false=无/null=无法判断）；
@@ -73,6 +73,7 @@ RULE_IMPORT_SYSTEM = """你是单证审查规则解析助手。任务：把用�
       "check_category": "主检查项（可选派生标签，见规则2）",
       "scope": {"doc_types": ["涉及的多个文件类型"] 或 "ALL"（整批合同/全部文件）或 null, "intents": ["检查意图列表"]},
       "rule_text": "规则文本（简洁、可执行的自然语言描述）",
+      "source_ref": "来源行引用（如 规则!2；仅当输入行带 [SOURCE_ROW=...] 时填写，否则省略）",
       "structure": {
         "condition": {"text": "触发条件原文或null", "field": "条件涉及字段名或null", "operator": "等于/包含于等或null", "value": "条件取值或null"},
         "assertion": {
@@ -117,6 +118,9 @@ RULE_IMPORT_SYSTEM = """你是单证审查规则解析助手。任务：把用�
 9. confidence 反映你对这条规则确信程度：规则描述非常清楚、无歧义则接近 1.0；含模糊表述（如"部分情况""一般""可能"）则适当降低；完全不确定或不合理则为 0.0
 10. 为减少输出体积，值为 null 的字段省略不输出（客户端自动补全），confidence 字段值为 1.0 时同理省略；defects 无缺陷时整个数组省略；ontology 无新概念时省略
 11. 紧凑输出（防止长清单被 max_tokens 截断）：rules 数组按"每行一条规则"输出、逗号分隔，不输出多余空行、注释或解释文字；structure/tolerance 仅在有内容时输出
+12. 输入行若带 `[SOURCE_ROW=...]`，该行是一个独立的规则候选：必须逐行解析，并在输出中原样回填 `source_ref`；禁止因为多行规则描述相似而把不同行合并成一条
+13. 表格行中的“文件类型/单据类型/适用单据”等列必须写入该规则的 scope；多行共享同一合并单元格时，该合并值已经展开到每个数据行，必须逐行继承
+14. 表格行中的“业务条件/场景/模式”等条件列必须写入 structure.condition；描述相似但 scope 或 condition 不同的规则必须分别输出，禁止合并
 
 ### 缺陷检测指令
 对每条被解析的规则，执行以下检查，将结果填入 `defects` 数组：
@@ -132,6 +136,7 @@ RULE_IMPORT_SYSTEM = """你是单证审查规则解析助手。任务：把用�
 - missing_value：缺少关键数值参数
 - contradiction：规则间存在矛盾
 - uncertainty：存在理解上的不确定
+- description 禁止写“规则0/规则1”等数组序号；如需引用其他规则，请引用规则原文。系统入库后会补充规则流水号。
 
 severity 说明：
 - error：大概率有问题的规则，需要用户处理
@@ -148,7 +153,7 @@ RULE_IMPORT_USER = """已知文件类型（建议复用，不强制；规则出�
 {raw_text}
 ---
 
-请输出 JSON。"""
+若输入行带 `[SOURCE_ROW=...]`，请逐行解析并原样回填 source_ref。请输出 JSON。"""
 
 # ============ 修正建议生成 ============
 SUGGESTION_SYSTEM = (
@@ -263,7 +268,7 @@ GRAPH_BUILDER_SYSTEM = """你是规则图谱构建助手。任务：把自然语
   ],
   "relationships": [
     {"source": "文件类型.字段名", "target": "文件类型.字段名", "type": "COMPARE_TO",
-     "attributes": {"operator": "等于|不大于|不小于|时间早于|时间不晚于|总额等于|包含于", "tolerance": 0, "rule_id": "R001"}}
+     "attributes": {"operator": "等于|不大于|不小于|时间早于|时间不晚于|总额等于|包含于", "tolerance": 0, "rule_id": "R0001"}}
   ],
   "confidence": 0.0-1.0
 }
@@ -273,7 +278,7 @@ GRAPH_BUILDER_SYSTEM = """你是规则图谱构建助手。任务：把自然语
 2. 关系类型固定为 COMPARE_TO（比对关系）
 3. operator 必须是上述枚举之一
 4. tolerance 为数值容差（百分比、千克、天数等，0 表示严格相等）
-5. rule_id 用规则在规则集中的序号（如 R001、R002）
+5. rule_id 必须原样使用输入的规则流水号（如 R0001、R0002），不得自行重编号
 6. 一条规则可拆出多个实体和关系
 7. confidence 反映你对规则理解的确信度（0-1）"""
 
@@ -294,10 +299,10 @@ CONFLICT_DETECTION_SYSTEM = """你是一个单证审查规则一致性检测专�
 {
   "conflicts": [
     {
-      "rule_indices": [0, 2],
+      "rule_codes": ["R0001", "R0003"],
       "type": "logical_contradiction",
       "severity": "error",
-      "description": "规则1说'应不大于'，规则3说'应不小于'，两者直接矛盾"
+      "description": "规则 R0001 说'应不大于'，规则 R0003 说'应不小于'，两者直接矛盾"
     }
   ]
 }
@@ -316,6 +321,7 @@ severity：
 注意：
 - 只检查同组规则的矛盾关系
 - 没有冲突则输出 {"conflicts": []}
+- 规则必须用输入的规则流水号（R0001 形式）指代，禁止使用“规则0/规则1”等数组下标
 """
 
 
@@ -344,7 +350,7 @@ PROMPT_TEMPLATES: dict[str, str] = {
 
 
 PROMPT_META: dict[str, dict] = {
-    "ocr.image.system": {"label": "OCR 图像识别 · 系统提示词", "group": "OCR 识别", "description": "通义千问 VL 识别图片时的系统指令（识别文本/印章/字段/类型/置信度）。"},
+    "ocr.image.system": {"label": "OCR 图像识别 · 系统提示词", "group": "OCR 识别", "description": "DeepSeek 多模态模型识别图片时的系统指令（识别文本/印章/字段/类型/置信度）。"},
     "ocr.image.fields_hint": {"label": "OCR 图像识别 · 字段提取规则", "group": "OCR 识别", "description": "已知文档类型时的字段提取规则，{field_list} 会被替换为模板字段清单（含多行明细汇总要求）。"},
     "ocr.image.infer_hint": {"label": "OCR 图像识别 · 类型推断提示", "group": "OCR 识别", "description": "已知类型时对 inferred_doc_type 的补充说明。"},
     "ocr.image.infer_hint_free": {"label": "OCR 图像识别 · 自由提取提示", "group": "OCR 识别", "description": "未知文档类型时的自由提取提示。"},

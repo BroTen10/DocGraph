@@ -7,13 +7,13 @@
  *
  * 交互：
  * - 点击右侧 OCR 文本/字段 → 在左侧原始文档中高亮对应位置
- * - PDF：通过 react-pdf 文本层 + customTextRenderer 实现高亮
- * - 图片：无坐标信息，点击时显示视觉提示
+ * - PDF：优先通过 react-pdf 文本层 + customTextRenderer 实现高亮
+ * - 扫描 PDF/图片：通过 OCR 返回的逐行 bbox 叠加高亮框
  * - DOCX：通过 mammoth 转 HTML 后，JS 搜索高亮
  * - 左侧预览：滚轮缩放，按住左键拖动平移（ZoomableStage）
  */
 
-import { useState, useEffect, useRef, useCallback } from 'react'
+import { useState, useEffect, useRef, useCallback, useMemo } from 'react'
 import { Document as PdfDocument, Page as PdfPage } from 'react-pdf'
 import {
   Card, Tabs, Table, Tag, Empty, Spin, Typography, Button, Tooltip, message, Input, Space, Popconfirm,
@@ -23,7 +23,7 @@ import {
   EditOutlined, SaveOutlined, PlusOutlined, DeleteOutlined, CloseOutlined,
 } from '@ant-design/icons'
 import { contractsApi, getErrorMessage } from '../api/client'
-import type { DocumentBrief } from '../types'
+import type { DocumentBrief, OcrLayout, OcrLayoutLine } from '../types'
 import '../pdf-setup'
 import ZoomableStage from './ZoomableStage'
 import type { ZoomPanApi } from './ZoomableStage'
@@ -129,17 +129,110 @@ function pdfTextRenderer(textItem: { str?: string }): string {
   return `<span data-pdf-text="${str.replace(/"/g, '&quot;')}">${str}</span>`
 }
 
+/** 用于定位匹配的文本归一化：忽略空格、常见标点和大小写差异。 */
+function normalizeMatchText(value: string): string {
+  return value
+    .toLowerCase()
+    .replace(/[\s\u3000:：,，.。;；\-—_/\\()（）[\]【】]/g, '')
+}
+
+/** 在 OCR 行坐标中查找与字段值/文本行匹配的位置。 */
+function findLayoutMatches(text: string, layout?: OcrLayout | null): Array<{ page: number; line: OcrLayoutLine }> {
+  const targets = text
+    .split(/[;；,，、\n]/)
+    .map(normalizeMatchText)
+    .filter((item) => item.length >= 2)
+  if (!targets.length || !layout?.pages?.length) return []
+
+  const matches: Array<{ page: number; line: OcrLayoutLine; score: number }> = []
+  for (const page of layout.pages) {
+    for (const line of page.lines || []) {
+      const candidate = normalizeMatchText(line.text || '')
+      if (candidate.length < 2) continue
+
+      let score = 0
+      for (const target of targets) {
+        const prefix = target.slice(0, Math.min(12, target.length))
+        if (candidate === target) {
+          score = Math.max(score, 4)
+        } else if (candidate.includes(target)) {
+          score = Math.max(score, 3)
+        } else if (target.includes(candidate) && candidate.length >= 4) {
+          score = Math.max(score, 2)
+        } else if (candidate.includes(prefix) || (prefix.includes(candidate) && candidate.length >= 4)) {
+          score = Math.max(score, 1)
+        }
+      }
+      if (score > 0) matches.push({ page: page.page, line, score })
+    }
+  }
+
+  const best = Math.max(...matches.map((item) => item.score), 0)
+  const threshold = best >= 2 ? 2 : 1
+  return matches
+    .filter((item) => item.score >= threshold)
+    // 同分时优先选择更接近目标长度的行，避免日期先命中标题里的长编号。
+    .sort((a, b) => b.score - a.score || a.line.text.length - b.line.text.length)
+    .slice(0, 20)
+    .map(({ page, line }) => ({ page, line }))
+}
+
+/** 在 PDF 页面或图片上叠加 OCR 坐标高亮框。 */
+function OcrLayoutOverlay({
+  lines,
+  activeText,
+}: {
+  lines: OcrLayoutLine[]
+  activeText: string | null
+}) {
+  const matchedLines = useMemo(
+    () => (activeText ? findLayoutMatches(activeText, { pages: [{ page: 1, lines }] }) : []),
+    [activeText, lines],
+  )
+
+  return (
+    <div style={{ position: 'absolute', inset: 0, pointerEvents: 'none', zIndex: 3 }}>
+      {matchedLines.map(({ line }, index) => {
+        const [left, top, right, bottom] = line.bbox
+        return (
+          <div
+            key={`${line.text}-${index}`}
+            data-ocr-highlight="true"
+            title={line.text}
+            style={{
+              position: 'absolute',
+              left: `${left * 100}%`,
+              top: `${top * 100}%`,
+              width: `${Math.max(0.2, (right - left) * 100)}%`,
+              height: `${Math.max(0.2, (bottom - top) * 100)}%`,
+              border: '2px solid #faad14',
+              background: 'rgba(250, 173, 20, 0.32)',
+              boxShadow: '0 0 0 2px rgba(250, 173, 20, 0.18)',
+              borderRadius: 3,
+              boxSizing: 'border-box',
+            }}
+          />
+        )
+      })}
+    </div>
+  )
+}
+
 /** PDF 渲染器 */
 function PdfViewer({
   fileUrl,
   onReady,
   height,
   apiRef,
+  layout,
+  highlightTarget,
 }: {
   fileUrl: string
   onReady: (container: HTMLElement | null) => void
   height: number | string
   apiRef: { current: ZoomPanApi | null }
+  layout?: OcrLayout | null
+  highlightTarget: string | null
 }) {
   const containerRef = useRef<HTMLDivElement>(null)
   const [numPages, setNumPages] = useState<number>(0)
@@ -201,15 +294,26 @@ function PdfViewer({
           loading={null}
           error={null}
         >
-          {Array.from(new Array(numPages), (_, i) => (
-            <PdfPage
-              key={i + 1}
-              pageNumber={i + 1}
-              width={600}
-              customTextRenderer={pdfTextRenderer}
-              renderAnnotationLayer={false}
-            />
-          ))}
+          {Array.from(new Array(numPages), (_, i) => {
+            const pageLayout = layout?.pages?.find((page) => page.page === i + 1)
+            return (
+              <div
+                key={i + 1}
+                style={{ position: 'relative', width: 600, lineHeight: 0 }}
+              >
+                <PdfPage
+                  pageNumber={i + 1}
+                  width={600}
+                  customTextRenderer={pdfTextRenderer}
+                  renderAnnotationLayer={false}
+                />
+                <OcrLayoutOverlay
+                  lines={pageLayout?.lines || []}
+                  activeText={highlightTarget}
+                />
+              </div>
+            )
+          })}
         </PdfDocument>
       </div>
     </ZoomableStage>
@@ -217,13 +321,35 @@ function PdfViewer({
 }
 
 /** 图片渲染器 */
-function ImageViewer({ fileUrl, height }: { fileUrl: string; height: number | string }) {
+function ImageViewer({
+  fileUrl,
+  height,
+  onReady,
+  apiRef,
+  layout,
+  highlightTarget,
+}: {
+  fileUrl: string
+  height: number | string
+  onReady: (container: HTMLElement | null) => void
+  apiRef: { current: ZoomPanApi | null }
+  layout?: OcrLayout | null
+  highlightTarget: string | null
+}) {
+  const containerRef = useRef<HTMLDivElement>(null)
   const [viewportWidth, setViewportWidth] = useState(0)
   const [naturalSize, setNaturalSize] = useState<{ w: number; h: number } | null>(null)
   const [loadError, setLoadError] = useState<string | null>(null)
 
+  const displayWidth = naturalSize && naturalSize.w < viewportWidth ? naturalSize.w : viewportWidth
+  const pageLayout = layout?.pages?.find((page) => page.page === 1)
+
+  useEffect(() => {
+    if (viewportWidth > 0) onReady(containerRef.current)
+  }, [viewportWidth, onReady])
+
   return (
-    <ZoomableStage height={height} onViewportWidth={setViewportWidth}>
+    <ZoomableStage height={height} apiRef={apiRef} onViewportWidth={setViewportWidth}>
       {loadError && (
         <div style={{ textAlign: 'center', padding: 40, color: '#fff' }}>
           <WarningOutlined style={{ fontSize: 32, marginBottom: 12, color: '#faad14' }} />
@@ -236,23 +362,32 @@ function ImageViewer({ fileUrl, height }: { fileUrl: string; height: number | st
         </div>
       )}
       {viewportWidth > 0 && (
-        <img
-          src={fileUrl}
-          alt="原始文档"
-          draggable={false}
-          onLoad={(e) => {
-            setNaturalSize({ w: e.currentTarget.naturalWidth, h: e.currentTarget.naturalHeight })
-            setLoadError(null)
-          }}
-          onError={() => setLoadError('无法加载图片')}
-          style={{
-            // 默认铺满视口宽度；小图保持原始尺寸，避免拉伸变糊
-            width: naturalSize && naturalSize.w < viewportWidth ? naturalSize.w : viewportWidth,
-            display: 'block',
-            background: '#fff',
-            boxShadow: '0 1px 6px rgba(0, 0, 0, 0.3)',
-          }}
-        />
+        <div
+          ref={containerRef}
+          style={{ position: 'relative', width: displayWidth, lineHeight: 0 }}
+        >
+          <img
+            src={fileUrl}
+            alt="原始文档"
+            draggable={false}
+            onLoad={(e) => {
+              setNaturalSize({ w: e.currentTarget.naturalWidth, h: e.currentTarget.naturalHeight })
+              setLoadError(null)
+            }}
+            onError={() => setLoadError('无法加载图片')}
+            style={{
+              // 默认铺满视口宽度；小图保持原始尺寸，避免拉伸变糊
+              width: displayWidth,
+              display: 'block',
+              background: '#fff',
+              boxShadow: '0 1px 6px rgba(0, 0, 0, 0.3)',
+            }}
+          />
+          <OcrLayoutOverlay
+            lines={pageLayout?.lines || []}
+            activeText={highlightTarget}
+          />
+        </div>
       )}
     </ZoomableStage>
   )
@@ -386,6 +521,13 @@ export default function DocumentCompare({ doc, fileUrl, height = 600, onSaved }:
         message.info('文档尚未加载完成')
         return
       }
+      const layoutMatches = findLayoutMatches(text, displayDoc.ocr_layout)
+      const locateLayoutMatch = () => {
+        window.requestAnimationFrame(() => {
+          const first = docContainerRef.current?.querySelector<HTMLElement>('[data-ocr-highlight="true"]')
+          locateElement(first || null)
+        })
+      }
 
       // 对 PDF：搜索 data-pdf-text 属性
       const pdfTextSpans = container.querySelectorAll('[data-pdf-text]')
@@ -416,18 +558,28 @@ export default function DocumentCompare({ doc, fileUrl, height = 600, onSaved }:
                 mark.appendChild(span.firstChild)
               }
               span.appendChild(mark)
-              // 定位到可视区中央
-              locateElement(span as HTMLElement)
               found = true
             }
           }
         })
 
         if (found) {
+          const firstMark = container.querySelector<HTMLElement>(`mark.${HIGHLIGHT_CLASS}`)
+          locateElement(firstMark)
           message.success(`已在原始文档中定位: ${text.slice(0, 30)}${text.length > 30 ? '...' : ''}`)
+        } else if (layoutMatches.length > 0) {
+          locateLayoutMatch()
+          message.success(`已按 OCR 坐标定位: ${text.slice(0, 30)}${text.length > 30 ? '...' : ''}`)
         } else {
           message.info(`未在 PDF 中找到完全匹配的文本，请尝试在 PDF 中按 Ctrl+F 搜索`)
         }
+        return
+      }
+
+      // 扫描 PDF/图片：使用 OCR 行坐标高亮
+      if (layoutMatches.length > 0) {
+        locateLayoutMatch()
+        message.success(`已按 OCR 坐标定位: ${text.slice(0, 30)}${text.length > 30 ? '...' : ''}`)
         return
       }
 
@@ -438,16 +590,14 @@ export default function DocumentCompare({ doc, fileUrl, height = 600, onSaved }:
         locateElement(firstMark as HTMLElement | null)
         message.success(`找到 ${count} 处匹配，已高亮第一处`)
       } else {
-        // 图片：无法高亮文本位置
-        const hasImage = container.querySelector('img')
-        if (hasImage) {
-          message.info('图片文档无法定位文本位置，请在右侧查看 OCR 识别结果')
+        if (['pdf', 'png', 'jpg', 'jpeg'].includes(displayDoc.file_type)) {
+          message.info('该文档尚无 OCR 坐标数据，请重新执行 OCR 后再定位')
         } else {
           message.info('未在原始文档中找到匹配文本')
         }
       }
     },
-    [locateElement],
+    [displayDoc.file_type, displayDoc.ocr_layout, locateElement],
   )
 
   // ============ 字段人工修正（OCR 对照界面） ============
@@ -603,10 +753,20 @@ export default function DocumentCompare({ doc, fileUrl, height = 600, onSaved }:
               onReady={handleDocReady}
               height={height}
               apiRef={zoomApiRef}
+              layout={displayDoc.ocr_layout}
+              highlightTarget={highlightTarget}
             />
           )}
           {(doc.file_type === 'png' || doc.file_type === 'jpg' || doc.file_type === 'jpeg') && (
-            <ImageViewer key={fileUrl} fileUrl={fileUrl} height={height} />
+            <ImageViewer
+              key={fileUrl}
+              fileUrl={fileUrl}
+              height={height}
+              onReady={handleDocReady}
+              apiRef={zoomApiRef}
+              layout={displayDoc.ocr_layout}
+              highlightTarget={highlightTarget}
+            />
           )}
           {doc.file_type === 'docx' && (
             <DocxViewer
