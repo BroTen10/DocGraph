@@ -51,14 +51,14 @@ class Settings(BaseSettings):
     # LLM (DeepSeek, OpenAI 兼容)
     llm_api_key: str = ""
     llm_base_url: str = "https://api.deepseek.com/v1"
-    llm_model_name: str = "deepseek-v4.1-flash-expires-on-0910"
+    llm_model_name: str = "deepseek-flash"
     llm_confidence_threshold: float = 0.9
 
     # OCR (DeepSeek 多模态，OpenAI 兼容端点)
     # OCR_API_KEY 留空时自动复用 LLM_API_KEY。
     ocr_api_key: str = ""
     ocr_base_url: str = "https://api.deepseek.com/v1"
-    ocr_model_name: str = "deepseek-v4.1-flash-expires-on-0910"
+    ocr_model_name: str = "deepseek-flash"
 
     # 审查容差默认值
     allow_same_day_receive_pay: bool = True
