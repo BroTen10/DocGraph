@@ -32,11 +32,8 @@ def main() -> int:
     print(f"[OCR] model    = {settings.ocr_model_name}")
     print(f"[OCR] api_key  = {'已配置' if settings.effective_ocr_api_key else '未配置'}")
 
-    if settings.ocr_model_name != "deepseek-v4.1-flash-expires-on-0910":
-        print(
-            "[FAIL] 当前 OCR 模型不是 "
-            f"deepseek-v4.1-flash-expires-on-0910: {settings.ocr_model_name}"
-        )
+    if settings.ocr_model_name != "deepseek-flash":
+        print(f"[FAIL] 当前 OCR 模型不是 deepseek-flash: {settings.ocr_model_name}")
         return 1
     if not settings.effective_ocr_api_key:
         print("[FAIL] OCR API key 未配置（OCR_API_KEY 与 LLM_API_KEY 均为空）")
