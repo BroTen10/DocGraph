@@ -76,6 +76,13 @@ Thumbs.db
 # ============ Docker ============
 # docker-compose 本身要上传，但卷数据不上传
 docker-volumes/
+
+# ============ 本地发布/脱敏工具（含敏感字面量表，绝不入库） ============
+.publish/
+
+# ============ 本地调试产物（Playwright 快照/截图会包含真实单据，绝不入库） ============
+.playwright-cli/
+output/
 .workbuddy/
 acceptance_output/
 nul
