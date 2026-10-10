@@ -35,12 +35,15 @@ def list_rules(
     enabled_only: bool = Query(False),
     defect_severity: Optional[str] = Query(
         None,
-        description="按缺陷严重程度过滤: none(无缺陷) / conflict / error / warning / info",
+        description=(
+            "按缺陷归桶过滤（每个规则只属于一个桶，均为未处理缺陷）: "
+            "none(正常规则) / conflict / error / warning / info"
+        ),
     ),
     only_confirmed: bool = Query(False),
     db: Session = Depends(get_db),
 ) -> list[RuleOut]:
-    """规则列表，支持按规则集 / 文件类型 / 检查项 / 启用状态 / 缺陷严重程度过滤。"""
+    """规则列表，支持按规则集 / 文件类型 / 检查项 / 启用状态 / 缺陷归桶过滤。"""
     return rule_service.list_rules(
         db, rule_set_id, doc_type, check_category, enabled_only,
         defect_severity=defect_severity,
@@ -135,7 +138,11 @@ def confirm_rules_batch(
     confirmed_by: str = Query("user", description="确认人"),
     db: Session = Depends(get_db),
 ) -> dict:
-    """批量确认规则。提供 ids 则仅确认这些；不提供则确认该规则集下所有 pending 规则。"""
+    """批量确认规则。提供 ids 则仅确认这些；不提供则确认该规则集下所有 pending 规则。
+
+    方案 A：确认即视为用户认可该规则及其全部缺陷，未处理缺陷会标记为"已处理"，
+    规则随即进入「正常规则」页签。
+    """
     count = rule_service.confirm_rules_batch(
         db, rule_set_id, payload.ids, confirmed_by=confirmed_by,
     )
@@ -148,7 +155,7 @@ def get_defect_summary(
     rule_set_id: uuid.UUID = Query(..., description="规则集 ID"),
     db: Session = Depends(get_db),
 ) -> dict:
-    """获取规则集缺陷概览统计：正常/冲突/错误/警告/提示各有多少条规则。"""
+    """获取规则集缺陷概览统计：正常/冲突/错误/警告/提示各有多少**条规则**（互斥且穷尽）。"""
     return rule_service.get_defect_summary(db, rule_set_id)
 
 

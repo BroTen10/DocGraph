@@ -82,6 +82,8 @@ def init_db() -> None:
     _run_migrations(engine)
     # 规则流水号回填与存量提示清洗
     _migrate_rule_numbering()
+    # 方案 A：存量已确认规则的缺陷标记为"已处理"（确认即认可）
+    _migrate_defect_resolution()
     # 种子数据：内置默认 Skill + 文档类型
     _seed_builtin_skill()
     _seed_doc_types()
@@ -258,6 +260,50 @@ def _migrate_rule_numbering() -> None:
         if changed:
             db.commit()
             logger.info("规则流水号提示迁移完成: 已更新 %d 条规则", changed)
+
+
+def _migrate_defect_resolution() -> None:
+    """方案 A 存量回填：已确认规则的未处理缺陷标记为"已处理"（幂等）。
+
+    旧口径下「正常规则」= defects 为空，而"确认并启用"只改 status/enabled，
+    导致用户已认可的规则永远停留在「冲突/错误/警告」页签。
+    新口径为「确认规则即认可该规则及其全部缺陷」，此处把存量已确认规则的
+    未处理缺陷标记为 resolved，使其归入「正常规则」。
+    """
+    from .services import rule_defects
+
+    with SessionLocal() as db:
+        rows = list(
+            db.execute(
+                text(
+                    "SELECT id, defects FROM rules "
+                    "WHERE status = 'confirmed' "
+                    "AND defects IS NOT NULL AND defects != '[]'::jsonb"
+                )
+            ).mappings()
+        )
+        changed = 0
+        for row in rows:
+            defects = list(row["defects"] or [])
+            resolved, count = rule_defects.resolve_defects(
+                defects,
+                by=rule_defects.RESOLVED_BY_MIGRATION,
+                note=rule_defects.MIGRATION_NOTE,
+            )
+            if not count:
+                continue
+            db.execute(
+                text(
+                    "UPDATE rules SET defects = CAST(:defects AS jsonb) "
+                    "WHERE id = CAST(:id AS uuid)"
+                ),
+                {"defects": json.dumps(resolved, ensure_ascii=False), "id": str(row["id"])},
+            )
+            changed += 1
+
+        if changed:
+            db.commit()
+            logger.info("规则缺陷处理状态回填完成: 已处理 %d 条规则的存量缺陷", changed)
 
 
 def _seed_builtin_skill() -> None:

@@ -19,6 +19,13 @@ class DefectItem(BaseModel):
     rule_code: str | None = Field(default=None, description="所属规则流水号，如 R0001")
     related_rule_ids: list[str] | None = Field(default=None, description="关联的冲突规则 ID")
     related_rule_codes: list[str] | None = Field(default=None, description="关联的冲突规则流水号")
+    # ----- 方案 A：缺陷处理状态 -----
+    # resolved = 用户/系统已认可该缺陷（规则确认即视为认可）；缺省/null = 未处理。
+    # 已处理缺陷保留在列表中用于审计，仅参与「已处理」展示，不再计入问题页签。
+    resolution: str | None = Field(default=None, description="处理状态：resolved=已处理；缺省=未处理")
+    resolved_at: str | None = Field(default=None, description="处理时间（ISO8601）")
+    resolved_by: str | None = Field(default=None, description="处理来源：用户确认/导入自动确认/冲突消除/历史迁移")
+    resolution_note: str | None = Field(default=None, description="处理说明")
 
 
 class RuleBase(BaseModel):

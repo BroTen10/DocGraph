@@ -14,6 +14,7 @@ from sqlalchemy.orm import Session
 
 from ..models import Rule, RuleSet, RuleSnapshot
 from ..schemas.rule import RuleCreate, RuleOut, RuleUpdate
+from . import rule_defects
 from .doc_normalizer import (
     normalize_doc_type,
     normalize_scope,
@@ -62,7 +63,11 @@ def list_rules(
     defect_severity: Optional[str] = None,
     only_confirmed: bool = False,
 ) -> list[RuleOut]:
-    """规则列表，支持按规则集 / 文件类型 / 检查项 / 启用状态 / 缺陷严重程度 / 确认状态过滤。"""
+    """规则列表，支持按规则集 / 文件类型 / 检查项 / 启用状态 / 缺陷归桶 / 确认状态过滤。
+
+    defect_severity 采用「归桶」语义（每个规则只属于一个桶，见 rule_defects.classify）：
+    none(正常规则) / conflict / error / warning / info，只统计**未处理**缺陷。
+    """
     stmt = (
         select(Rule)
         .where(Rule.rule_set_id == rule_set_id)
@@ -79,27 +84,25 @@ def list_rules(
     rows = db.execute(stmt).scalars().all()
     result = [RuleOut.model_validate(r) for r in rows]
 
-    # defect_severity 过滤在 Python 层做（JSONB 复杂查询）
+    # 缺陷归桶过滤在 Python 层做（JSONB 复杂查询）
     if defect_severity:
-        if defect_severity == "none":
-            # 无缺陷的规则
-            result = [r for r in result if not r.defects or len(r.defects) == 0]
-        elif defect_severity == "conflict":
-            # 有冲突类型缺陷的规则
-            conflict_types = {"logical_contradiction", "boundary_overlap", "redundant"}
-            result = [r for r in result if any(d.type in conflict_types for d in (r.defects or []))]
-        elif defect_severity == "error":
-            result = [r for r in result if any(d.severity == "error" for d in (r.defects or []))]
-        elif defect_severity == "warning":
-            result = [r for r in result if any(d.severity == "warning" for d in (r.defects or []))]
-        elif defect_severity == "info":
-            result = [r for r in result if any(d.severity == "info" for d in (r.defects or []))]
+        result = [r for r in result if rule_defects.matches_bucket(r.defects, defect_severity)]
 
     return result
 
 
 def get_rule(db: Session, rule_id: uuid.UUID) -> Optional[Rule]:
     return db.get(Rule, rule_id)
+
+
+def _accept_defects(
+    rule: Rule, *, by: str, note: str | None = rule_defects.CONFIRM_NOTE
+) -> int:
+    """方案 A：认可规则即认可其全部缺陷——把未处理缺陷标记为已处理。"""
+    defects, count = rule_defects.resolve_defects(rule.defects, by=by, note=note)
+    if count:
+        rule.defects = defects
+    return count
 
 
 def create_rule(db: Session, rule_set_id: uuid.UUID, payload: RuleCreate) -> RuleOut:
@@ -118,6 +121,9 @@ def create_rule(db: Session, rule_set_id: uuid.UUID, payload: RuleCreate) -> Rul
         if data.get("structure"):
             data["structure"] = normalize_structure(db, data["structure"], data.get("doc_type"))
         rule = Rule(rule_set_id=rule_set_id, **data)
+        # 方案 A：创建时即为"已确认"的规则，缺陷一并视为已认可
+        if rule.status == "confirmed":
+            _accept_defects(rule, by=rule.confirmed_by or rule_defects.RESOLVED_BY_CONFIRM)
         db.add(rule)
         db.commit()
         db.refresh(rule)
@@ -130,6 +136,8 @@ def create_rule(db: Session, rule_set_id: uuid.UUID, payload: RuleCreate) -> Rul
 def update_rule(
     db: Session, rule_id: uuid.UUID, payload: RuleUpdate
 ) -> Optional[RuleOut]:
+    from datetime import datetime
+
     rule = db.get(Rule, rule_id)
     if rule is None:
         return None
@@ -145,6 +153,15 @@ def update_rule(
         )
     for k, v in data.items():
         setattr(rule, k, v)
+    # 方案 A：把规则置为"已确认"或显式启用（用户认可）时，未处理缺陷标记为已处理，
+    # 规则随即进入「正常规则」。仅改文本/标签不会自动消解缺陷，需用户显式确认。
+    accepts = data.get("status") == "confirmed" or data.get("enabled") is True
+    if accepts and rule.status == "confirmed":
+        if rule.confirmed_at is None:
+            rule.confirmed_at = datetime.now()
+        if not rule.confirmed_by:
+            rule.confirmed_by = rule_defects.RESOLVED_BY_CONFIRM
+        _accept_defects(rule, by=rule.confirmed_by)
     db.commit()
     db.refresh(rule)
     return RuleOut.model_validate(rule)
@@ -211,18 +228,21 @@ def confirm_rules_batch(
     db: Session, rule_set_id: uuid.UUID, ids: Optional[list[uuid.UUID]] = None,
     confirmed_by: str = "user",
 ) -> int:
-    """批量确认规则：将指定规则（或所有 pending 规则）状态改为 confirmed 并启用。
+    """批量确认规则：状态改为 confirmed 并启用，同时把未处理缺陷标记为已处理。
+
+    提供 ids 时按 id 确认（**包含已 confirmed 但仍有未处理缺陷的规则**，需要重新确认才能进入正常规则）；
+    不提供 ids 时确认该规则集下所有 pending 规则。
 
     Returns:
         实际确认的规则条数
     """
     from datetime import datetime
-    stmt = select(Rule).where(
-        Rule.rule_set_id == rule_set_id,
-        Rule.status != "confirmed",
-    )
+
+    stmt = select(Rule).where(Rule.rule_set_id == rule_set_id)
     if ids:
         stmt = stmt.where(Rule.id.in_(ids))
+    else:
+        stmt = stmt.where(Rule.status != "confirmed")
     rows = db.execute(stmt).scalars().all()
     now = datetime.now()
     for r in rows:
@@ -230,6 +250,8 @@ def confirm_rules_batch(
         r.confirmed_at = now
         r.confirmed_by = confirmed_by
         r.enabled = True
+        # 方案 A：确认即认可，未处理缺陷标记为已处理 → 规则进入「正常规则」
+        _accept_defects(r, by=confirmed_by)
     db.commit()
     return len(rows)
 
@@ -249,7 +271,10 @@ def get_enabled_rules_for_snapshot(
 
 
 def get_defect_summary(db: Session, rule_set_id: uuid.UUID) -> dict:
-    """获取规则集缺陷概览统计。
+    """获取规则集缺陷概览统计（**各页签均为规则条数**，互斥且穷尽）。
+
+    每个规则按最严重的未处理缺陷归入唯一桶（冲突 > 错误 > 警告 > 提示 > 正常规则），
+    因此 ``total_rules == healthy + conflict + error + warning + info``。
 
     Returns:
         {"total_rules": N, "healthy": N, "conflict": N, "error": N, "warning": N, "info": N}
@@ -258,37 +283,15 @@ def get_defect_summary(db: Session, rule_set_id: uuid.UUID) -> dict:
         select(Rule).where(Rule.rule_set_id == rule_set_id)
     ).scalars().all()
 
-    total = len(rules)
-    conflict = 0
-    error = 0
-    warning = 0
-    info = 0
-    conflict_types = {"logical_contradiction", "boundary_overlap", "redundant"}
-
-    for r in rules:
-        defects = r.defects or []
-        has_conflict = False
-        for d in defects:
-            if d.get("type") in conflict_types:
-                has_conflict = True
-            sev = d.get("severity", "info")
-            if sev == "error":
-                error += 1
-            elif sev == "warning":
-                warning += 1
-            else:
-                info += 1
-        if has_conflict:
-            conflict += 1
-
-    # healthy = 无任何缺陷的规则数
-    healthy = sum(1 for r in rules if not r.defects or len(r.defects) == 0)
-
-    return {
-        "total_rules": total,
-        "healthy": healthy,
-        "conflict": conflict,
-        "error": error,
-        "warning": warning,
-        "info": info,
+    summary = {
+        "total_rules": len(rules),
+        "healthy": 0,
+        "conflict": 0,
+        "error": 0,
+        "warning": 0,
+        "info": 0,
     }
+    for r in rules:
+        # classify 只会返回 healthy/conflict/error/warning/info
+        summary[rule_defects.classify(r.defects)] += 1
+    return summary

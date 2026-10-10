@@ -26,6 +26,7 @@ from sqlalchemy.orm import Session
 from ..constants import ALL_DOC_TYPES, CHECK_CATEGORIES
 from ..llm_client import LLMError, get_llm_client
 from ..models import DocumentType, Rule, RuleSet
+from . import rule_defects
 from .rule_service import create_rule
 from ..schemas.rule import RuleCreate, ConflictReport
 from .rule_parse_engine import (
@@ -569,28 +570,37 @@ def _merge_into_existing(
     for d in (new_defects or []):
         d = dict(d)
         d["rule_code"] = getattr(existing_rule, "rule_code", None)
+        # 同一缺陷再次并入时，若此前已被标记为"已处理"，需重新打开
+        d.pop("resolution", None)
+        d.pop("resolved_at", None)
+        d.pop("resolved_by", None)
+        d.pop("resolution_note", None)
         key = (d.get("type"), d.get("description"))
         if key not in old_keys:
             old_defects.append(d)
             old_keys.add(key)
             changes += 1
-            if d.get("severity") in ("error", "warning"):
+            if d.get("severity") in rule_defects.BLOCKING_SEVERITIES:
                 added_real_defect = True
     if changes > 0:
         existing_rule.defects = old_defects
         # 重新评估规则健康状态：新并入实质缺陷时回落到待确认/禁用。
-        has_defects = any(
-            d.get("severity") in ("error", "warning")
-            for d in old_defects
-        )
         if added_real_defect:
             existing_rule.status = "pending"
             existing_rule.enabled = False
             existing_rule.confirmed_at = None
             existing_rule.confirmed_by = None
-        elif not has_defects and existing_rule.status != "confirmed":
+        elif not rule_defects.has_open_blocking_defect(old_defects) and existing_rule.status != "confirmed":
             existing_rule.status = "confirmed"
             existing_rule.enabled = True
+            # 自动确认 = 系统认可，残留（提示类）缺陷一并标记为已处理
+            resolved, count = rule_defects.resolve_defects(
+                existing_rule.defects,
+                by=rule_defects.RESOLVED_BY_IMPORT,
+                note=rule_defects.AUTO_CONFIRM_NOTE,
+            )
+            if count:
+                existing_rule.defects = resolved
             changes += 1
 
     db.commit()
@@ -978,9 +988,10 @@ def import_rules_from_text(
             confidence = None
 
         # 关联该规则的 defects（rule_index 从 0 开始）
-        rule_defects = defects_by_rule.get(i - 1, [])
+        # 注意：变量名不能叫 rule_defects，否则会遮蔽同名的缺陷语义模块
+        rule_defect_items = defects_by_rule.get(i - 1, [])
         clean_defects = []
-        for d in rule_defects:
+        for d in rule_defect_items:
             clean_defects.append({
                 "type": d.get("type", "unknown"),
                 "severity": d.get("severity", "info"),
@@ -1046,10 +1057,10 @@ def import_rules_from_text(
             continue
 
         # ----- 3. 规则健康状态分类 -----
-        # 无实质缺陷(error/warning) -> 自动确认+启用
-        # 有实质缺陷 -> 待确认+禁用
+        # 无实质缺陷(error/warning) -> 自动确认+启用（提示类缺陷一并视为已认可）
+        # 有实质缺陷 -> 待确认+禁用，缺陷保持未处理，规则进入「错误/警告」页签
         has_real_defect = any(
-            d.get("severity") in ("error", "warning")
+            d.get("severity") in rule_defects.BLOCKING_SEVERITIES
             for d in clean_defects
         )
         if has_real_defect:
@@ -1058,6 +1069,11 @@ def import_rules_from_text(
         else:
             status = "confirmed"
             enabled = True
+            clean_defects, _resolved = rule_defects.resolve_defects(
+                clean_defects,
+                by=rule_defects.RESOLVED_BY_IMPORT,
+                note=rule_defects.AUTO_CONFIRM_NOTE,
+            )
 
         try:
             payload = RuleCreate(

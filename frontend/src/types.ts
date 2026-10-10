@@ -100,6 +100,14 @@ export interface DefectItem {
   rule_code?: string | null
   related_rule_ids?: string[] | null
   related_rule_codes?: string[] | null
+  /** 处理状态：resolved = 用户/系统已认可（确认规则即视为认可）；缺省 = 未处理 */
+  resolution?: 'open' | 'resolved' | null
+  /** 处理时间（ISO8601） */
+  resolved_at?: string | null
+  /** 处理来源：用户确认 / 导入自动确认 / 冲突消除 / 历史迁移 */
+  resolved_by?: string | null
+  /** 处理说明 */
+  resolution_note?: string | null
 }
 
 export interface ConflictReport {

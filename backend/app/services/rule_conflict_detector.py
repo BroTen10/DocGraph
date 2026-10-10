@@ -19,6 +19,7 @@ from sqlalchemy.orm import Session
 
 from ..llm_client import LLMError, get_llm_client
 from ..models import Rule
+from . import rule_defects
 from .settings_service import get_prompt
 from .rule_import_task import ImportProgress, update_task
 from .rule_service import format_rule_code
@@ -339,6 +340,14 @@ def apply_conflicts_as_defects(db: Session, rule_set_id: str, conflicts: list[di
             if not is_dup:
                 existing.append(defect)
                 rule.defects = existing
+            else:
+                # 同一冲突再次出现：即使此前被用户标记为"已处理"，也要重新打开，
+                # 否则已处理的旧缺陷会掩盖新检测出的冲突。
+                reopened, count = rule_defects.reopen_defects(
+                    existing, types=(defect["type"],)
+                )
+                if count:
+                    rule.defects = reopened
 
             # 语义冲突属于需要人工确认的问题，统一回到安全默认状态。
             if (
@@ -372,20 +381,25 @@ def clear_old_conflicts(db: Session, rule_set_id: str, current_conflict_ids: set
         defects = rule.defects or []
         new_defects = [
             d for d in defects
-            if d.get("type") not in ("logical_contradiction", "boundary_overlap", "redundant")
+            if not rule_defects.is_conflict_defect(d)
             or d.get("description") in current_conflict_ids
         ]
         if len(new_defects) != len(defects):
             rule.defects = new_defects
             cleared += 1
-            # 冲突已消除且无其他实质缺陷时，恢复健康规则默认状态。
-            has_real_defect = any(
-                d.get("severity") in ("error", "warning")
-                for d in new_defects
-            )
-            if not has_real_defect and rule.status != "confirmed":
+            # 冲突已消除且无其他未处理实质缺陷时，恢复健康规则默认状态：
+            # 自动确认的同时把残留（提示类）缺陷一并标记为已处理，保证
+            # "已确认 ⇒ 无未处理缺陷"，规则进入「正常规则」。
+            if not rule_defects.has_open_blocking_defect(new_defects) and rule.status != "confirmed":
                 rule.status = "confirmed"
                 rule.enabled = True
+                resolved, count = rule_defects.resolve_defects(
+                    new_defects,
+                    by=rule_defects.RESOLVED_BY_CONFLICT_CLEARED,
+                    note=rule_defects.CONFLICT_CLEARED_NOTE,
+                )
+                if count:
+                    rule.defects = resolved
 
     if cleared:
         db.commit()

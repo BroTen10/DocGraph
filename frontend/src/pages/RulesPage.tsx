@@ -8,6 +8,10 @@ import {
 import { PlusOutlined, EditOutlined, DeleteOutlined, HistoryOutlined, ImportOutlined, InboxOutlined, FileTextOutlined, SettingOutlined, CheckOutlined, WarningOutlined, ArrowRightOutlined } from '@ant-design/icons'
 import { rulesApi, constantsApi, getErrorMessage, isFormValidationError, ruleSetsApi, skillsApi } from '../api/client'
 import type { Rule, RuleSet, RuleSnapshot, DocTypeMeta, ConstantsResponse, RuleImportResponse, ImportTask, DefectItem } from '../types'
+import {
+  classifyDefects, hasOpenDefect, isConflictDefect, isResolvedDefect, needsUserAction, openDefects,
+  openSeverityCounts, DEFECT_BUCKET_LABEL, type RuleFilterKey,
+} from '../utils/defects'
 import PageHeader from '../components/PageHeader'
 import { useRuleSet } from '../context/RuleSetContext'
 import SkillTab from './SkillTab'
@@ -194,8 +198,7 @@ export default function RulesPage() {
   const [defectDrawerOpen, setDefectDrawerOpen] = useState(false)
   const [defectDrawerTab, setDefectDrawerTab] = useState<'conflict' | 'error' | 'warning'>('error')
 
-  // 规则列表子标签页：按健康状态过滤
-  type RuleFilterKey = 'all' | 'healthy' | 'conflict' | 'error' | 'warning' | 'info'
+  // 规则列表子标签页：按缺陷归桶过滤（互斥：正常/冲突/错误/警告/提示）
   const [activeRuleFilter, setActiveRuleFilter] = useState<RuleFilterKey>('all')
   const [defectSummaryRemote, setDefectSummaryRemote] = useState<{ healthy: number; conflict: number; error: number; warning: number; info: number; total_rules: number } | null>(null)
 
@@ -285,25 +288,35 @@ export default function RulesPage() {
     return [...new Set([...seed, ...fromSet, ...fromRules])]
   }, [ruleSet, rules])
 
-  // 计算缺陷统计
+  // 计算缺陷统计（与后端同口径：按"最严重的未处理缺陷"归桶，各页签都是规则条数）。
+  // 后端 defect-summary 为权威来源，此处仅作兜底与无网络时的降级展示。
   const defectSummary = useMemo(() => {
-    const summary = { error: 0, warning: 0, info: 0, total: 0, conflict: 0 }
+    const summary = { healthy: 0, conflict: 0, error: 0, warning: 0, info: 0, total_rules: rules.length }
     rules.forEach((r) => {
-      const defects = r.defects || []
-      defects.forEach((d: DefectItem) => {
-        const sev = d.severity || 'info'
-        // 冲突类单独计数
-        if (['logical_contradiction', 'boundary_overlap', 'redundant'].includes(d.type)) {
-          summary.conflict++
-        }
-        if (sev === 'error') summary.error++
-        else if (sev === 'warning') summary.warning++
-        else summary.info++
-        summary.total++
-      })
+      summary[classifyDefects(r.defects)] += 1
     })
     return summary
   }, [rules])
+
+  /** 页签计数：优先用后端规则集全量统计（当前 rules 可能已被页签过滤） */
+  const summary = defectSummaryRemote ?? defectSummary
+
+  /** 缺陷侧边栏计数：按**未处理缺陷条目**统计（与表格逐条展示保持一致） */
+  const openDefectCounts = useMemo(() => {
+    const counts = { conflict: 0, error: 0, warning: 0, info: 0 }
+    rules.forEach((r) => {
+      openDefects(r.defects).forEach((d) => {
+        if (isConflictDefect(d)) counts.conflict += 1
+        if (d.severity === 'error') counts.error += 1
+        else if (d.severity === 'warning') counts.warning += 1
+        else counts.info += 1
+      })
+    })
+    return counts
+  }, [rules])
+
+  /** 当前视图中仍需用户操作的规则（未确认，或仍有未处理缺陷） */
+  const actionableRules = useMemo(() => rules.filter(needsUserAction), [rules])
 
   const openCreate = () => {
     setEditing(null)
@@ -464,13 +477,9 @@ export default function RulesPage() {
     if (!currentId) return
     setConfirming(true)
     try {
-      // 先确认
+      // 后端确认时已同时置 enabled=true，并把未处理缺陷标记为"已处理"
       const resp = await rulesApi.confirmBatch(currentId, ids)
-      // 再批量启用
-      if (ids && ids.length > 0) {
-        await Promise.all(ids.map((id) => rulesApi.update(id, { enabled: true }).catch(() => {})))
-      }
-      message.success(resp.message + '，已同步启用')
+      message.success(resp.message + '，缺陷已标记为已处理并进入「正常规则」')
       await load()
     } catch (e) {
       message.error('确认失败: ' + getErrorMessage(e))
@@ -830,10 +839,11 @@ export default function RulesPage() {
   }
 
   // 批次 5-6：错误/警告 Tab 共用缺陷表格渲染（消除重复）
+  // 方案 A：只列**未处理**缺陷；已处理缺陷保留在规则详情/缺陷列中做审计展示。
   const renderDefectTable = (severity: 'error' | 'warning', rowPrefix: string) => {
     const entries: Array<{ ruleId: string; ruleCode: string; docType: string | null; checkCategory: string | null; ruleText: string; type: string; description: string }> = []
     rules.forEach((r) => {
-      ;(r.defects || []).filter((d) => d.severity === severity).forEach((d) => {
+      openDefects(r.defects).filter((d) => d.severity === severity).forEach((d) => {
         entries.push({
           ruleId: r.id, ruleCode: r.rule_code, docType: r.doc_type, checkCategory: r.check_category,
           ruleText: r.rule_text, type: d.type, description: d.description,
@@ -912,28 +922,28 @@ export default function RulesPage() {
       ),
     },
     {
-      title: '缺陷', key: 'defects', width: 140,
+      title: '缺陷', key: 'defects', width: 150,
       render: (_: unknown, row: Rule) => {
         const defects = row.defects || []
         if (defects.length === 0) return <Text type="secondary">-</Text>
-        const errors = defects.filter((d) => d.severity === 'error')
-        const warnings = defects.filter((d) => d.severity === 'warning')
-        const infos = defects.filter((d) => d.severity === 'info')
+        const pending = openDefects(defects)
+        const handled = defects.length - pending.length
+        const { error: errors, warning: warnings, info: infos } = openSeverityCounts(defects)
+        const tag = (count: number, color: string, label: string, list: DefectItem[]) => (
+          <Tooltip title={list.map((d) => d.description).join('\n')}>
+            <Tag color={color}>{count} {label}</Tag>
+          </Tooltip>
+        )
         return (
           <Space size={4} wrap>
-            {errors.length > 0 && (
-              <Tooltip title={errors.map((d) => d.description).join('\n')}>
-                <Tag color="red">{errors.length} 错误</Tag>
-              </Tooltip>
-            )}
-            {warnings.length > 0 && (
-              <Tooltip title={warnings.map((d) => d.description).join('\n')}>
-                <Tag color="orange">{warnings.length} 警告</Tag>
-              </Tooltip>
-            )}
-            {infos.length > 0 && (
-              <Tooltip title={infos.map((d) => d.description).join('\n')}>
-                <Tag color="blue">{infos.length} 提示</Tag>
+            {errors > 0 && tag(errors, 'red', '错误', pending.filter((d) => d.severity === 'error'))}
+            {warnings > 0 && tag(warnings, 'orange', '警告', pending.filter((d) => d.severity === 'warning'))}
+            {infos > 0 && tag(infos, 'blue', '提示', pending.filter((d) => d.severity === 'info'))}
+            {handled > 0 && (
+              <Tooltip
+                title={defects.filter(isResolvedDefect).map((d) => `${d.description}（已处理${d.resolved_by ? `：${d.resolved_by}` : ''}）`).join('\n')}
+              >
+                <Tag color="default">{handled} 已处理</Tag>
               </Tooltip>
             )}
           </Space>
@@ -961,15 +971,19 @@ export default function RulesPage() {
           onChange={async (checked) => {
             try {
               const payload: Partial<Rule> = { enabled: checked }
-              // 在问题规则视图中启用时，同时确认该规则
-              if (checked && row.status !== 'confirmed' && activeRuleFilter !== 'healthy') {
+              // 启用即视为用户认可：未确认的规则同时置为已确认，
+              // 后端会把未处理缺陷标记为"已处理"，规则随后进入「正常规则」。
+              if (checked && row.status !== 'confirmed') {
                 payload.status = 'confirmed'
               }
               await rulesApi.update(row.id, payload)
+              const accepted = checked && row.status !== 'confirmed'
               message.success(
-                checked && row.status !== 'confirmed'
-                  ? '规则已确认并启用，将参与图谱构建'
-                  : checked ? '规则已启用' : '规则已禁用，已从图谱中移除'
+                accepted
+                  ? '规则已确认并启用，缺陷已标记为已处理，将参与图谱构建'
+                  : checked
+                    ? (hasOpenDefect(row) ? '规则已启用，缺陷已标记为已处理' : '规则已启用')
+                    : '规则已禁用，已从图谱中移除'
               )
               await load()
     } catch (e) {
@@ -981,26 +995,43 @@ export default function RulesPage() {
     },
     {
       title: '操作', key: 'action', width: 180,
-      render: (_: unknown, row: Rule) => (
-        <Space>
-          {row.status !== 'confirmed' && (
-            <Popconfirm
-              title="确认并启用该条规则？确认后规则将参与图谱构建和文档审查"
-              onConfirm={async () => {
-                await rulesApi.update(row.id, { status: 'confirmed', enabled: true })
-                message.success('规则已确认并启用')
-                await load()
-              }}
-            >
-              <Button size="small" type="primary" icon={<CheckOutlined />}>确认启用</Button>
+      render: (_: unknown, row: Rule) => {
+        const openCount = openDefects(row.defects).length
+        const needConfirm = row.status !== 'confirmed'
+        // 已确认但仍有未处理缺陷（例如历史数据/后续新检出）时，仍提供"标记已处理"入口
+        const showAction = needConfirm || openCount > 0
+        return (
+          <Space>
+            {showAction && (
+              <Popconfirm
+                title={
+                  needConfirm
+                    ? '确认并启用该条规则？确认后缺陷将标记为已处理，规则进入「正常规则」并参与图谱构建和文档审查'
+                    : `将 ${openCount} 条未处理缺陷标记为已处理？规则已确认启用，处理后将进入「正常规则」`
+                }
+                onConfirm={async () => {
+                  await rulesApi.update(
+                    row.id,
+                    needConfirm ? { status: 'confirmed', enabled: true } : { status: 'confirmed' },
+                  )
+                  message.success(
+                    needConfirm ? '规则已确认并启用，缺陷已标记为已处理' : '缺陷已标记为已处理，规则已进入「正常规则」',
+                  )
+                  await load()
+                }}
+              >
+                <Button size="small" type="primary" icon={<CheckOutlined />}>
+                  {needConfirm ? '确认启用' : '标记已处理'}
+                </Button>
+              </Popconfirm>
+            )}
+            <Button size="small" icon={<EditOutlined />} onClick={() => openEdit(row)} />
+            <Popconfirm title="确定删除该规则？" onConfirm={() => handleDelete(row.id)}>
+              <Button size="small" danger icon={<DeleteOutlined />} />
             </Popconfirm>
-          )}
-          <Button size="small" icon={<EditOutlined />} onClick={() => openEdit(row)} />
-          <Popconfirm title="确定删除该规则？" onConfirm={() => handleDelete(row.id)}>
-            <Button size="small" danger icon={<DeleteOutlined />} />
-          </Popconfirm>
-        </Space>
-      ),
+          </Space>
+        )
+      },
     },
   ]
 
@@ -1063,64 +1094,72 @@ export default function RulesPage() {
                   size="small"
                   style={{ marginBottom: 12 }}
                   items={[
-                    { key: 'all', label: `全部（${defectSummaryRemote?.total_rules ?? rules.length}）` },
+                    { key: 'all', label: `全部（${summary.total_rules}）` },
                     {
                       key: 'healthy',
                       label: (
-                        <span style={{ color: '#52c41a' }}>
-                          正常规则（{defectSummaryRemote?.healthy ?? 0}）
-                        </span>
+                        <Tooltip title="无未处理缺陷的规则（已确认的规则可直接参与图谱构建）">
+                          <span style={{ color: '#52c41a' }}>
+                            {DEFECT_BUCKET_LABEL.healthy}（{summary.healthy}）
+                          </span>
+                        </Tooltip>
                       ),
                     },
                     {
                       key: 'conflict',
                       label: (
-                        <span style={{ color: '#ff4d4f' }}>
-                          冲突（{defectSummaryRemote?.conflict ?? defectSummary.conflict}）
-                        </span>
+                        <Tooltip title="存在未处理的语义冲突缺陷（逻辑矛盾/边界冲突/冗余）的规则条数">
+                          <span style={{ color: '#ff4d4f' }}>
+                            {DEFECT_BUCKET_LABEL.conflict}（{summary.conflict}）
+                          </span>
+                        </Tooltip>
                       ),
                     },
                     {
                       key: 'error',
                       label: (
-                        <span style={{ color: '#ff4d4f' }}>
-                          错误（{defectSummaryRemote?.error ?? defectSummary.error}）
-                        </span>
+                        <Tooltip title="存在未处理的错误级缺陷的规则条数">
+                          <span style={{ color: '#ff4d4f' }}>
+                            {DEFECT_BUCKET_LABEL.error}（{summary.error}）
+                          </span>
+                        </Tooltip>
                       ),
                     },
                     {
                       key: 'warning',
                       label: (
-                        <span style={{ color: '#fa8c16' }}>
-                          警告（{defectSummaryRemote?.warning ?? defectSummary.warning}）
-                        </span>
+                        <Tooltip title="存在未处理的警告级缺陷的规则条数">
+                          <span style={{ color: '#fa8c16' }}>
+                            {DEFECT_BUCKET_LABEL.warning}（{summary.warning}）
+                          </span>
+                        </Tooltip>
                       ),
                     },
                     {
                       key: 'info',
                       label: (
-                        <span style={{ color: '#1890ff' }}>
-                          提示（{defectSummaryRemote?.info ?? defectSummary.info}）
-                        </span>
+                        <Tooltip title="存在未处理的提示级缺陷的规则条数（提示不影响规则执行）">
+                          <span style={{ color: '#1890ff' }}>
+                            {DEFECT_BUCKET_LABEL.info}（{summary.info}）
+                          </span>
+                        </Tooltip>
                       ),
                     },
                   ]}
                 />
 
-                {/* 操作用工具栏 */}
+                {/* 操作用工具栏：只要当前视图还有"未确认 / 有未处理缺陷"的规则就提供一键处理 */}
                 <Space style={{ marginBottom: 12 }}>
-                  {activeRuleFilter !== 'healthy' && activeRuleFilter !== 'all' && (
+                  {actionableRules.length > 0 && (
                     <Popconfirm
-                      title={`确认并启用当前视图中的全部待定规则？确认后这些规则将参与图谱构建`}
+                      title={`确认并启用当前视图中的 ${actionableRules.length} 条规则？确认即视为认可其全部缺陷，缺陷将标记为已处理，规则进入「正常规则」并参与图谱构建`}
                       onConfirm={async () => {
-                        const ids = rules.filter((r) => r.status !== 'confirmed').map((r) => r.id)
-                        if (ids.length === 0) { message.info('没有待确认的规则'); return }
-                        await handleBatchConfirm(ids)
+                        await handleBatchConfirm(actionableRules.map((r) => r.id))
                         await load()
                       }}
                     >
                       <Button type="primary" icon={<CheckOutlined />} loading={confirming}>
-                        一键确认并启用
+                        一键确认并启用（{actionableRules.length}）
                       </Button>
                     </Popconfirm>
                   )}
@@ -1143,18 +1182,28 @@ export default function RulesPage() {
                   </Button>
                 </Space>
 
-                {/* 正常规则提示 */}
+                {/* 正常规则提示：已确认的规则可直接参与构建；未确认的需显式确认 */}
                 {activeRuleFilter === 'healthy' && (
-                  <Alert
-                    type="success"
-                    showIcon
-                    icon={<CheckOutlined />}
-                    style={{ marginBottom: 12 }}
-                    message="以下规则已自动确认并启用，可直接参与图谱构建和文档审查"
-                  />
+                  <>
+                    <Alert
+                      type="success"
+                      showIcon
+                      icon={<CheckOutlined />}
+                      style={{ marginBottom: 12 }}
+                      message="以下规则没有未处理缺陷；已确认并启用的规则可直接参与图谱构建和文档审查"
+                    />
+                    {rules.some((r) => r.status !== 'confirmed') && (
+                      <Alert
+                        type="warning"
+                        showIcon
+                        style={{ marginBottom: 12 }}
+                        message={`其中 ${rules.filter((r) => r.status !== 'confirmed').length} 条规则尚未确认，不会参与图谱构建；请点击「一键确认并启用」`}
+                      />
+                    )}
+                  </>
                 )}
 
-                {/* 问题规则提示 */}
+                {/* 问题规则提示：确认即认可缺陷并使其进入「正常规则」 */}
                 {activeRuleFilter !== 'healthy' && activeRuleFilter !== 'all' && (
                   <Alert
                     type="warning"
@@ -1162,10 +1211,10 @@ export default function RulesPage() {
                     style={{ marginBottom: 12 }}
                     message={
                       activeRuleFilter === 'conflict'
-                        ? '以下规则存在语义冲突，默认为禁用状态。请逐条确认后手动启用，确认后的规则将参与图谱构建'
+                        ? '以下规则存在未处理的语义冲突，默认为禁用状态。确认即视为认可该冲突，缺陷将标记为已处理并进入「正常规则」；建议先修正规则文本再确认'
                         : activeRuleFilter === 'info'
-                          ? '以下规则包含提示信息；其中语义冲突规则默认为禁用状态，其余提示不影响规则执行'
-                          : '以下规则存在缺陷，默认为禁用状态。请逐条确认后手动启用，确认后的规则将参与图谱构建'
+                          ? '以下规则存在未处理的提示信息（不影响规则执行）。确认后提示将标记为已处理，规则进入「正常规则」'
+                          : '以下规则存在未处理的缺陷，默认为禁用状态。确认即视为认可该缺陷，缺陷将标记为已处理并进入「正常规则」，确认后的规则将参与图谱构建'
                     }
                   />
                 )}
@@ -1645,10 +1694,10 @@ export default function RulesPage() {
             setDefectDrawerTab(k as 'error' | 'warning')
           }}
           items={[
-            ...(defectSummary.conflict > 0
+            ...(openDefectCounts.conflict > 0
               ? [{
                   key: 'conflict' as const,
-                  label: `冲突（${defectSummary.conflict}）`,
+                  label: `冲突（${openDefectCounts.conflict}）`,
                   children: (
                     <div>
                       {conflictDetecting ? (
@@ -1725,17 +1774,17 @@ export default function RulesPage() {
                   ),
                 }]
               : []),
-            ...(defectSummary.error > 0
+            ...(openDefectCounts.error > 0
               ? [{
                   key: 'error' as const,
-                  label: `错误（${defectSummary.error}）`,
+                  label: `错误（${openDefectCounts.error}）`,
                   children: renderDefectTable('error', 'e'),
                 }]
               : []),
-            ...(defectSummary.warning > 0
+            ...(openDefectCounts.warning > 0
               ? [{
                   key: 'warning' as const,
-                  label: `警告（${defectSummary.warning}）`,
+                  label: `警告（${openDefectCounts.warning}）`,
                   children: renderDefectTable('warning', 'w'),
                 }]
               : []),
