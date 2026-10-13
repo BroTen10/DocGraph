@@ -1,7 +1,7 @@
 """Neo4j 客户端封装。
 
-参考 MiroFish-Explorer 的设计：单例驱动、参数化查询、graph_id 隔离不同规则集版本。
-本模块重新实现，去除对原项目 services 包的耦合。
+单例驱动、参数化查询；graph_id 隔离不同规则集版本，写操作走事务，
+只读查询先过 cypher_guard 校验。
 """
 
 from __future__ import annotations

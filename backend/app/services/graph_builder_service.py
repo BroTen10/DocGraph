@@ -10,7 +10,7 @@
 4. 写入 Neo4j（graph_id 隔离，MERGE 幂等）
 5. 保存规则快照到 Postgres
 
-输出契约（参考 MiroFish-Explorer）：
+输出契约：
 {
   "entities": [{"name": "代理协议.协议方", "type": "Field", "attributes": {...}}],
   "relationships": [{"source": "...", "target": "...", "type": "COMPARE_TO",

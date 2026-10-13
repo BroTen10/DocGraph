@@ -1,6 +1,5 @@
 """Cypher 查询安全防护。
 
-参考 MiroFish-Explorer 的 cypher_guard.py，重新实现一个精简版本：
 - 参数名必须是合法标识符
 - 参数值（字符串）中检测危险 Cypher 关键字
 - 只读查询白名单校验（防止误执行写操作）
