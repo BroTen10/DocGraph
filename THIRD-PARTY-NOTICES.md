@@ -65,9 +65,14 @@ DocGraph 使用了下列第三方开源组件。本文件说明各组件的版�
 | --- | --- | --- |
 | PostgreSQL | 16-alpine | PostgreSQL License |
 | Neo4j Community | 5.26.0 | GPL-3.0 |
+| nginx（前端容器运行时） | 1.27.5-alpine (Alpine 3.21) | BSD-2-Clause |
+| Python（后端容器运行时） | 3.12.15-slim (Debian 13) | PSF-2.0 |
+| Node.js（前端构建期运行时） | 22-slim | MIT |
 
-两者均以独立容器运行、通过标准协议（PostgreSQL wire protocol / Bolt）交互，
+数据库以独立容器运行、通过标准协议（PostgreSQL wire protocol / Bolt）交互，
 不构成与 DocGraph 代码的衍生作品；但请勿将上述数据库源码并入本项目分发。
+Python / Node.js / nginx 三个镜像只作为构建期或运行时基础镜像使用（镜像地址统一走
+`public.ecr.aws/docker/library/*`），未修改其源码，未随本项目分发其代码。
 
 ## 四、开发期工具（不随产物分发）
 

@@ -1,0 +1,6 @@
+# 宿主机的 node_modules 不能带进构建上下文（平台相关二进制会污染 Linux 构建）
+node_modules/
+dist/
+.vite/
+*.tsbuildinfo
+*.log

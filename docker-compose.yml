@@ -46,7 +46,50 @@ services:
       retries: 20
       start_period: 30s
 
+  backend:
+    build:
+      context: ./backend
+    image: docgraph-backend:local
+    container_name: docgraph-backend
+    restart: unless-stopped
+    # 机密与业务配置放 backend/.env（不入 git）；deploy.sh 会在缺失时从 .env.example 生成
+    env_file:
+      - ./backend/.env
+    # environment 优先级高于 env_file：容器内一律用 compose 服务名与容器内端口，
+    # 不沿用 .env 里给宿主机开发用的 localhost:15432 / localhost:17687
+    environment:
+      APP_HOST: 0.0.0.0
+      APP_PORT: "8800"
+      APP_DEBUG: "false"
+      PG_HOST: postgres
+      PG_PORT: "5432"
+      NEO4J_URI: bolt://neo4j:7687
+      UPLOAD_ROOT: /data/uploads
+    volumes:
+      - uploads_data:/data/uploads
+    ports:
+      # 只绑定回环：后端 API 无鉴权，不直接对公网暴露，统一从前端 nginx 的 /api 进
+      - "127.0.0.1:${BACKEND_HOST_PORT:-8800}:8800"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      neo4j:
+        condition: service_healthy
+
+  frontend:
+    build:
+      context: ./frontend
+    image: docgraph-frontend:local
+    container_name: docgraph-frontend
+    restart: unless-stopped
+    ports:
+      - "${FRONTEND_HOST_PORT:-8080}:80"
+    depends_on:
+      - backend
+
 volumes:
   postgres_data:
   neo4j_data:
   neo4j_logs:
+  # 上传的业务单据（含真实合同），独立卷便于备份/迁移
+  uploads_data:
