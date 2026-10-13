@@ -33,6 +33,9 @@ class DocTypeOut(BaseModel):
     field_aliases: dict = {}
     stamp_required: str | None = None
     business_meaning: str | None = None
+    # OCR 增强点（一期）：类型专属抽取指令 + 备注类补充字段
+    ocr_extract_instructions: str | None = None
+    ocr_extra_fields: list[str] = []
     has_sample: bool = False
     source: str
     status: str
@@ -52,6 +55,8 @@ class DocTypeCreate(BaseModel):
     field_aliases: dict = {}
     stamp_required: str | None = None
     business_meaning: str | None = None
+    ocr_extract_instructions: str | None = None
+    ocr_extra_fields: list[str] = []
     source: str = "manual"
 
 
@@ -64,6 +69,17 @@ class DocTypeUpdate(BaseModel):
     field_aliases: dict | None = None
     stamp_required: str | None = None
     business_meaning: str | None = None
+    ocr_extract_instructions: str | None = None
+    ocr_extra_fields: list[str] | None = None
+
+
+class OcrProfileOut(BaseModel):
+    """某文档类型的 OCR 增强点与最终字段清单（供前端预览/重跑范围选择）。"""
+    doc_type: str
+    base_fields: list[str] = []
+    extra_fields: list[str] = []
+    instructions: str | None = None
+    field_list: list[str] = []
 
 
 class AnalyzeSampleResult(BaseModel):
@@ -92,6 +108,8 @@ def _to_out(dt: DocumentType) -> DocTypeOut:
         field_aliases=dict(dt.field_aliases or {}),
         stamp_required=dt.stamp_required,
         business_meaning=dt.business_meaning,
+        ocr_extract_instructions=dt.ocr_extract_instructions,
+        ocr_extra_fields=list(dt.ocr_extra_fields or []),
         has_sample=bool(dt.sample_file_path),
         source=dt.source,
         status=dt.status,
@@ -142,6 +160,29 @@ def get_doc_type(type_id: str, db: Session = Depends(get_db)):
     return _to_out(dt)
 
 
+@router.get("/{type_id}/ocr-profile", response_model=OcrProfileOut)
+def get_ocr_profile(type_id: str, db: Session = Depends(get_db)):
+    """获取该文档类型当前的 OCR 增强点与最终字段清单（基础字段 + 备注类补充字段）。
+
+    前端在「文档类型」页编辑增强点后可用它核对最终会送进提示词的字段清单。
+    """
+    from ..services.ocr_service import OCR_PROFILE_TYPE, resolve_ocr_profile
+
+    dt = db.execute(
+        select(DocumentType).where(DocumentType.id == uuid.UUID(type_id))
+    ).scalars().first()
+    if not dt:
+        raise HTTPException(status_code=404, detail="文档类型不存在")
+    data = resolve_ocr_profile(db, dt.name, OCR_PROFILE_TYPE)
+    return OcrProfileOut(
+        doc_type=dt.name,
+        base_fields=data["base_fields"],
+        extra_fields=data["extra_fields"],
+        instructions=data["instructions"],
+        field_list=data["field_list"],
+    )
+
+
 @router.post("", response_model=DocTypeOut, status_code=201)
 def create_doc_type(body: DocTypeCreate, db: Session = Depends(get_db)):
     """创建新的文档类型。"""
@@ -169,6 +210,8 @@ def create_doc_type(body: DocTypeCreate, db: Session = Depends(get_db)):
         field_aliases=body.field_aliases,
         stamp_required=body.stamp_required,
         business_meaning=body.business_meaning,
+        ocr_extract_instructions=body.ocr_extract_instructions,
+        ocr_extra_fields=body.ocr_extra_fields,
         source=body.source,
         status="active",
     )

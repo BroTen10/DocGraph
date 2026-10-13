@@ -59,6 +59,7 @@ class OCRClient:
         infer_hint: Optional[str] = None,
         infer_hint_free: Optional[str] = None,
         layout_hint: Optional[str] = None,
+        extra_instructions: Optional[str] = None,
     ) -> dict:
         """对单张图片执行 OCR + 印章检测 + 字段提取。
 
@@ -66,6 +67,8 @@ class OCRClient:
             image_path: 图片文件路径
             doc_type_hint: 文件业务类型提示（如"出口报关单"），帮助模型聚焦字段
             field_template: 需提取的字段名列表（如 ["合同协议号","境内发货人",...]），为空时自动推断类型+自由提取
+            extra_instructions: 文档类型级 OCR 增强点指令（一期）。为空则不注入，
+                识别行为与升级前一致
 
         Returns:
             {
@@ -99,7 +102,12 @@ class OCRClient:
             infer_hint = infer_hint_free or OCR_IMAGE_INFER_HINT_FREE
 
         system_prompt = system_prompt or OCR_IMAGE_SYSTEM
-        user_prompt = f"{hint}{fields_hint}{infer_hint}{layout_hint or ''}请识别这张图片。"
+        extra_block = ""
+        if extra_instructions and str(extra_instructions).strip():
+            extra_block = str(extra_instructions).strip() + "\n"
+        user_prompt = (
+            f"{hint}{fields_hint}{extra_block}{infer_hint}{layout_hint or ''}请识别这张图片。"
+        )
 
         messages = [
             {"role": "system", "content": system_prompt},

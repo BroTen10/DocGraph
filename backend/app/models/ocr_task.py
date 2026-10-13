@@ -70,6 +70,10 @@ class OcrTask(Base):
     end_time: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     # 任务级错误
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # 生效快照（FR-5）：本次识别实际使用的增强点与提示词口径，供追溯/复现
+    # 形如 {"profile": "type", "doc_types": {"增值税发票": {"base_fields": [...],
+    #        "extra_fields": [...], "instructions": "..."}}}
+    applied_config: Mapped[dict] = mapped_column(JSONB, default=dict, nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime, server_default=func.now(), nullable=False
     )

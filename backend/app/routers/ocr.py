@@ -25,12 +25,20 @@ router = APIRouter(prefix="/api/ocr", tags=["ocr"])
 def trigger_doc_ocr(
     doc_id: uuid.UUID,
     rule_set_id: uuid.UUID = Query(..., description="所属规则集 ID"),
+    profile: str = Query(
+        default="type",
+        pattern="^(type|base)$",
+        description="OCR 增强点范围：type=该文档类型的增强点（默认），base=仅基础字段模板",
+    ),
     db: Session = Depends(get_db),
 ) -> OcrTaskOut:
-    """触发单个文档 OCR（异步，立即返回 task）。"""
+    """触发单个文档 OCR（异步，立即返回 task）。
+
+    profile 用于对比重跑：配置了增强点的类型可用 base 复现"未增强"的识别结果。
+    """
     try:
         return OcrTaskOut.model_validate(
-            ocr_task_service.start_ocr_for_doc(db, rule_set_id, doc_id)
+            ocr_task_service.start_ocr_for_doc(db, rule_set_id, doc_id, profile=profile)
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -44,6 +52,11 @@ def trigger_contract_ocr(
         default=False,
         description="为 true 时对该合同下全部文档重新识别（含已识别文档，覆盖原结果）",
     ),
+    profile: str = Query(
+        default="type",
+        pattern="^(type|base)$",
+        description="OCR 增强点范围：type=各文档类型的增强点（默认），base=仅基础字段模板",
+    ),
     db: Session = Depends(get_db),
 ) -> OcrTaskOut:
     """触发合同下文档批量 OCR（异步）。
@@ -53,7 +66,7 @@ def trigger_contract_ocr(
     try:
         return OcrTaskOut.model_validate(
             ocr_task_service.start_ocr_for_contract(
-                db, rule_set_id, contract_id, force=force
+                db, rule_set_id, contract_id, force=force, profile=profile
             )
         )
     except ValueError as e:

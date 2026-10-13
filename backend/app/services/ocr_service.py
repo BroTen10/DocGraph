@@ -40,6 +40,96 @@ def resolve_field_template(db, doc_type: str) -> list[str]:
     return FIELD_TEMPLATES.get(doc_type, [])
 
 
+# ============ 一期：OCR 增强点（类型专属指令 + 备注类补充字段） ============
+
+# 生效范围：默认使用类型增强点；base = 仅基础字段模板（用于对比重跑/排查）
+OCR_PROFILE_TYPE = "type"
+OCR_PROFILE_BASE = "base"
+
+
+def compose_field_list(base_fields: list[str], extra_fields: list[str]) -> list[str]:
+    """合并字段清单：基础字段在前，补充字段去重后追加，保持原顺序。"""
+    out: list[str] = []
+    for name in list(base_fields or []) + list(extra_fields or []):
+        name = str(name).strip()
+        if name and name not in out:
+            out.append(name)
+    return out
+
+
+def resolve_ocr_profile(
+    db,
+    doc_type: str,
+    profile: str = OCR_PROFILE_TYPE,
+) -> dict:
+    """解析某文档类型本次生效的 OCR 增强点。
+
+    profile="type"（默认）：基础字段 + 该类型的备注类补充字段 + 专属指令；
+    profile="base"：仅基础字段模板，忽略增强点（未配置增强点时两者等价）。
+
+    Returns:
+        {"profile", "base_fields", "extra_fields", "instructions", "field_list"}
+    """
+    base_fields = list(resolve_field_template(db, doc_type) or [])
+    extra_fields: list[str] = []
+    instructions: str | None = None
+
+    if profile != OCR_PROFILE_BASE and db is not None:
+        try:
+            from sqlalchemy import select
+            from ..models import DocumentType
+
+            dt = db.execute(
+                select(DocumentType).where(DocumentType.name == doc_type)
+            ).scalars().first()
+            if dt is not None:
+                extra_fields = [
+                    str(f).strip() for f in (dt.ocr_extra_fields or []) if str(f).strip()
+                ]
+                raw = (dt.ocr_extract_instructions or "").strip()
+                instructions = raw or None
+        except Exception:
+            logger.warning("解析 OCR 增强点失败（按基础模板处理）: %s", doc_type, exc_info=True)
+
+    return {
+        "profile": OCR_PROFILE_BASE if profile == OCR_PROFILE_BASE else OCR_PROFILE_TYPE,
+        "base_fields": base_fields,
+        "extra_fields": extra_fields,
+        "instructions": instructions,
+        "field_list": compose_field_list(base_fields, extra_fields),
+    }
+
+
+def render_extra_instructions(db, doc_type: str, profile: dict) -> str | None:
+    """把类型专属指令套进可配置的包装模板；无指令时返回 None（不注入）。"""
+    raw = (profile or {}).get("instructions")
+    if not raw:
+        return None
+    tpl = get_prompt(db, "ocr.image.extra_instructions")
+    try:
+        return tpl.format(doc_type=doc_type, extra_instructions=raw)
+    except (KeyError, IndexError, ValueError):
+        # 模板被改坏时不阻断识别，退回指令正文
+        logger.warning("OCR 增强点包装模板占位符异常，已退回指令正文")
+        return str(raw)
+
+
+def build_applied_config(profile: str, profiles_by_type: dict[str, dict]) -> dict:
+    """生成 OCR 任务生效快照（FR-5），供追溯「这次识别用了哪版增强点」。"""
+    return {
+        "profile": OCR_PROFILE_BASE if profile == OCR_PROFILE_BASE else OCR_PROFILE_TYPE,
+        "doc_types": {
+            name: {
+                "base_fields": list(p.get("base_fields") or []),
+                "extra_fields": list(p.get("extra_fields") or []),
+                "instructions": p.get("instructions"),
+                "field_list": list(p.get("field_list") or []),
+            }
+            for name, p in (profiles_by_type or {}).items()
+        },
+    }
+
+
 def _extract_text_pdf(pdf_path: str) -> str:
     """文本型 PDF 直接提取文本。"""
     import pdfplumber
@@ -113,6 +203,7 @@ def _ensure_fields(
     doc_type: str,
     field_template: list[str],
     db=None,
+    extra_instructions: str | None = None,
 ) -> dict:
     """多模态返回文字但漏掉字段时，用已识别文本再走一次字段提取。"""
     if not result.get("success") or _has_extracted_fields(result.get("fields")):
@@ -121,7 +212,9 @@ def _ensure_fields(
     if not text:
         return result
 
-    fallback = _llm_extract_fields_from_text(text, doc_type, field_template, db=db)
+    fallback = _llm_extract_fields_from_text(
+        text, doc_type, field_template, db=db, extra_instructions=extra_instructions
+    )
     if _has_extracted_fields(fallback.get("fields")):
         result["fields"] = fallback.get("fields") or {}
         if result.get("has_stamp") is None:
@@ -137,6 +230,7 @@ def _llm_extract_fields_from_text(
     doc_type: str,
     field_template: list[str],
     db=None,
+    extra_instructions: str | None = None,
 ) -> dict:
     """对文本型 PDF/DOCX，调用 LLM 提取结构化字段。
 
@@ -163,6 +257,8 @@ def _llm_extract_fields_from_text(
             field_list=", ".join(field_template),
             text=text[:4000],
         )
+    if extra_instructions and str(extra_instructions).strip():
+        user_prompt = f"{user_prompt}\n{str(extra_instructions).strip()}"
 
     try:
         resp = llm.chat_json(
@@ -192,6 +288,7 @@ def process_document(
     doc: Document,
     key_fields: list[str] | None = None,
     db=None,
+    extra_instructions: str | None = None,
 ) -> dict:
     """处理单个文档：根据类型选择 OCR 或文本提取，回写 doc 记录。
 
@@ -215,11 +312,17 @@ def process_document(
         if doc.file_type == "pdf":
             if _is_scanned_pdf(str(path)):
                 # 扫描型 PDF：逐页 OCR
-                return _ocr_scanned_pdf(str(path), doc.doc_type, field_template, db=db)
+                return _ocr_scanned_pdf(
+                    str(path), doc.doc_type, field_template, db=db,
+                    extra_instructions=extra_instructions,
+                )
             else:
                 # 文本型 PDF：直接提取 + LLM 字段提取
                 text = _extract_text_pdf(str(path))
-                ext = _llm_extract_fields_from_text(text, doc.doc_type, field_template, db=db)
+                ext = _llm_extract_fields_from_text(
+                    text, doc.doc_type, field_template, db=db,
+                    extra_instructions=extra_instructions,
+                )
                 return {
                     "success": True,
                     "text": text,
@@ -229,14 +332,21 @@ def process_document(
                 }
         elif doc.file_type in ("png", "jpg"):
             return _ensure_fields(
-                _ocr_image(str(path), doc.doc_type, field_template, db=db),
+                _ocr_image(
+                    str(path), doc.doc_type, field_template, db=db,
+                    extra_instructions=extra_instructions,
+                ),
                 doc.doc_type,
                 field_template,
                 db=db,
+                extra_instructions=extra_instructions,
             )
         elif doc.file_type == "docx":
             text = _extract_docx(str(path))
-            ext = _llm_extract_fields_from_text(text, doc.doc_type, field_template, db=db)
+            ext = _llm_extract_fields_from_text(
+                text, doc.doc_type, field_template, db=db,
+                extra_instructions=extra_instructions,
+            )
             return {
                 "success": True,
                 "text": text,
@@ -251,7 +361,13 @@ def process_document(
         return {"success": False, "error": f"处理失败: {e}"}
 
 
-def _ocr_image(image_path: str, doc_type: str, field_template: list[str], db=None) -> dict:
+def _ocr_image(
+    image_path: str,
+    doc_type: str,
+    field_template: list[str],
+    db=None,
+    extra_instructions: str | None = None,
+) -> dict:
     """对单张图片调用 DeepSeek 多模态模型 OCR。"""
     ocr = get_ocr_client()
     result = ocr.recognize(
@@ -262,6 +378,7 @@ def _ocr_image(image_path: str, doc_type: str, field_template: list[str], db=Non
         fields_hint=get_prompt(db, "ocr.image.fields_hint"),
         infer_hint=get_prompt(db, "ocr.image.infer_hint"),
         infer_hint_free=get_prompt(db, "ocr.image.infer_hint_free"),
+        extra_instructions=extra_instructions,
     )
     if result.get("success"):
         result["layout"] = _build_layout([extract_layout_lines(image_path)])
@@ -273,6 +390,7 @@ def _ocr_scanned_pdf(
     doc_type: str,
     field_template: list[str],
     db=None,
+    extra_instructions: str | None = None,
 ) -> dict:
     """扫描型 PDF：逐页转图片 OCR，合并结果。"""
     import tempfile
@@ -301,6 +419,7 @@ def _ocr_scanned_pdf(
                 fields_hint=get_prompt(db, "ocr.image.fields_hint"),
                 infer_hint=get_prompt(db, "ocr.image.infer_hint"),
                 infer_hint_free=get_prompt(db, "ocr.image.infer_hint_free"),
+                extra_instructions=extra_instructions,
             )
             if r.get("success"):
                 success_pages += 1
@@ -328,4 +447,4 @@ def _ocr_scanned_pdf(
         "fields": merged_fields,
         "confidence": avg_conf,
         "layout": _build_layout(page_layouts),
-    }, doc_type, field_template, db=db)
+    }, doc_type, field_template, db=db, extra_instructions=extra_instructions)

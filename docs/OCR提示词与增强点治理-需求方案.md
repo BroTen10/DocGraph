@@ -1,6 +1,6 @@
 # OCR 提示词与「OCR 增强点」治理 · 需求方案
 
-> 状态：**需求方案 v1.2（2026-10-13），未开发**
+> 状态：**需求方案 v1.3（2026-10-13）**；**一期（MVP）已实现**（后端 + 前端），待真实票据样本验证抽取效果
 > 来源：2026-10-13 用户补充需求（增值税发票备注案例）+ 行业做法调研
 > 关联：`task_plan.md`「保留待排期」P2 行；上游需求变更（文档类型迁移到 OCR 对照页 / 全部可重置 OCR）见 `progress.md`
 
@@ -8,6 +8,7 @@
 
 | 版本 | 日期 | 事项 | 说明 |
 |---|---|---|---|
+| v1.3 | 2026-10-13 | 一期实现 | 按一期 FR-1~FR-5 + D6 落地代码（数据模型/迁移/提示词注入/归一豁免/applied_config/前端编辑区与重跑范围选择）；补 15 项单测；详见文末「一期实现记录」 |
 | v1.2 | 2026-10-13 | 字段命名规范定稿 | 按 D1 落定备注类字段命名口径 `备注-<语义名>`，并补上它与 `normalize_fields` / `cross_validate_contract_no` 的相互作用与一处必须规避的坑（新增 D6） |
 | v1.1 | 2026-10-13 | 决策回填 + 机制实测 | 回填 D1~D5 结论；新增「机制实测」章节（用真实单据验证"加字段能否引导抽取"）；D5 给出复用 `rule_parse_skill` 治理模式的建议 |
 | v1.0 | 2026-10-13 | 初稿（含行业调研） | 依据「增值税发票备注被默认 OCR 忽略」案例，调研行业「OCR 增强点积累与固化」做法后形成 |
@@ -207,6 +208,23 @@ DOC_VAT_INVOICE key_fields = [合同号, 发票号码, 购货方, 销货方, 金
   - 其余（如 `备注-项目名称`、`备注-建筑服务发生地`）原样保留为文本。
 - **必须规避的坑**：`normalize_fields` 与 `cross_validate_contract_no` 都按"键名含『合同』且含『号』"识别合同号字段，而 `review_service` / `ocr_task_service` 随后会调 `cross_validate_contract_no(doc.file_name, …)`，用**文件名**里的合同号做 ground truth 覆盖。即 `备注-合同号` 会被文件名覆盖：当备注里的号**就是**合同号时这是想要的（防末位误识）；当备注里可能是**另一个号**（订单号、分批号）时会改错。→ 处理方式见 D6。
 - **规则引用方式**：规则的 `assertion.source/target.field` 直接写 `备注-合同号`（`doc_type=增值税发票`）；需要别名时走文档类型的 `field_aliases` 登记。
+
+#### 一期实现记录（2026-10-13）
+
+| 功能点 | 落地位置 |
+|---|---|
+| FR-1 类型级增强点字段 | `backend/app/models/document_type.py`（`ocr_extract_instructions` / `ocr_extra_fields`）、`backend/app/database.py`（`_run_migrations` 增量 DDL）、`backend/app/routers/doc_types.py`（CRUD 打通 + `GET /api/doc-types/{id}/ocr-profile`） |
+| FR-2 提示词注入 | `backend/app/prompt_templates.py`（新增 `ocr.image.extra_instructions` 包装模板 + 元信息）、`backend/app/ocr_client.py`（`extra_instructions` 参数）、`backend/app/services/ocr_service.py`（`compose_field_list` / `resolve_ocr_profile` / `render_extra_instructions`），图像、扫描 PDF、文本 PDF、DOCX 与 `_ensure_fields` 兜底全部贯通 |
+| FR-4 重跑范围 | `backend/app/routers/ocr.py`（`profile=type|base`）、`backend/app/services/ocr_task_service.py`、前端 `frontend/src/pages/UploadPage.tsx`（识别范围下拉） |
+| FR-5 生效快照 | `backend/app/models/ocr_task.py`（`applied_config`）、`build_applied_config`、`backend/app/schemas/ocr_task.py`、前端 `frontend/src/types.ts` |
+| FR-3 备注类字段不归一 | `backend/app/constants.py`（`OCR_REMARK_FIELD_PREFIX` / `is_remark_field`）、`backend/app/services/field_extraction_service.py`（`normalize_fields` 六大归一链全部豁免） |
+| D6 不参与文件名覆盖 | 同上文件 `cross_validate_contract_no` 按前缀跳过 |
+| 审查链路一致性 | `backend/app/services/review_service.py` 的漏补 OCR 同步使用增强点 |
+| 前端编辑区 | `frontend/src/pages/DocTypesPage.tsx`（新建/编辑弹窗内的「OCR 增强点」区 + 列表列）、`frontend/src/api/client.ts`（`docTypesApi.ocrProfile`、`ocrApi.triggerDoc/triggerContract` 增加 `profile`） |
+
+验证：`py_compile` 全过；新增单测 `tests/test_ocr_extract_profile.py`（15 项断言全过）；`npm run build`（tsc + vite）通过；对真实库跑一次迁移与增强点解析（事务回滚，无残留）确认 3 个新列落地、`type` 档合成 12 个字段、`base` 档退回 8 个字段、指令模板渲染正确。
+
+尚未验证：用真实增值税发票样本端到端确认「备注栏内容确实被抽出」（本机无该类型样本）；以及把备注类字段写进审查规则的实例化演示。
 
 ### 二期：可配置后处理规则 + 字段词典
 

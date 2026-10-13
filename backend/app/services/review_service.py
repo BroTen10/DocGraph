@@ -48,7 +48,13 @@ from .field_extraction_service import (
     normalize_fields,
     parse_date,
 )
-from .ocr_service import process_document, resolve_field_template
+from .ocr_service import (
+    OCR_PROFILE_TYPE,
+    process_document,
+    render_extra_instructions,
+    resolve_field_template,
+    resolve_ocr_profile,
+)
 from .doc_normalizer import normalize_party_name, resolve_field_aliases
 from .settings_service import get_setting
 from .suggestion_service import build_suggestion_llm
@@ -196,10 +202,13 @@ def _run_review_pipeline(
         if doc.ocr_status == "done" and doc.extracted_fields:
             # 已处理过，跳过
             continue
+        # 一期：审查链路内的漏补 OCR 同样使用该文档类型的 OCR 增强点
+        pdata = resolve_ocr_profile(db, doc.doc_type, OCR_PROFILE_TYPE)
         r = process_document(
             doc,
-            key_fields=resolve_field_template(db, doc.doc_type),
+            key_fields=pdata["field_list"] or resolve_field_template(db, doc.doc_type),
             db=db,
+            extra_instructions=render_extra_instructions(db, doc.doc_type, pdata),
         )
         if r.get("success"):
             doc.ocr_status = "done"

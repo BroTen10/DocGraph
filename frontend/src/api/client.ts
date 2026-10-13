@@ -18,6 +18,7 @@ import type {
   GraphData,
   GraphOntology,
   ImportTask,
+  OcrProfileItem,
   OcrTask,
   OcrTaskBrief,
   PromptOptimizeResult,
@@ -247,16 +248,23 @@ export const reviewsApi = {
 
 // ============ OCR ============
 export const ocrApi = {
-  /** 触发单个文档 OCR(异步,立即返回 task) */
-  triggerDoc: (ruleSetId: string, docId: string) =>
+  /** 触发单个文档 OCR(异步,立即返回 task);profile=base 时不带类型增强点(对比重跑) */
+  triggerDoc: (ruleSetId: string, docId: string, profile: 'type' | 'base' = 'type') =>
     http
-      .post<OcrTask>(`/ocr/documents/${docId}`, null, { params: { rule_set_id: ruleSetId } })
+      .post<OcrTask>(`/ocr/documents/${docId}`, null, {
+        params: { rule_set_id: ruleSetId, profile },
+      })
       .then((r) => r.data),
   /** 触发合同下批量 OCR(异步);force=true 时对全部文档重置式重新识别(含已识别) */
-  triggerContract: (ruleSetId: string, contractId: string, force = false) =>
+  triggerContract: (
+    ruleSetId: string,
+    contractId: string,
+    force = false,
+    profile: 'type' | 'base' = 'type',
+  ) =>
     http
       .post<OcrTask>(`/ocr/contracts/${contractId}`, null, {
-        params: { rule_set_id: ruleSetId, force },
+        params: { rule_set_id: ruleSetId, force, profile },
       })
       .then((r) => r.data),
   /** OCR 任务列表(按 rule_set_id 过滤,可按 contract_id 进一步过滤) */
@@ -283,6 +291,9 @@ export const docTypesApi = {
   /** 获取单个文档类型 */
   get: (id: string) =>
     http.get<DocTypeItem>(`/doc-types/${id}`).then((r) => r.data),
+  /** 获取该类型的 OCR 增强点与最终字段清单(基础字段 + 备注类补充字段) */
+  ocrProfile: (id: string) =>
+    http.get<OcrProfileItem>(`/doc-types/${id}/ocr-profile`).then((r) => r.data),
   /** 创建文档类型 */
   create: (data: DocTypeCreate) =>
     http.post<DocTypeItem>('/doc-types', data).then((r) => r.data),

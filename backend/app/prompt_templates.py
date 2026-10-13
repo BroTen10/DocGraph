@@ -27,6 +27,13 @@ OCR_IMAGE_FIELDS_HINT = """请提取以下字段，字段名严格使用模板�
 
 OCR_IMAGE_INFER_HINT = "额外从文档内容和布局推断当前文件的业务类型名称，填入 inferred_doc_type。"
 
+# ============ OCR 增强点：类型专属抽取指令（一期） ============
+# 占位符：{doc_type} 文件类型；{extra_instructions} 文档类型配置中的专属抽取指令。
+# 仅在文档类型配置了 ocr_extract_instructions 时拼接进 OCR 用户提示词；未配置则不注入，
+# 保证升级前的识别行为逐字段不变（向后兼容）。
+OCR_IMAGE_EXTRA_INSTRUCTIONS = """补充抽取要求（本文件类型为【{doc_type}】）：
+{extra_instructions}"""
+
 OCR_IMAGE_INFER_HINT_FREE = (
     "该文件业务类型未知。请从文档内容和布局推断文件的业务类型名称"
     "（如'采购合同'、'装箱单'、'运单'等），填入 inferred_doc_type。"
@@ -329,6 +336,7 @@ severity：
 PROMPT_TEMPLATES: dict[str, str] = {
     "ocr.image.system": OCR_IMAGE_SYSTEM,
     "ocr.image.fields_hint": OCR_IMAGE_FIELDS_HINT,
+    "ocr.image.extra_instructions": OCR_IMAGE_EXTRA_INSTRUCTIONS,
     "ocr.image.infer_hint": OCR_IMAGE_INFER_HINT,
     "ocr.image.infer_hint_free": OCR_IMAGE_INFER_HINT_FREE,
     "ocr.text.system_free": OCR_TEXT_SYSTEM_FREE,
@@ -352,6 +360,7 @@ PROMPT_TEMPLATES: dict[str, str] = {
 PROMPT_META: dict[str, dict] = {
     "ocr.image.system": {"label": "OCR 图像识别 · 系统提示词", "group": "OCR 识别", "description": "DeepSeek 多模态模型识别图片时的系统指令（识别文本/印章/字段/类型/置信度）。"},
     "ocr.image.fields_hint": {"label": "OCR 图像识别 · 字段提取规则", "group": "OCR 识别", "description": "已知文档类型时的字段提取规则，{field_list} 会被替换为模板字段清单（含多行明细汇总要求）。"},
+    "ocr.image.extra_instructions": {"label": "OCR 增强点 · 类型专属指令包装", "group": "OCR 识别", "description": "把「文档类型」页配置的专属抽取指令包成一段追加要求。占位符：{doc_type} 文件类型、{extra_instructions} 该类型的指令正文；未配置指令时不注入。"},
     "ocr.image.infer_hint": {"label": "OCR 图像识别 · 类型推断提示", "group": "OCR 识别", "description": "已知类型时对 inferred_doc_type 的补充说明。"},
     "ocr.image.infer_hint_free": {"label": "OCR 图像识别 · 自由提取提示", "group": "OCR 识别", "description": "未知文档类型时的自由提取提示。"},
     "ocr.text.system_free": {"label": "OCR 文本提取 · 自由模式系统提示词", "group": "OCR 识别", "description": "文本型 PDF/DOCX 未知类型时的系统提示词。"},

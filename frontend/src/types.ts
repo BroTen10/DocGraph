@@ -390,6 +390,19 @@ export interface OcrTask {
   success_count: number
   failed_count: number
   failures: Array<{ doc_id: string; file_name: string; error: string }>
+  /** 一期:本次识别的生效快照(使用的增强点与提示词口径,profile=type 表示走了增强点) */
+  applied_config?: {
+    profile?: 'type' | 'base'
+    doc_types?: Record<
+      string,
+      {
+        base_fields?: string[]
+        extra_fields?: string[]
+        instructions?: string | null
+        field_list?: string[]
+      }
+    >
+  }
   start_time: string
   end_time: string | null
   error: string | null
@@ -509,6 +522,10 @@ export interface DocTypeItem {
   field_aliases?: Record<string, unknown>
   stamp_required: string | null
   business_meaning: string | null
+  /** 一期 OCR 增强点:类型专属抽取指令(追加到该类型的 OCR 提示词) */
+  ocr_extract_instructions?: string | null
+  /** 一期 OCR 增强点:备注内关键字段清单(以「备注-」开头) */
+  ocr_extra_fields?: string[]
   has_sample: boolean
   source: string
   status: string
@@ -530,6 +547,8 @@ export interface DocTypeCreate {
   field_aliases?: Record<string, unknown>
   stamp_required?: string | null
   business_meaning?: string
+  ocr_extract_instructions?: string | null
+  ocr_extra_fields?: string[]
   source?: string
 }
 
@@ -541,6 +560,17 @@ export interface DocTypeUpdate {
   field_aliases?: Record<string, unknown>
   stamp_required?: string | null
   business_meaning?: string
+  ocr_extract_instructions?: string | null
+  ocr_extra_fields?: string[]
+}
+
+/** 某文档类型的 OCR 增强点与最终字段清单(基础字段 + 备注类补充字段) */
+export interface OcrProfileItem {
+  doc_type: string
+  base_fields: string[]
+  extra_fields: string[]
+  instructions: string | null
+  field_list: string[]
 }
 
 export interface AnalyzeSampleResult {

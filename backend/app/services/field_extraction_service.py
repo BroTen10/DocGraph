@@ -18,6 +18,7 @@ from ..constants import (
     DOC_RECEIVE_VOUCHER,
     DOC_PAY_VOUCHER,
     DOC_VAT_INVOICE,
+    is_remark_field,
 )
 from .contract_normalizer import extract_contract_numbers, normalize_contract_no
 from .doc_normalizer import is_currency_field, normalize_currency_value
@@ -122,7 +123,10 @@ def normalize_fields(
         out = renamed
 
     # 1. 合同号归一化
-    contract_no_keys = [k for k in out if "合同" in k and "号" in k]
+    # 备注类字段（前缀「备注-」）不做任何值归一：备注原文语义不稳定，强行归一易误伤（FR-3）
+    normable = {k: v for k, v in out.items() if not is_remark_field(k)}
+
+    contract_no_keys = [k for k in normable if "合同" in k and "号" in k]
     for k in contract_no_keys:
         v = out.get(k)
         if v:
@@ -133,7 +137,7 @@ def normalize_fields(
                 out[f"{k}__aliases"] = aliases
 
     # 2. 日期字段规范化
-    date_keys = [k for k in out if "日期" in k or "时间" in k]
+    date_keys = [k for k in normable if "日期" in k or "时间" in k]
     for k in date_keys:
         v = out.get(k)
         if v:
@@ -142,7 +146,9 @@ def normalize_fields(
                 out[k] = d
 
     # 3. 金额字段规范化
-    amount_keys = [k for k in out if "金额" in k or "总价" in k or "价税合计" in k or "税额" in k]
+    amount_keys = [
+        k for k in normable if "金额" in k or "总价" in k or "价税合计" in k or "税额" in k
+    ]
     for k in amount_keys:
         v = out.get(k)
         if v is not None:
@@ -152,14 +158,14 @@ def normalize_fields(
 
     # 3.5 币别值归一（批次 12）：美元/USD/美金 等写法统一为规范中文币名，
     # 多行分号拼接展开去重（如 币别="美元;美元" → "美元"）
-    currency_keys = [k for k in out if is_currency_field(k)]
+    currency_keys = [k for k in normable if is_currency_field(k)]
     for k in currency_keys:
         v = out.get(k)
         if v is not None:
             out[k] = normalize_currency_value(v)
 
     # 4. 数量字段规范化
-    qty_keys = [k for k in out if "数量" in k or "件数" in k]
+    qty_keys = [k for k in normable if "数量" in k or "件数" in k]
     for k in qty_keys:
         v = out.get(k)
         if v is not None:
@@ -168,7 +174,7 @@ def normalize_fields(
                 out[k] = n
 
     # 5. 重量字段规范化
-    weight_keys = [k for k in out if "重" in k]
+    weight_keys = [k for k in normable if "重" in k]
     for k in weight_keys:
         v = out.get(k)
         if v is not None:
@@ -196,7 +202,8 @@ def cross_validate_contract_no(file_name: str, fields: dict) -> dict:
         return fields
 
     out: dict[str, Any] = dict(fields)
-    contract_keys = [k for k in out if "合同" in k and "号" in k]
+    # D6：备注类字段排除文件名覆盖——备注里可能是订单号/分批号等另一个号，用文件名覆盖会改错
+    contract_keys = [k for k in out if "合同" in k and "号" in k and not is_remark_field(k)]
     if not contract_keys:
         return out
 

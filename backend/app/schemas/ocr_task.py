@@ -26,6 +26,8 @@ class OcrTaskOut(BaseModel):
     success_count: int
     failed_count: int
     failures: list[dict[str, Any]] = Field(default_factory=list)
+    # 生效快照（FR-5）：本次识别使用的增强点与提示词口径
+    applied_config: dict[str, Any] = Field(default_factory=dict)
     start_time: datetime
     end_time: datetime | None = None
     error: str | None = None

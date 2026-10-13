@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from 'react'
 import {
   Card, Row, Col, Upload, Button, Table, Tag, message, Modal, Input,
-  Space, Typography, Popconfirm, Drawer, Spin, Progress, Tooltip,
+  Space, Typography, Popconfirm, Drawer, Spin, Progress, Tooltip, Select,
 } from 'antd'
 import { InboxOutlined, DeleteOutlined, ReloadOutlined, EditOutlined, FileSearchOutlined, UploadOutlined, ThunderboltOutlined, ReloadOutlined as ReRunIcon } from '@ant-design/icons'
 import type { UploadProps } from 'antd'
@@ -34,6 +34,8 @@ export default function UploadPage() {
   const [ocrTask, setOcrTask] = useState<OcrTask | null>(null)
   const [ocrTriggering, setOcrTriggering] = useState(false) // 批量触发按钮 loading
   const [ocrResetting, setOcrResetting] = useState(false) // 重置式重新识别按钮 loading
+  // 一期:OCR 增强点范围。type=按文档类型的增强点(默认);base=仅基础字段模板(对比重跑用)
+  const [ocrProfile, setOcrProfile] = useState<'type' | 'base'>('type')
   const [docOcrLoading, setDocOcrLoading] = useState<Record<string, boolean>>({}) // 单文档触发 loading(按文档粒度,支持并行触发)
   const ocrPollRef = useRef<ReturnType<typeof setInterval> | null>(null)
   // 当前展示的合同 id,供 OCR 轮询回调对比:仅当用户仍停留在启动轮询的那个合同时才刷新详情,
@@ -182,7 +184,7 @@ export default function UploadPage() {
     if (!currentId || !detail) return
     setOcrTriggering(true)
     try {
-      const t = await ocrApi.triggerContract(currentId, detail.id)
+      const t = await ocrApi.triggerContract(currentId, detail.id, false, ocrProfile)
       setOcrTask(t)
       message.info(`已触发 OCR,共 ${t.total_count} 个待识别文档`)
       pollOcrTask(t.id, detail.id)
@@ -198,7 +200,7 @@ export default function UploadPage() {
     if (!currentId || !detail) return
     setOcrResetting(true)
     try {
-      const t = await ocrApi.triggerContract(currentId, detail.id, true)
+      const t = await ocrApi.triggerContract(currentId, detail.id, true, ocrProfile)
       setOcrTask(t)
       message.info(`已触发重置 OCR,共 ${t.total_count} 个文档`)
       pollOcrTask(t.id, detail.id)
@@ -213,7 +215,7 @@ export default function UploadPage() {
     if (!currentId) return
     setDocOcrLoading((m) => ({ ...m, [docId]: true }))
     try {
-      const t = await ocrApi.triggerDoc(currentId, docId)
+      const t = await ocrApi.triggerDoc(currentId, docId, ocrProfile)
       setOcrTask(t)
       message.info(`已触发「${fileName}」OCR 识别`)
       pollOcrTask(t.id, currentDetailIdRef.current || '')
@@ -507,6 +509,18 @@ export default function UploadPage() {
             extra={
               detail && (
                 <Space>
+                  <Tooltip title="识别范围：使用类型增强点=按「文档类型」页配置的备注类补充字段与专属指令；仅基础字段=忽略增强点，用于对比排查">
+                    <Select
+                      size="small"
+                      value={ocrProfile}
+                      onChange={(v) => setOcrProfile(v)}
+                      style={{ width: 150 }}
+                      options={[
+                        { value: 'type', label: '使用类型增强点' },
+                        { value: 'base', label: '仅基础字段' },
+                      ]}
+                    />
+                  </Tooltip>
                   <Tooltip title="对该合同下所有未识别文档批量触发 OCR">
                     <Button
                       type="primary"

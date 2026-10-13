@@ -48,6 +48,14 @@ class DocumentType(Base):
     business_meaning: Mapped[str | None] = mapped_column(Text, nullable=True)
     # 用户上传的样例文档路径
     sample_file_path: Mapped[str | None] = mapped_column(String(1024), nullable=True)
+    # OCR 增强点（一期）：本类型专属抽取指令，追加到该类型的 OCR 提示词
+    # 例：「发票备注栏也要逐字扫描，备注中的合同号、项目名称需单独抽取」
+    ocr_extract_instructions: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # OCR 增强点（一期）：备注内关键字段清单（逐个结构化，命名以「备注-」开头）
+    # 例：["备注-合同号", "备注-项目名称", "备注-共计金额"]
+    ocr_extra_fields: Mapped[list] = mapped_column(
+        JSONB, default=list, nullable=False
+    )
     # 文档类型来源：seed / rule_import / manual
     source: Mapped[str] = mapped_column(String(32), default="manual", nullable=False)
     # 状态：active / pending_review / rejected

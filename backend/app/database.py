@@ -119,6 +119,11 @@ def _run_migrations(engine) -> None:
         # 批次 11：文档类型显式别名（写时归一）
         "ALTER TABLE document_types ADD COLUMN IF NOT EXISTS aliases JSONB NOT NULL DEFAULT '[]'::jsonb;",
         "ALTER TABLE document_types ADD COLUMN IF NOT EXISTS field_aliases JSONB NOT NULL DEFAULT '{}'::jsonb;",
+        # 一期 OCR 增强点：类型专属抽取指令 + 备注类补充字段清单
+        "ALTER TABLE document_types ADD COLUMN IF NOT EXISTS ocr_extract_instructions TEXT;",
+        "ALTER TABLE document_types ADD COLUMN IF NOT EXISTS ocr_extra_fields JSONB NOT NULL DEFAULT '[]'::jsonb;",
+        # 一期 OCR 生效快照：记录本次识别实际使用的增强点与提示词口径
+        "ALTER TABLE ocr_tasks ADD COLUMN IF NOT EXISTS applied_config JSONB NOT NULL DEFAULT '{}'::jsonb;",
         # OCR 文本行坐标：扫描 PDF/图片在原件上的高亮定位
         "ALTER TABLE documents ADD COLUMN IF NOT EXISTS ocr_layout JSONB NOT NULL DEFAULT '{}'::jsonb;",
         # 规则流水号：规则集内单调递增，对外展示为 R0001/R0002

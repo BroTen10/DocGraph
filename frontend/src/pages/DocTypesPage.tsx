@@ -275,6 +275,29 @@ export default function DocTypesPage() {
       ),
     },
     {
+      title: 'OCR 增强点',
+      key: 'ocr_profile',
+      render: (_: unknown, record: DocTypeItem) => {
+        const extra = record.ocr_extra_fields || []
+        const hasInstr = Boolean((record.ocr_extract_instructions || '').trim())
+        if (!extra.length && !hasInstr) {
+          return <Text type="secondary">-</Text>
+        }
+        return (
+          <Space size={4} wrap>
+            {extra.map((f) => (
+              <Tag color="geekblue" key={f}>{f}</Tag>
+            ))}
+            {hasInstr && (
+              <Tooltip title={record.ocr_extract_instructions}>
+                <Tag color="cyan">专属指令</Tag>
+              </Tooltip>
+            )}
+          </Space>
+        )
+      },
+    },
+    {
       title: '别名',
       dataIndex: 'aliases',
       key: 'aliases',
@@ -472,6 +495,20 @@ export default function DocTypesPage() {
           <Form.Item name="key_fields" label="关键字段">
             <Select mode="tags" placeholder="输入字段名后回车添加" tokenSeparators={[',']} />
           </Form.Item>
+          <Form.Item
+            name="ocr_extra_fields"
+            label="OCR 增强点 · 备注类补充字段"
+            extra="备注栏里的关键信息拆成独立字段，统一以「备注-」开头（如 备注-合同号 / 备注-项目名称）。此类字段不做金额、日期等归一，也不会被文件名覆盖；抽取不到时留空。"
+          >
+            <Select mode="tags" placeholder="如：备注-合同号" tokenSeparators={[',']} />
+          </Form.Item>
+          <Form.Item
+            name="ocr_extract_instructions"
+            label="OCR 增强点 · 类型专属抽取指令"
+            extra="只对本类型生效，会追加到该类型的 OCR 提示词（如：发票备注栏也要逐字扫描）。留空则不加任何额外要求。"
+          >
+            <TextArea rows={3} placeholder="如：发票备注栏也要逐字扫描，备注中的合同号与项目名称需单独抽取" />
+          </Form.Item>
           <Form.Item name="aliases" label="别名（同义叫法）" extra="规则/文档中出现这些叫法时，会自动归一到本类型">
             <Select mode="tags" placeholder="如：报关单" tokenSeparators={[',']} />
           </Form.Item>
@@ -536,6 +573,20 @@ export default function DocTypesPage() {
           </Form.Item>
           <Form.Item name="key_fields" label="关键字段">
             <Select mode="tags" tokenSeparators={[',']} />
+          </Form.Item>
+          <Form.Item
+            name="ocr_extra_fields"
+            label="OCR 增强点 · 备注类补充字段"
+            extra="备注栏里的关键信息拆成独立字段，统一以「备注-」开头（如 备注-合同号 / 备注-项目名称）。此类字段不做金额、日期等归一，也不会被文件名覆盖；抽取不到时留空。"
+          >
+            <Select mode="tags" placeholder="如：备注-合同号" tokenSeparators={[',']} />
+          </Form.Item>
+          <Form.Item
+            name="ocr_extract_instructions"
+            label="OCR 增强点 · 类型专属抽取指令"
+            extra="只对本类型生效，会追加到该类型的 OCR 提示词（如：发票备注栏也要逐字扫描）。留空则不加任何额外要求。"
+          >
+            <TextArea rows={3} />
           </Form.Item>
           <Form.Item name="aliases" label="别名（同义叫法）" extra="规则/文档中出现这些叫法时，会自动归一到本类型">
             <Select mode="tags" tokenSeparators={[',']} />

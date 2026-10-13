@@ -209,3 +209,17 @@ CURRENCY_VALUE_ALIASES: dict[str, list[str]] = {
     "新台币": ["TWD", "台币", "新台币"],
     "韩元": ["KRW", "韩圆", "韩元"],
 }
+
+# ============ OCR 增强点：备注类字段命名前缀（一期） ============
+# 需求方案：docs/OCR提示词与增强点治理-需求方案.md（v1.2，FR-1/FR-3/D6）
+# 约定：备注栏里抽出的关键信息拆成独立字段，统一以「备注-」开头命名，例如
+#      备注-合同号 / 备注-项目名称 / 备注-共计金额。
+# 该前缀字段的例外处理：
+# 1. 不做金额/日期/数量/重量/币别归一（备注原文语义不稳定，强行归一易误伤）；
+# 2. 不参与「文件名 ground truth 覆盖」（备注里可能是订单号/分批号等另一个号）。
+OCR_REMARK_FIELD_PREFIX = "备注-"
+
+
+def is_remark_field(field_name: object) -> bool:
+    """是否为备注类字段（以 OCR_REMARK_FIELD_PREFIX 开头）。"""
+    return str(field_name or "").startswith(OCR_REMARK_FIELD_PREFIX)
