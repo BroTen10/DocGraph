@@ -14,6 +14,10 @@
 #   BACKEND_HOST_PORT=8800    后端，只绑 127.0.0.1，供本机排障
 #   例如把前端放到 80：FRONTEND_HOST_PORT=80 bash deploy.sh
 #
+# backend/frontend 两个服务挂在 compose 的 deploy profile 下（裸
+# `docker compose up -d` 只起 postgres/neo4j，本地开发不受影响），本脚本
+# 的每条 compose 命令都会自动带上 --profile deploy。
+#
 # 前置条件：Docker Engine + compose v2；backend/.env（缺失会从 .env.example 生成，
 # 生成后必须填 LLM_API_KEY 与 PG_PASSWORD）。
 # =============================================================================
@@ -24,11 +28,12 @@ cd "$(dirname "$0")"
 # 数据库口令只认 backend/.env 一份：--env-file 让 compose 的 ${PG_PASSWORD} /
 # ${NEO4J_PASSWORD} 与后端进程读到同一个值。优先级 shell 环境 > --env-file > 根目录 .env。
 COMPOSE_ENV_FILE="backend/.env"
+COMPOSE_PROFILE="deploy"
 dc() {
     if [ -f "$COMPOSE_ENV_FILE" ]; then
-        docker compose --env-file "$COMPOSE_ENV_FILE" "$@"
+        docker compose --env-file "$COMPOSE_ENV_FILE" --profile "$COMPOSE_PROFILE" "$@"
     else
-        docker compose "$@"
+        docker compose --profile "$COMPOSE_PROFILE" "$@"
     fi
 }
 

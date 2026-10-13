@@ -42,11 +42,18 @@
 
    脚本会：校验 Docker → 检查 `.env` → 拦截 `DB_RESET_ON_STARTUP=true` → 构建 → 启动 → 轮询 `/api/health` → 探测 `/api/`、`/api/constants/doc-types`、`/api/rule-sets`。
 
+   `backend`、`frontend` 两个服务挂在 compose 的 **`deploy` profile** 下，所以：
+
+   - 服务器上按上面这条走即可（`deploy.sh` 每条 compose 命令都自带 `--profile deploy`）；
+   - 手工执行时务必带上 profile，否则只会拉起 postgres/neo4j：
+     `docker compose --env-file backend/.env --profile deploy up -d`
+
 5. 其它子命令：`bash deploy.sh check|status|logs [服务]|restart|down`。
 
 ## 关键约定
 
 - **容器内一律用服务名**：`PG_HOST=postgres`、`PG_PORT=5432`、`NEO4J_URI=bolt://neo4j:7687`。`.env` 里给宿主机开发用的 `localhost:15432/17687` 会被 compose 的 `environment` 覆盖，不要改回来。
+- **`deploy` profile**：`backend`/`frontend` 只在 `--profile deploy` 时参与编排。服务器部署走 `deploy.sh`（已自带）；本地裸 `docker compose up -d` 因此仍然只起数据库，和以前的手感一致。
 - **`DB_RESET_ON_STARTUP` 必须为 false**：true 会 `DROP SCHEMA` 并清空 Neo4j 图谱，脚本会直接拒绝启动。
 - **上传文件在卷里**：老数据在开发机的 `backend/uploads/`，迁移用
   `docker compose cp backend/uploads/. backend:/data/uploads/`。
@@ -66,7 +73,26 @@
 
 ## 与 Windows 本地开发的关系
 
-本地开发仍用 `start_services.bat` / `stop_services.bat`（后端 `.venv` + Vite dev server）。两套方式共用同一个 `docker-compose.yml`：`docker compose up -d postgres neo4j` 只起数据库即可继续本地开发。
+两套方式共用同一个 `docker-compose.yml`，靠 `deploy` profile 分开，互不干扰：
+
+| 用途 | 命令 | 形态 |
+| --- | --- | --- |
+| 日常开发（主力） | `docker compose up -d postgres neo4j` + `start_services.bat` | 后端 `backend\.venv` 跑 uvicorn `--reload`（8800），前端 Vite dev server（5173），改代码即时生效 |
+| 发布前预演 / 环境对齐 | `BACKEND_HOST_PORT=8811 docker compose --profile deploy up -d --build backend frontend` | 容器化形态（前端 8080、后端 8811），与服务器同一套镜像与 Linux 依赖 |
+| 只收容器、留数据库 | `docker compose --profile deploy rm -sf backend frontend` | 容器删除，`postgres`/`neo4j` 与数据卷不受影响 |
+
+注意：`deploy.sh` 用 `--env-file backend/.env` 解析数据库口令，裸 `docker compose` 则用内置默认值
+（`postgres` / `neo4jpassword`），两套口令解析结果不同，会让 `postgres`/`neo4j` 容器被**重建一次**
+（数据卷不动、数据不丢，但数据库会重启几十秒）。本机想避免这次重建，就把本地命令也写成
+`docker compose --env-file backend/.env up -d postgres neo4j`。
+
+两者同时跑要注意三点：
+
+1. **端口**：容器后端默认要 `127.0.0.1:8800`，与 dev 后端冲突，并存时用 `BACKEND_HOST_PORT=8811`。
+2. **上传件是两套存储**：dev 写 `backend/uploads/`，容器写 `uploads_data` 卷，数据库却是共享的，所以会出现"记录在、文件打不开"。要在本地共用，给 `backend` 服务加一行 bind mount `./backend/uploads:/data/uploads`。
+3. **镜像里的代码是构建那一刻的**，改了代码不 rebuild 就不会生效，别拿 8080 上的旧构建当调试目标。
+
+本地开发不会碰容器产物：`uploads/`、`backend/uploads/`、`frontend/dist/`、`node_modules/` 都在 `.gitignore` 内，镜像与卷只占 Docker 空间。
 
 > 注意：本地 `backend/.env` 若已把数据库口令改成非默认值，而 postgres 数据卷是很早以前用默认
 > 口令初始化的，两者不会自动同步（`POSTGRES_PASSWORD` 只在数据卷首次初始化时生效）。

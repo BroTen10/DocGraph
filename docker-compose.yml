@@ -47,6 +47,9 @@ services:
       start_period: 30s
 
   backend:
+    # 只在 --profile deploy 下纳入编排：裸 `docker compose up -d` 仍然只起数据库，
+    # 本地开发（venv + Vite dev server）不受影响。deploy.sh 已默认带该 profile。
+    profiles: ["deploy"]
     build:
       context: ./backend
     image: docgraph-backend:local
@@ -77,6 +80,7 @@ services:
         condition: service_healthy
 
   frontend:
+    profiles: ["deploy"]
     build:
       context: ./frontend
     image: docgraph-frontend:local
