@@ -99,3 +99,24 @@ backend\.venv\Scripts\python.exe tests\run_graph_rule_tests.py
 ```bat
 backend\.venv\Scripts\python.exe tests\test_rule_import_granularity.py
 ```
+
+## LLM 客户端离线桩测试
+
+`tests/test_llm_client.py` 针对 `backend/app/llm_client.py`：用假的 OpenAI client 顶替真实网络调用，
+**不联网、不需要 API key、不依赖数据库**，覆盖：
+
+- 可重试故障（限流 / 超时 / 连接失败）的退避重试、重试上限与退避递增；
+- 空响应（choices 为空 / content 为空白）重试，以及重试耗尽后抛 `invalid_response`；
+- 不可重试故障的分类：鉴权 → `auth_error`、欠费 → `arrearage`、其他 → `unknown`，且不重试；
+- `chat_json` 的 markdown 围栏、JSON 前后夹带文本、字符串内含括号、非法 JSON；
+- `max_tokens` 截断 JSON 的降级修复（批次 4-2）及三个修复辅助函数的行为；
+- `enable_thinking` / `disable_thinking` 透传为 `extra_body`（两个参数同时给出时合并）；
+- 默认请求参数（temperature 回落到 0.3、未指定时不传 `max_tokens`）与全局单例工厂。
+
+运行方式（无需启动数据库或后端服务）：
+
+```bat
+backend\.venv\Scripts\python.exe tests\test_llm_client.py
+```
+
+退出码：0 = 全部通过，1 = 存在失败断言。
