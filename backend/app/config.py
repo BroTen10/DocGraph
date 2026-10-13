@@ -48,17 +48,17 @@ class Settings(BaseSettings):
     neo4j_user: str = "neo4j"
     neo4j_password: str = "neo4jpassword"
 
-    # LLM (DeepSeek, OpenAI 兼容)
+    # LLM（标普云 hub，OpenAI 兼容；模型由 hub 侧聚合，deepseek 系列走 Anthropic 语义）
     llm_api_key: str = ""
-    llm_base_url: str = "https://api.deepseek.com/v1"
-    llm_model_name: str = "deepseek-flash"
+    llm_base_url: str = "https://hub.biaopu.cloud/v1"
+    llm_model_name: str = "deepseek-v4.1-flash"
     llm_confidence_threshold: float = 0.9
 
-    # OCR (DeepSeek 多模态，OpenAI 兼容端点)
+    # OCR（多模态，OpenAI 兼容端点；与 LLM 同源）
     # OCR_API_KEY 留空时自动复用 LLM_API_KEY。
     ocr_api_key: str = ""
-    ocr_base_url: str = "https://api.deepseek.com/v1"
-    ocr_model_name: str = "deepseek-flash"
+    ocr_base_url: str = "https://hub.biaopu.cloud/v1"
+    ocr_model_name: str = "deepseek-v4.1-flash"
 
     # 审查容差默认值
     allow_same_day_receive_pay: bool = True

@@ -94,9 +94,11 @@ preflight() {
     key="$(read_env PG_PASSWORD)"
     [ -n "$key" ] || warn "backend/.env 未设置 PG_PASSWORD，将使用 compose 默认口令 postgres"
     key="$(read_env LLM_API_KEY)"
-    if [ -z "$key" ] || [ "$key" = "sk-your-deepseek-key" ]; then
-        warn "backend/.env 的 LLM_API_KEY 仍是占位值，规则解析与审查链路会调用失败"
-    fi
+    case "$key" in
+        ""|sk-your-*)
+            warn "backend/.env 的 LLM_API_KEY 仍是占位值，规则解析与审查链路会调用失败"
+            ;;
+    esac
 
     if [ -n "${PG_PASSWORD:-}" ] || [ -n "${NEO4J_PASSWORD:-}" ]; then
         warn "shell 环境里设置了 PG_PASSWORD / NEO4J_PASSWORD，它会覆盖 backend/.env 里的值"
