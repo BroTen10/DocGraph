@@ -16,13 +16,13 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react'
 import { Document as PdfDocument, Page as PdfPage } from 'react-pdf'
 import {
-  Card, Tabs, Table, Tag, Empty, Spin, Typography, Button, Tooltip, message, Input, Space, Popconfirm,
+  Card, Tabs, Table, Tag, Empty, Spin, Typography, Button, Tooltip, message, Input, Space, Popconfirm, Select,
 } from 'antd'
 import {
   SearchOutlined, FileTextOutlined, CheckCircleOutlined, WarningOutlined,
   EditOutlined, SaveOutlined, PlusOutlined, DeleteOutlined, CloseOutlined,
 } from '@ant-design/icons'
-import { contractsApi, getErrorMessage } from '../api/client'
+import { contractsApi, constantsApi, getErrorMessage } from '../api/client'
 import type { DocumentBrief, OcrLayout, OcrLayoutLine } from '../types'
 import '../pdf-setup'
 import ZoomableStage from './ZoomableStage'
@@ -479,6 +479,11 @@ export default function DocumentCompare({ doc, fileUrl, height = 600, onSaved }:
   const [draftFields, setDraftFields] = useState<Array<{ key: string; value: string }>>([])
   const [saving, setSaving] = useState(false)
   const [freshDoc, setFreshDoc] = useState<DocumentBrief | null>(null)
+  // 文档类型人工修正(OCR 对照页保存;保存后作为规则审查的类型依据)
+  const [docTypeOptions, setDocTypeOptions] = useState<string[]>([])
+  const [docTypesLoading, setDocTypesLoading] = useState(false)
+  const [draftDocType, setDraftDocType] = useState('')
+  const [savingDocType, setSavingDocType] = useState(false)
   const docContainerRef = useRef<HTMLElement | null>(null)
   /** 左侧缩放平移组件的 API（用于高亮后定位到可视区中央） */
   const zoomApiRef = useRef<ZoomPanApi | null>(null)
@@ -491,6 +496,37 @@ export default function DocumentCompare({ doc, fileUrl, height = 600, onSaved }:
   }, [doc, fileUrl])
 
   const displayDoc = freshDoc ?? doc
+
+  // 文档类型候选项：已定义类型清单（与「文档类型」页一致）
+  useEffect(() => {
+    let mounted = true
+    setDocTypesLoading(true)
+    constantsApi
+      .docTypes()
+      .then((c) => {
+        if (mounted) setDocTypeOptions(c.doc_types.map((d) => d.name))
+      })
+      .catch(() => {
+        /* 拉取失败时退化为仅展示当前类型 */
+      })
+      .finally(() => {
+        if (mounted) setDocTypesLoading(false)
+      })
+    return () => {
+      mounted = false
+    }
+  }, [])
+
+  // 展示文档变化（切换文档 / 保存后刷新）时同步草稿值
+  useEffect(() => {
+    setDraftDocType(displayDoc.doc_type || '')
+  }, [displayDoc.id, displayDoc.doc_type])
+
+  const docTypeSelectOptions = useMemo(() => {
+    const names = new Set(docTypeOptions)
+    if (displayDoc.doc_type) names.add(displayDoc.doc_type)
+    return Array.from(names).map((name) => ({ value: name, label: name }))
+  }, [docTypeOptions, displayDoc.doc_type])
 
   const handleDocReady = useCallback((container: HTMLElement | null) => {
     docContainerRef.current = container
@@ -643,6 +679,24 @@ export default function DocumentCompare({ doc, fileUrl, height = 600, onSaved }:
 
   const updateDraft = (idx: number, patch: Partial<{ key: string; value: string }>) => {
     setDraftFields((prev) => prev.map((row, i) => (i === idx ? { ...row, ...patch } : row)))
+  }
+
+  // ============ 文档类型人工修正 ============
+  const saveDocType = async () => {
+    const next = (draftDocType || '').trim()
+    if (!next || next === displayDoc.doc_type || savingDocType) return
+    setSavingDocType(true)
+    try {
+      await contractsApi.updateDocType(displayDoc.id, next)
+      const updated = await contractsApi.getOcr(displayDoc.id)
+      setFreshDoc(updated)
+      message.success('文档类型已保存，重新审查将按修正后的类型核对')
+      onSaved?.()
+    } catch (e) {
+      message.error('保存文档类型失败: ' + getErrorMessage(e, ''))
+    } finally {
+      setSavingDocType(false)
+    }
   }
 
   const removeDraft = (idx: number) => {
@@ -805,6 +859,46 @@ export default function DocumentCompare({ doc, fileUrl, height = 600, onSaved }:
           }
         >
           {/* 元信息 */}
+          <div
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              flexWrap: 'wrap',
+              gap: 8,
+              marginBottom: 12,
+              padding: '8px 10px',
+              background: '#f8fafc',
+              border: '1px solid #e2e8f0',
+              borderRadius: 8,
+            }}
+          >
+            <Text strong style={{ fontSize: 13 }}>文档类型</Text>
+            <Select
+              size="small"
+              showSearch
+              optionFilterProp="label"
+              style={{ minWidth: 200 }}
+              value={draftDocType || undefined}
+              onChange={(val) => setDraftDocType(val)}
+              options={docTypeSelectOptions}
+              loading={docTypesLoading}
+            />
+            {displayDoc.is_required ? <Tag color="red">必备</Tag> : <Tag>非必备</Tag>}
+            <Button
+              size="small"
+              type="primary"
+              icon={<SaveOutlined />}
+              loading={savingDocType}
+              disabled={!draftDocType || draftDocType === displayDoc.doc_type}
+              onClick={saveDocType}
+            >
+              保存类型
+            </Button>
+            <Text type="secondary" style={{ fontSize: 11 }}>
+              修正后作为审查依据，参与齐套性 / 印章 / 字段比对等规则核对
+            </Text>
+          </div>
+
           <div style={{ marginBottom: 12, fontSize: 12, color: '#666' }}>
             {inferredDocType && (
               <Tag color="purple" style={{ marginRight: 8 }}>

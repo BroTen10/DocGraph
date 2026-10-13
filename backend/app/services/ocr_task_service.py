@@ -100,25 +100,26 @@ def start_ocr_for_doc(db: Session, rule_set_id: uuid.UUID, doc_id: uuid.UUID) ->
 
 
 def start_ocr_for_contract(
-    db: Session, rule_set_id: uuid.UUID, contract_id: uuid.UUID
+    db: Session,
+    rule_set_id: uuid.UUID,
+    contract_id: uuid.UUID,
+    force: bool = False,
 ) -> OcrTask:
-    """对合同下所有 pending 文档批量启动 OCR（异步）。"""
+    """对合同下文档批量启动 OCR（异步）。
+
+    force=False（默认）：仅处理 ocr_status=pending 的未识别文档；
+    force=True：重置式重新识别，覆盖该合同下全部文档（含已 done/failed 的）。
+    """
     contract = db.get(Contract, contract_id)
     if contract is None:
         raise ValueError("合同不存在")
 
-    docs = (
-        db.execute(
-            select(Document).where(
-                Document.contract_id == contract_id,
-                Document.ocr_status == "pending",
-            )
-        )
-        .scalars()
-        .all()
-    )
+    stmt = select(Document).where(Document.contract_id == contract_id)
+    if not force:
+        stmt = stmt.where(Document.ocr_status == "pending")
+    docs = db.execute(stmt).scalars().all()
     if not docs:
-        raise ValueError("没有待识别的文档")
+        raise ValueError("没有待识别的文档" if not force else "该合同下没有可重新识别的文档")
 
     task = OcrTask(
         rule_set_id=rule_set_id,

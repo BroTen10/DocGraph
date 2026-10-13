@@ -40,12 +40,21 @@ def trigger_doc_ocr(
 def trigger_contract_ocr(
     contract_id: uuid.UUID,
     rule_set_id: uuid.UUID = Query(..., description="所属规则集 ID"),
+    force: bool = Query(
+        default=False,
+        description="为 true 时对该合同下全部文档重新识别（含已识别文档，覆盖原结果）",
+    ),
     db: Session = Depends(get_db),
 ) -> OcrTaskOut:
-    """触发合同下所有 pending 文档批量 OCR（异步）。"""
+    """触发合同下文档批量 OCR（异步）。
+
+    默认只处理 pending 文档；force=true 时重置式重新识别全部文档。
+    """
     try:
         return OcrTaskOut.model_validate(
-            ocr_task_service.start_ocr_for_contract(db, rule_set_id, contract_id)
+            ocr_task_service.start_ocr_for_contract(
+                db, rule_set_id, contract_id, force=force
+            )
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))

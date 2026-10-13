@@ -252,10 +252,12 @@ export const ocrApi = {
     http
       .post<OcrTask>(`/ocr/documents/${docId}`, null, { params: { rule_set_id: ruleSetId } })
       .then((r) => r.data),
-  /** 触发合同下所有 pending 文档批量 OCR(异步) */
-  triggerContract: (ruleSetId: string, contractId: string) =>
+  /** 触发合同下批量 OCR(异步);force=true 时对全部文档重置式重新识别(含已识别) */
+  triggerContract: (ruleSetId: string, contractId: string, force = false) =>
     http
-      .post<OcrTask>(`/ocr/contracts/${contractId}`, null, { params: { rule_set_id: ruleSetId } })
+      .post<OcrTask>(`/ocr/contracts/${contractId}`, null, {
+        params: { rule_set_id: ruleSetId, force },
+      })
       .then((r) => r.data),
   /** OCR 任务列表(按 rule_set_id 过滤,可按 contract_id 进一步过滤) */
   listTasks: (ruleSetId: string, contractId?: string) =>
