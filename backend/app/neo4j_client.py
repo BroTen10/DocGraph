@@ -284,14 +284,14 @@ class Neo4jClient:
         """获取指定图谱的节点和边，供前端力导向图渲染。"""
         nodes = self.execute_read(
             "MATCH (n:RuleEntity) WHERE n.graph_id = $graph_id "
-            "RETURN id(n) AS id, n.name AS name, n.type AS type, "
+            "RETURN elementId(n) AS id, n.name AS name, n.type AS type, "
             "properties(n) AS properties",
             {"graph_id": graph_id},
         )
         edges = self.execute_read(
             "MATCH (a:RuleEntity)-[r]->(b:RuleEntity) "
             "WHERE a.graph_id = $graph_id "
-            "RETURN id(r) AS id, a.name AS source, b.name AS target, "
+            "RETURN elementId(r) AS id, a.name AS source, b.name AS target, "
             "type(r) AS type, properties(r) AS properties",
             {"graph_id": graph_id},
         )
