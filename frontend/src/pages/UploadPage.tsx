@@ -648,6 +648,11 @@ export default function UploadPage() {
                         )}
                       </div>
                     )}
+                    {ocrTask.status === 'failed' && ocrTask.failures.length === 0 && ocrTask.error && (
+                      <div style={{ marginTop: 8, fontSize: 11, color: '#dc2626' }}>
+                        · {ocrTask.error}
+                      </div>
+                    )}
                   </div>
                 )}
 

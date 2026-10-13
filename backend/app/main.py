@@ -52,6 +52,19 @@ async def lifespan(app: FastAPI):
     # 再为规则集添加规则（POST /api/rules?rule_set_id=...）。
     # 2. 确保上传目录存在
     settings.ensure_upload_root()
+    # 3. 回收上一个进程遗留的 OCR 任务：OCR 跑在进程内后台线程，进程退出后
+    #    任务行会永久停在 running/pending，导致前端一直显示"识别中"并禁用按钮
+    from .database import SessionLocal
+    from .services.ocr_task_service import reconcile_stale_tasks, set_process_start
+
+    _db = SessionLocal()
+    try:
+        set_process_start(_db)
+        stale = reconcile_stale_tasks(_db, force_all=True)
+        if stale:
+            logger.warning("启动时回收 %d 个中断的 OCR 任务", stale)
+    finally:
+        _db.close()
     yield
     logger.info("=== 后端关闭 ===")
 

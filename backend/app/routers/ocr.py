@@ -81,6 +81,8 @@ def list_tasks(
     db: Session = Depends(get_db),
 ) -> list[OcrTaskBrief]:
     """OCR 任务列表（按 rule_set_id 过滤，可按 contract_id 二次过滤）。"""
+    # 顺带回收中断的任务，避免前端把陈旧的 running 状态当作"正在识别"
+    ocr_task_service.reconcile_stale_tasks(db)
     tasks = ocr_task_service.list_ocr_tasks(db, rule_set_id, contract_id, limit)
     return [OcrTaskBrief.model_validate(t) for t in tasks]
 
@@ -90,6 +92,7 @@ def get_task(
     task_id: uuid.UUID, db: Session = Depends(get_db)
 ) -> OcrTaskOut:
     """查询单个 OCR 任务进度。"""
+    ocr_task_service.reconcile_stale_tasks(db)
     t = ocr_task_service.get_ocr_task(db, task_id)
     if t is None:
         raise HTTPException(status_code=404, detail="任务不存在")

@@ -13,10 +13,10 @@ from __future__ import annotations
 import logging
 import threading
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Optional
 
-from sqlalchemy import select
+from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
 from ..constants import DOC_OTHER
@@ -34,6 +34,57 @@ from .ocr_service import (
 )
 
 logger = logging.getLogger(__name__)
+
+# running/pending 任务超过该时长即视为中断（单页识别 10-60s，30 分钟足够宽松）
+STALE_TASK_MINUTES = 30
+
+# 本进程启动时刻（数据库时钟）。由 lifespan 在启动时写入：
+# 早于本进程启动的任务不可能还活着，可立即回收，无需等满 STALE_TASK_MINUTES。
+# 前提是单进程部署（本地 run.py / Dockerfile 的 uvicorn 均未使用 --workers）。
+_PROCESS_STARTED_DB_TS: datetime | None = None
+
+
+def set_process_start(db: Session) -> None:
+    """记录本进程启动时刻（数据库时钟），供中断任务回收使用。"""
+    global _PROCESS_STARTED_DB_TS
+    try:
+        _PROCESS_STARTED_DB_TS = db.execute(select(func.now())).scalar()
+    except Exception:
+        logger.warning("读取数据库时钟失败，中断任务回收将只按超时判定", exc_info=True)
+        _PROCESS_STARTED_DB_TS = None
+
+
+def reconcile_stale_tasks(db: Session, *, force_all: bool = False) -> int:
+    """回收中断的 OCR 任务，避免任务行永久停在 running。
+
+    背景：OCR 在进程内后台线程执行，服务重启（含 debug reload）或进程退出会让线程
+    消失，但任务行仍是 running/pending；前端据此一直显示"识别中"并禁用触发按钮。
+
+    force_all=True（服务启动时）：此时不可能有存活任务，全部置 failed；
+    force_all=False（查询/触发时）：处理「超过 STALE_TASK_MINUTES」或「早于本进程
+    启动时刻」的任务——后者在单进程部署下必然已中断，可让界面立刻恢复可用。
+
+    Returns: 被回收的任务数
+    """
+    stmt = select(OcrTask).where(OcrTask.status.in_(("pending", "running")))
+    if not force_all:
+        conds = [OcrTask.start_time < func.now() - timedelta(minutes=STALE_TASK_MINUTES)]
+        if _PROCESS_STARTED_DB_TS is not None:
+            conds.append(OcrTask.start_time < _PROCESS_STARTED_DB_TS)
+        stmt = stmt.where(or_(*conds))
+    rows = db.execute(stmt).scalars().all()
+    if not rows:
+        return 0
+    for t in rows:
+        t.status = "failed"
+        t.stage = "已中断"
+        t.error = t.error or "任务中断（服务重启或识别进程退出），请重新触发 OCR"
+        t.end_time = func.now()
+        if t.done_count < t.total_count:
+            t.failed_count = max(t.failed_count, t.total_count - t.done_count)
+    db.commit()
+    logger.warning("已回收 %d 个中断的 OCR 任务", len(rows))
+    return len(rows)
 
 
 def _apply_inferred_doc_type(db: Session, doc: Document, fields: dict) -> None:
@@ -95,6 +146,9 @@ def start_ocr_for_doc(
     if doc is None:
         raise ValueError("文档不存在")
 
+    # 先回收中断的旧任务，避免前端因陈旧 running 状态禁用触发按钮
+    reconcile_stale_tasks(db)
+
     profile_data = _prepare_profile(db, doc.doc_type, profile)
     task = OcrTask(
         rule_set_id=rule_set_id,
@@ -137,6 +191,8 @@ def start_ocr_for_contract(
     contract = db.get(Contract, contract_id)
     if contract is None:
         raise ValueError("合同不存在")
+
+    reconcile_stale_tasks(db)
 
     stmt = select(Document).where(Document.contract_id == contract_id)
     if not force:
