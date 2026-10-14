@@ -37,10 +37,9 @@ def check(name: str, ok: bool, detail: str = "") -> None:
 
 
 def reset_env() -> None:
-    """清掉所有注入变量并清缓存，回到"本机开发"初始状态。"""
+    """清掉所有注入变量，回到"本机开发"初始状态。"""
     for key in V.ENV_VARS:
         os.environ.pop(key, None)
-    V.collect_build_info.cache_clear()
 
 
 def main() -> None:
@@ -72,7 +71,6 @@ def main() -> None:
         }
     )
     os.environ[V.ENV_VERSION] = "1.2.3"
-    V.collect_build_info.cache_clear()
     built = V.collect_build_info()
     check("镜像构建：source=build-args", built["source"] == "build-args", built["source"])
     check("镜像构建：build_env=prod", built["build_env"] == "prod", built["build_env"])
@@ -82,7 +80,6 @@ def main() -> None:
     check("镜像构建：不做 git 探测（容器内无 .git）", built["commit_full"] is None and built["dirty"] is False, repr(built["dirty"]))
 
     os.environ[V.ENV_DIRTY] = "true"
-    V.collect_build_info.cache_clear()
     check("有未提交改动时 label 带 .dirty", V.collect_build_info()["label"] == "1.2.3+abc1234.dirty", V.collect_build_info()["label"])
 
     # ---------- 3. 本机开发：运行时读工作区 git ----------
@@ -106,27 +103,36 @@ def main() -> None:
     check("无 git 时：label 只有版本号", file_only["label"] == file_version, file_only["label"])
     check("无 git 时：build_env=unknown（无法判断环境）", file_only["build_env"] == "unknown", file_only["build_env"])
 
-    # ---------- 5. 什么都没有：如实兜底，不伪造版本 ----------
+    # ---------- 5. 实时读取：同一进程内重复调用会重算（不缓存） ----------
+    reset_env()
+    before = V.collect_build_info()
+    os.environ[V.ENV_VERSION] = "0.0.1-test"
+    os.environ[V.ENV_COMMIT] = "feedface"
+    after = V.collect_build_info()
+    check(
+        "环境变化立刻反映（版本信息不缓存）",
+        after["version"] == "0.0.1-test" and after["commit"] == "feedface" and after["label"] == "0.0.1-test+feedface",
+        f"before={before['label']} after={after['label']}",
+    )
+
+    # ---------- 6. 什么都没有：如实兜底，不伪造版本 ----------
     reset_env()
     original_path = V.version_file_path
     V.version_file_path = lambda: Path(tempfile.gettempdir()) / "docgraph-no-such-VERSION"  # type: ignore[assignment]
     try:
-        V.collect_build_info.cache_clear()
         empty = V.collect_build_info(use_git=False)
         check("无 VERSION、无 git：version 兜底为 0.0.0", empty["version"] == V.FALLBACK_VERSION, empty["version"])
         check("无 VERSION、无 git：source=unknown", empty["source"] == "unknown", empty["source"])
     finally:
         V.version_file_path = original_path  # type: ignore[assignment]
-        V.collect_build_info.cache_clear()
 
-    # ---------- 6. git 不在 PATH 时的兜底（Windows 上装了 git 但没加进 PATH 很常见） ----------
+    # ---------- 7. git 不在 PATH 时的兜底（Windows 上装了 git 但没加进 PATH 很常见） ----------
     reset_env()
     original_git = V._git
     original_dirty = V.git_dirty
     V._git = lambda *args, **kwargs: None  # type: ignore[assignment]
     V.git_dirty = lambda: None  # type: ignore[assignment]
     try:
-        V.collect_build_info.cache_clear()
         no_binary = V.collect_build_info()
         if V._git_dir() is not None:
             check(
@@ -151,9 +157,8 @@ def main() -> None:
     finally:
         V._git = original_git  # type: ignore[assignment]
         V.git_dirty = original_dirty  # type: ignore[assignment]
-        V.collect_build_info.cache_clear()
 
-    # ---------- 7. 接口口径与模块一致 ----------
+    # ---------- 8. 接口口径与模块一致 ----------
     from app.main import app as fastapi_app, health, version_info  # noqa: E402
 
     paths = {getattr(route, "path", None) for route in fastapi_app.routes}

@@ -26,7 +26,6 @@ from __future__ import annotations
 import os
 import re
 import subprocess
-from functools import lru_cache
 from pathlib import Path
 
 APP_NAME = "DocGraph"
@@ -179,9 +178,12 @@ def read_git_head() -> tuple[str | None, str | None]:
     return sha, branch
 
 
-@lru_cache(maxsize=1)
 def collect_build_info(use_git: bool = True) -> dict:
-    """汇总版本信息（进程内只计算一次）。
+    """汇总版本信息。
+
+    每次调用都实时读取，不做进程级缓存：``git commit`` 之后提交号立刻更新，
+    工程目录里的未提交改动也立刻反映到 ``dirty``——否则"进程启动那一刻的版本"
+    会被误当成当前版本，正好在"提交完就和服务器对版本"时给出错误结论。
 
     ``use_git=False`` 时完全跳过 git，便于测试与无 git 环境。
     """
