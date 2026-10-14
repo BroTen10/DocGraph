@@ -120,3 +120,20 @@ backend\.venv\Scripts\python.exe tests\test_llm_client.py
 ```
 
 退出码：0 = 全部通过，1 = 存在失败断言。
+
+## 版本号管理
+
+`tests/test_version.py` 覆盖版本号口径：
+
+- 版本号真相（仓库根 `VERSION` 文件）存在且为合法 semver；
+- 取值优先级：环境变量（镜像 build args）> 工作区 git（本机开发）> `VERSION` 文件 > 兜底 `0.0.0`；
+- `label` 格式（`version+commit[.dirty]`）与 dirty 判定；
+- `/api/health`、`/api/version` 与 `backend/app/version.py` 口径一致。
+
+运行方式（无需启动数据库或后端服务，也不需要网络）：
+
+```bat
+backend\.venv\Scripts\python.exe tests\test_version.py
+```
+
+退出码：0 = 全部通过，1 = 存在失败断言。

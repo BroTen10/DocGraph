@@ -30,6 +30,7 @@ from .routers import (
     rules,
     settings as settings_router,
 )
+from .version import app_version, collect_build_info
 
 logging.basicConfig(
     level=logging.INFO,
@@ -42,6 +43,7 @@ logger = logging.getLogger(__name__)
 async def lifespan(app: FastAPI):
     """应用生命周期：启动时初始化。"""
     logger.info("=== 启动文档审查智能体后端 ===")
+    logger.info("版本：%s", collect_build_info()["label"])
     # 1. 创建表（含 rule_sets 表与 rule_set_id 外键）
     #    注意：init_db 会先 DROP SCHEMA public CASCADE，再 CREATE SCHEMA public，再 create_all
     #    用户已确认不迁移旧数据。
@@ -79,7 +81,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="基于知识图谱的自动文档审查智能体 API",
-    version="1.0.0",
+    version=app_version(),
     description="出口代理贸易单证自动审查 - MVP（多规则集）",
     lifespan=lifespan,
 )
@@ -107,8 +109,27 @@ app.include_router(settings_router.router)
 
 @app.get("/api/health")
 def health() -> dict:
-    """健康检查。"""
-    return {"status": "ok", "version": "1.0.0"}
+    """健康检查：带版本信息，便于一条命令确认某环境跑的是哪次构建。"""
+    info = collect_build_info()
+    return {
+        "status": "ok",
+        "version": info["version"],
+        "label": info["label"],
+        "commit": info["commit"],
+        "dirty": info["dirty"],
+        "build_env": info["build_env"],
+    }
+
+
+@app.get("/api/version")
+def version_info() -> dict:
+    """完整版本信息（版本号 + git 定位 + 构建环境）。
+
+    本机开发环境与服务器正式环境用同一结构返回，可直接对比：
+    本机 ``http://localhost:8800/api/version`` vs
+    服务器 ``https://<域名>/api/version``。
+    """
+    return collect_build_info()
 
 
 @app.get("/api/constants/doc-types")

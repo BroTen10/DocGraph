@@ -30,6 +30,7 @@ import {
 import { settingsApi, getErrorMessage } from '../api/client'
 import type { SettingsItem, PromptOptimizeResult } from '../types'
 import PageHeader from '../components/PageHeader'
+import VersionCard from '../components/VersionCard'
 
 const { Text, Paragraph } = Typography
 const { TextArea } = Input
@@ -441,6 +442,8 @@ export default function SettingsPage() {
           </Space>
         }
       />
+
+      <VersionCard />
 
       {loading ? (
         <div style={{ textAlign: 'center', padding: 60 }}>

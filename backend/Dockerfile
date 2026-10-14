@@ -36,6 +36,27 @@ COPY . .
 # UPLOAD_ROOT 由 compose 注入为 /data/uploads 并挂卷持久化
 RUN mkdir -p /data/uploads
 
+# 版本信息：容器里没有 .git，版本号由 deploy.sh 算好后经 compose 的 build args
+# 传到这里的 ARG，再落到镜像 ENV，供 /api/version 与启动日志使用。
+# 声明放在最后：改版本号只会重建这层之后的内容，dependency 层继续命中缓存。
+ARG DOCGRAPH_APP_VERSION=""
+ARG DOCGRAPH_GIT_COMMIT=""
+ARG DOCGRAPH_GIT_DESCRIBE=""
+ARG DOCGRAPH_GIT_TAG=""
+ARG DOCGRAPH_GIT_BRANCH=""
+ARG DOCGRAPH_GIT_DIRTY=""
+ARG DOCGRAPH_BUILD_TIME=""
+ARG DOCGRAPH_BUILD_ENV="prod"
+
+ENV DOCGRAPH_APP_VERSION=${DOCGRAPH_APP_VERSION} \
+    DOCGRAPH_GIT_COMMIT=${DOCGRAPH_GIT_COMMIT} \
+    DOCGRAPH_GIT_DESCRIBE=${DOCGRAPH_GIT_DESCRIBE} \
+    DOCGRAPH_GIT_TAG=${DOCGRAPH_GIT_TAG} \
+    DOCGRAPH_GIT_BRANCH=${DOCGRAPH_GIT_BRANCH} \
+    DOCGRAPH_GIT_DIRTY=${DOCGRAPH_GIT_DIRTY} \
+    DOCGRAPH_BUILD_TIME=${DOCGRAPH_BUILD_TIME} \
+    DOCGRAPH_BUILD_ENV=${DOCGRAPH_BUILD_ENV}
+
 EXPOSE 8800
 
 # 健康检查：容器内不装 curl，直接用 python 打自家的 /api/health

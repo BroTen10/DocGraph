@@ -21,6 +21,7 @@ import DocTypesPage from './pages/DocTypesPage'
 import SettingsPage from './pages/SettingsPage'
 import { RuleSetProvider, useRuleSet } from './context/RuleSetContext'
 import { RuleSetSwitcher } from './components/RuleSetSwitcher'
+import VersionBadge from './components/VersionBadge'
 
 const { Header, Sider, Content } = Layout
 
@@ -211,6 +212,8 @@ function AppInner() {
 
           <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
             <RuleSetSwitcher />
+            {/* 版本徽标：本机开发环境与服务器正式环境对版本时先看这里 */}
+            <VersionBadge />
           </div>
         </Header>
 

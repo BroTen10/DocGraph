@@ -614,3 +614,36 @@ export interface DetectNewTypesResponse {
   new_types: NewDocTypeInfo[]
   total: number
 }
+
+/**
+ * 版本信息：后端 `GET /api/version` 与前端构建期 `__BUILD_INFO__` 共用同一结构，
+ * 便于把"本机开发环境"与"服务器正式环境"放在一起对比。
+ */
+export interface BuildInfo {
+  /** 来源：backend | frontend */
+  kind: string
+  name: string
+  /** 人类版本号，来自仓库根 VERSION 文件 */
+  version: string
+  /** 版本号 + 提交 + dirty，如 0.3.0+4b00ac1.dirty */
+  label: string
+  /** git describe 输出，如 v0.2.0-36-g4b00ac1 */
+  describe: string | null
+  /** 最近一次发版 tag */
+  tag?: string | null
+  /** 短提交号（7 位） */
+  commit: string | null
+  /** 完整提交号（后端 runtime-git 时提供） */
+  commit_full?: string | null
+  /** 提交时间（ISO 8601） */
+  commit_date?: string | null
+  branch: string | null
+  /** 工作区是否有未提交改动；无法判断时为 null */
+  dirty: boolean | null
+  /** dev=从 git 工作区运行；prod=deploy.sh 构建的镜像；unknown=都没有 */
+  build_env: string
+  /** 构建时间（ISO 8601）；本机开发时前端值等于 dev server 启动时间 */
+  built_at: string | null
+  /** 版本信息来源：build-args | runtime-git | version-file | unknown */
+  source: string
+}

@@ -65,6 +65,20 @@ bash deploy.sh                 # 校验 → dc build 重建 backend 镜像 → u
 - **systemd + nginx 形态**（腾讯云那份指引）：`git pull` → `sudo systemctl restart docgraph-backend`；依赖有变化才重建 venv，前端有改动才 `npm ci && npm run build` 并重新拷贝 `dist`。
 - **升级后自检**：`bash deploy.sh check` 通过，并在「系统设置 → 运行参数」能看到随版本新增的开关（例如 `LLM 全量复核（只提异议，不改判）`，默认关闭）。新增开关只写数据库 `system_settings`，不需要改 `.env` 或 compose。
 
+### 升级前后的版本核对
+
+版本号真相是仓库根 `VERSION` 文件，`deploy.sh` 会把它与 git 定位（提交 / tag / dirty）一起注入两个镜像
+——容器里没有 `.git`，靠这一步镜像才报得出准确版本。因此：
+
+- 部署结束会打印「运行版本：`{...}`」（来自 `GET /api/version`），一眼确认服务器这次跑的是哪个提交；
+- 手动核对：`curl http://127.0.0.1:${FRONTEND_HOST_PORT}/api/version`；
+- 与本机开发环境对比：本机执行 `powershell -File scripts\version.ps1 -Remote https://<域名>`，
+  脚本列出「本机工作区 / 本机运行中后端 / 服务器正式环境」三行并按提交号给结论；
+- 网页右上角也有版本徽标（悬停看前后端明细），前后端不是同一次构建时会标橙提示强刷。
+- `deploy.sh` 在「工作树有未提交改动」或「`VERSION` 还没打对应 tag」时会告警（不阻断）。
+
+字段含义、来源与发版流程见 [版本管理](版本管理.md)。
+
 ### 重启会回收"中断"的任务
 
 OCR 与审查任务都跑在进程内后台线程，因此**容器/进程重启时，启动前遗留的 running 任务会被置为 failed（阶段显示「已中断」）**，需要重新发起：
@@ -93,6 +107,7 @@ OCR 与审查任务都跑在进程内后台线程，因此**容器/进程重启�
 | 大文件上传返回 413 | nginx `client_max_body_size` 需大于后端 `MAX_FILE_SIZE_MB`，当前 60m。 |
 | 部署脚本报 `$'\r': command not found` | 脚本被 CRLF 污染，`.gitattributes` 已固定 `*.sh` 为 LF；若是拷贝目录导致的，执行 `sed -i 's/\r$//' deploy.sh`。 |
 | 前端页面能开、接口 404 | 检查 nginx 是否把 `/api/` 代理到 `backend:8800`，以及 backend 容器是否 healthy。 |
+| 界面右上角版本徽标显示「版本未知」 | 该镜像是直接 `docker compose --profile deploy build` 出来的（没有 build args），用 `bash deploy.sh` 重新构建即可带上版本；详见 [版本管理](版本管理.md)。 |
 
 ## 与 Windows 本地开发的关系
 

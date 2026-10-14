@@ -52,6 +52,17 @@ services:
     profiles: ["deploy"]
     build:
       context: ./backend
+      # 版本信息：容器内没有 .git，由 deploy.sh 算好后经 build args 注入镜像 ENV
+      # （宿主 shell 未设这些变量时为空，镜像会如实报 0.0.0 / unknown，不伪造版本）
+      args:
+        DOCGRAPH_APP_VERSION: ${DOCGRAPH_APP_VERSION:-}
+        DOCGRAPH_GIT_COMMIT: ${DOCGRAPH_GIT_COMMIT:-}
+        DOCGRAPH_GIT_DESCRIBE: ${DOCGRAPH_GIT_DESCRIBE:-}
+        DOCGRAPH_GIT_TAG: ${DOCGRAPH_GIT_TAG:-}
+        DOCGRAPH_GIT_BRANCH: ${DOCGRAPH_GIT_BRANCH:-}
+        DOCGRAPH_GIT_DIRTY: ${DOCGRAPH_GIT_DIRTY:-}
+        DOCGRAPH_BUILD_TIME: ${DOCGRAPH_BUILD_TIME:-}
+        DOCGRAPH_BUILD_ENV: ${DOCGRAPH_BUILD_ENV:-prod}
     image: docgraph-backend:local
     container_name: docgraph-backend
     restart: unless-stopped
@@ -83,6 +94,15 @@ services:
     profiles: ["deploy"]
     build:
       context: ./frontend
+      args:
+        DOCGRAPH_APP_VERSION: ${DOCGRAPH_APP_VERSION:-}
+        DOCGRAPH_GIT_COMMIT: ${DOCGRAPH_GIT_COMMIT:-}
+        DOCGRAPH_GIT_DESCRIBE: ${DOCGRAPH_GIT_DESCRIBE:-}
+        DOCGRAPH_GIT_TAG: ${DOCGRAPH_GIT_TAG:-}
+        DOCGRAPH_GIT_BRANCH: ${DOCGRAPH_GIT_BRANCH:-}
+        DOCGRAPH_GIT_DIRTY: ${DOCGRAPH_GIT_DIRTY:-}
+        DOCGRAPH_BUILD_TIME: ${DOCGRAPH_BUILD_TIME:-}
+        DOCGRAPH_BUILD_ENV: ${DOCGRAPH_BUILD_ENV:-prod}
     image: docgraph-frontend:local
     container_name: docgraph-frontend
     restart: unless-stopped

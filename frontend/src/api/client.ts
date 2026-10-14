@@ -3,6 +3,7 @@
 import axios, { AxiosError, InternalAxiosRequestConfig } from 'axios'
 import type {
   AnalyzeSampleResult,
+  BuildInfo,
   ConflictDetectionResponse,
   ConstantsResponse,
   ContractBrief,
@@ -282,6 +283,12 @@ export const ocrApi = {
 export const constantsApi = {
   docTypes: () => http.get<ConstantsResponse>('/constants/doc-types').then((r) => r.data),
   health: () => http.get<{ status: string }>('/health').then((r) => r.data),
+}
+
+// ============ 版本 ============
+export const versionApi = {
+  /** 后端版本信息；对比本机开发环境与服务器正式环境时直接看这个接口 */
+  get: () => http.get<BuildInfo>('/version').then((r) => r.data),
 }
 
 export const docTypesApi = {
