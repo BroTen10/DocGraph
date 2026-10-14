@@ -50,6 +50,29 @@
 
 5. 其它子命令：`bash deploy.sh check|status|logs [服务]|restart|down`。
 
+## 升级（拉新代码后重新部署）
+
+```bash
+cd /opt/docgraph/app
+git pull
+bash deploy.sh                 # 校验 → dc build 重建 backend 镜像 → up -d → 健康检查
+# 想直接占 80：FRONTEND_HOST_PORT=80 bash deploy.sh
+```
+
+- **必须 rebuild 才生效**：`deploy.sh` 会 `dc build`，改过的代码随镜像更新；`bash deploy.sh restart` 只是重启容器，不带新代码，别拿它当升级手段。
+- **幂等、无数据风险**：可反复执行；`backend/.env` 与数据卷（`postgres_data` / `neo4j_data` / `uploads_data`）都不受影响。
+- **无需手工迁移数据库或重灌图谱**：启动时的 `init_db()` 是幂等建表 + 增量 DDL；规则图谱按规则集快照存于 Neo4j，升级不改动。`requirements.txt` 未变时 pip 层命中缓存，不会重装依赖。
+- **systemd + nginx 形态**（腾讯云那份指引）：`git pull` → `sudo systemctl restart docgraph-backend`；依赖有变化才重建 venv，前端有改动才 `npm ci && npm run build` 并重新拷贝 `dist`。
+- **升级后自检**：`bash deploy.sh check` 通过，并在「系统设置 → 运行参数」能看到随版本新增的开关（例如 `LLM 全量复核（只提异议，不改判）`，默认关闭）。新增开关只写数据库 `system_settings`，不需要改 `.env` 或 compose。
+
+### 重启会回收"中断"的任务
+
+OCR 与审查任务都跑在进程内后台线程，因此**容器/进程重启时，启动前遗留的 running 任务会被置为 failed（阶段显示「已中断」）**，需要重新发起：
+
+- OCR：重启后不再永久显示"识别中"，失败的重新点识别即可；
+- 审查：启动瞬间正在跑的那条审查会被标记中断，重跑一次审查即可；
+- 该自愈逻辑假设**单副本、单 worker**（`backend/Dockerfile` 的 CMD 未使用 `--workers`，compose 也只有一份 `backend` 服务）。将来若扩容成多副本或多 worker，启动时的全量回收会误杀其它副本正在跑的任务，需改为只回收本进程创建的任务并辅以心跳。
+
 ## 关键约定
 
 - **容器内一律用服务名**：`PG_HOST=postgres`、`PG_PORT=5432`、`NEO4J_URI=bolt://neo4j:7687`。`.env` 里给宿主机开发用的 `localhost:15432/17687` 会被 compose 的 `environment` 覆盖，不要改回来。
