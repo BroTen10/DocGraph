@@ -56,13 +56,21 @@ async def lifespan(app: FastAPI):
     #    任务行会永久停在 running/pending，导致前端一直显示"识别中"并禁用按钮
     from .database import SessionLocal
     from .services.ocr_task_service import reconcile_stale_tasks, set_process_start
+    from .services.review_service import (
+        reconcile_stale_review_tasks,
+        set_process_start as set_review_process_start,
+    )
 
     _db = SessionLocal()
     try:
         set_process_start(_db)
+        set_review_process_start(_db)
         stale = reconcile_stale_tasks(_db, force_all=True)
         if stale:
             logger.warning("启动时回收 %d 个中断的 OCR 任务", stale)
+        stale_review = reconcile_stale_review_tasks(_db, force_all=True)
+        if stale_review:
+            logger.warning("启动时回收 %d 个中断的审查任务", stale_review)
     finally:
         _db.close()
     yield

@@ -234,7 +234,34 @@ LLM_ADJUDICATION_SYSTEM = """你是贸易单证审查裁决助手。以下规则
 2. 字段值存在等价写法/别名/格式差异时按语义等价处理（如 "美元;美元" 与 "美元"、"USD" 与 "美元"、"币别" 与 "币制"）
 3. condition_met=true 时，按规则断言比对 source/target 字段值给出 pass/fail；condition_met=false 时 result=pass（规则不适用）并在 reason 说明依据
 4. 币种/金额口径不一致（如人民币发票上的美元折算值）不能作为金额相等的依据
-5. confidence 反映确定程度；证据充分、无歧义时才给高值；无法判断给 null 或低值"""
+5. 断言字段可能是复合算式（如 件数*数量、数量*箱数、数量+件数），需要按同一份单据的原子字段（件数、数量、箱数等）自行计算后再比对，并在 reason 中写明算式、取值来源单据与计算结果
+6. confidence 反映确定程度；证据充分、无歧义时才给高值；无法判断给 null 或低值"""
+
+# ============ 文档类型样例分析 ============
+LLM_CHALLENGE_SYSTEM = """你是贸易单证审查复核助手。下面给出的是确定性引擎（规则图谱 + 字段比对 + 算术求值）已经给出的结论，请你**只做复核，不要改写结论**。
+
+复核要点：引擎有没有拿对单据/字段、触发条件是否真的成立、算式与单位口径是否一致、是否漏掉应参与比对的关联单据、金额/数量/日期口径是否同一含义。
+
+输出严格 JSON：
+{
+  "results": [
+    {
+      "index": 0,
+      "agree": true|false,
+      "suggested_result": "pass|fail|unverifiable"|null,
+      "confidence": 0-1,
+      "reason": "复核依据：引用具体单据与字段值；存疑时说明疑点"
+    }
+  ]
+}
+
+规则：
+1. 你的结论不会直接改写审查结果，只会把存疑项提示给人工复核；所以存疑就如实提出，不要为了"看起来一致"而 agree=true
+2. 引擎结论确实站得住 → agree=true（此时 suggested_result 可为 null）
+3. 发现实质问题（口径拿错、条件判断错误、算术/单位不一致、漏单据）→ agree=false，给出 suggested_result 与 confidence
+4. 复核复合算式字段（如 件数*数量、数量*箱数）时，按同一份单据的原子字段自行计算后再判断
+5. 只依据提供的文档字段与规则文本判断，不得臆造字段值；无法判断 → agree=false 且 confidence 给低值，并在 reason 说明缺什么"""
+
 
 # ============ 文档类型样例分析 ============
 DOC_ANALYZE_SYSTEM = """你是一个单证分析专家。分析用户上传的文档样例，输出以下 JSON：
@@ -349,6 +376,7 @@ PROMPT_TEMPLATES: dict[str, str] = {
     "llm_review.review_system": LLM_REVIEW_SYSTEM,
     "llm_review.semantic_system": LLM_SEMANTIC_SYSTEM,
     "llm_review.adjudication_system": LLM_ADJUDICATION_SYSTEM,
+    "llm_review.challenge_system": LLM_CHALLENGE_SYSTEM,
     "doc_analyze.system": DOC_ANALYZE_SYSTEM,
     "doc_analyze.user": DOC_ANALYZE_USER,
     "graph_builder.system": GRAPH_BUILDER_SYSTEM,
@@ -373,6 +401,7 @@ PROMPT_META: dict[str, dict] = {
     "llm_review.review_system": {"label": "LLM 语义审查 · 系统提示词", "group": "审查与建议", "description": "对定性规则做 LLM 批量审查（引擎 B）。"},
     "llm_review.semantic_system": {"label": "LLM 语义审查 · 字符串一致性复核", "group": "审查与建议", "description": "对确定性字符串比对失败做同义复核。"},
     "llm_review.adjudication_system": {"label": "LLM 语义审查 · 条件/不可核验裁决", "group": "审查与建议", "description": "条件预检无法确定或疑似误判、断言不可核验时，结合合同上下文与关联单据做综合裁决（引擎 B-3）。"},
+    "llm_review.challenge_system": {"label": "LLM 全量复核 · 异议提示词", "group": "审查与建议", "description": "可选全量复核（review.llm_full_review_enabled）：逐条复核确定性结论，但只能提出异议并标注需人工复核，不会改写结论（引擎 B-4）。"},
     "doc_analyze.system": {"label": "文档类型分析 · 系统提示词", "group": "文档类型", "description": "上传样例文档由 AI 分析类型/字段/用印/业务含义。"},
     "doc_analyze.user": {"label": "文档类型分析 · 用户提示词模板", "group": "文档类型", "description": "占位符：{file_name} 文件名、{hint} 类型提示、{text} 文档文本。"},
     "graph_builder.system": {"label": "图谱构建 · 规则转换提示词", "group": "图谱", "description": "旧版无结构化断言的规则转图谱的 LLM 兜底路径。"},

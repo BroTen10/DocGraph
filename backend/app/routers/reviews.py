@@ -46,6 +46,8 @@ def list_tasks(
     db: Session = Depends(get_db),
 ) -> list[ReviewTaskListItem]:
     """审查任务列表（默认按开始时间倒序，可按合同/规则集过滤）。"""
+    # 顺带回收中断的审查任务，避免前端把陈旧的 running 状态当作"正在执行"
+    review_service.reconcile_stale_review_tasks(db)
     stmt = (
         select(ReviewTask, Contract.contract_no)
         .join(Contract, Contract.id == ReviewTask.contract_id, isouter=True)

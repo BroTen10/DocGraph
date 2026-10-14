@@ -21,6 +21,7 @@ from __future__ import annotations
 import contextvars
 import json
 import logging
+import re
 import uuid
 from datetime import datetime
 from typing import Optional
@@ -56,14 +57,134 @@ def _first_doc_for_type(docs: list[Document], doc_type: str | None) -> Optional[
 
 
 def _get_field(doc: Document, key: str, aliases: list[str] | None = None):
-    """从文档的 extracted_fields 取字段值，支持别名。"""
+    """从文档的 extracted_fields 取字段值，支持别名与复合算术表达式。"""
     fields = doc.extracted_fields or {}
     if key in fields and fields[key] is not None:
         return fields[key]
     for alias in (aliases or []):
         if alias in fields and fields[alias] is not None:
             return fields[alias]
+    # 复合字段表达式（如 "件数*数量"）：OCR 字段里不存在该字面名，
+    # 按同一份文档的原子字段求值。取不到值时保持 None（由调用方记缺失）。
+    value, _ = _eval_field_expression(doc, key)
+    if value is not None:
+        return value
     return None
+
+
+# ---------- 复合字段表达式（A：图谱引擎表达式支持） ----------
+# 规则导入侧会产出算术表达式断言字段（如「报关单数量 = 件数*数量」）。这类字段名
+# 在单据 OCR 结果里不存在，只能按原子字段求值，否则永远判「字段数据缺失」。
+# 拆词规则：`*`/`×` 无条件视为乘号（真实单据字段名不含这两个字符）；
+# `+`/`-`/`/` 仅在两侧带空白时视为运算符，避免拆坏「订单号/合同号」这类字段名。
+_EXPR_MUL_RE = re.compile(r"\s*[*×]\s*")
+_EXPR_WS_RE = re.compile(r"\s+([+\-/－])\s+")
+_EXPR_OP_ALIAS = {"×": "*", "－": "-"}
+_EXPR_OPS = ("*", "/", "+", "-")
+_NUMERIC_CURRENCY_PREFIX = "$¥￥€£"
+
+
+def _to_number(value) -> Optional[float]:
+    """宽容数值解析：OCR 常见写法 "1"、"1,234.5"、"￥1,234.50"、"12.5%" 都能落成 float。"""
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    text = str(value).strip()
+    if not text:
+        return None
+    text = text.replace(",", "").replace("，", "").replace(" ", "").replace("％", "%")
+    text = text.rstrip("%").lstrip(_NUMERIC_CURRENCY_PREFIX)
+    try:
+        return float(text)
+    except ValueError:
+        return None
+
+
+def _split_field_expr(expr) -> Optional[list[str]]:
+    """把复合字段表达式拆成 token 列表 [原子, 运算符, 原子, ...]；非表达式返回 None。"""
+    if not isinstance(expr, str) or not expr:
+        return None
+    if not any(op in expr for op in ("*", "×", "+", "-", "－", "/")):
+        return None
+    tokens: list[str] = []
+    for part in _EXPR_MUL_RE.split(expr):
+        if tokens:
+            tokens.append("*")
+        segments = _EXPR_WS_RE.split(part)
+        for idx, seg in enumerate(segments):
+            seg = seg.strip()
+            if not seg:
+                return None
+            if idx % 2:
+                tokens.append(_EXPR_OP_ALIAS.get(seg, seg))
+            else:
+                tokens.append(seg)
+    # 合法表达式：原子/运算符交替，至少两个原子
+    if len(tokens) < 3 or len(tokens) % 2 == 0:
+        return None
+    if any(token in _EXPR_OPS for token in tokens[0::2]):
+        return None
+    if any(token not in _EXPR_OPS for token in tokens[1::2]):
+        return None
+    return tokens
+
+
+def _eval_field_expression(doc: Document, expr) -> tuple[Optional[float], list[str]]:
+    """对单份文档求复合字段表达式（先乘除后加减，不支持括号）。
+
+    Returns (值 | None, 缺失或非数值的原子字段列表)。
+    - 非表达式：返回 (None, [])
+    - 表达式但原子字段缺失/非数值：返回 (None, [缺失原子...])
+    """
+    tokens = _split_field_expr(expr)
+    if tokens is None:
+        return None, []
+    fields = doc.extracted_fields or {}
+    missing: list[str] = []
+    operands: list = []
+    for token in tokens:
+        if token in _EXPR_OPS:
+            operands.append(token)
+            continue
+        num = _to_number(fields.get(token))
+        if num is None:
+            missing.append(token)
+            operands.append(0.0)
+        else:
+            operands.append(num)
+    if missing:
+        return None, missing
+
+    # 第一遍：乘除
+    reduced: list = [operands[0]]
+    idx = 1
+    while idx < len(operands) - 1:
+        op, right = operands[idx], operands[idx + 1]
+        if op in ("*", "/"):
+            left = reduced.pop()
+            if op == "/" and right == 0:
+                return None, []
+            reduced.append(left * right if op == "*" else left / right)
+        else:
+            reduced.append(op)
+            reduced.append(right)
+        idx += 2
+
+    # 第二遍：加减
+    total = reduced[0]
+    idx = 1
+    while idx < len(reduced) - 1:
+        op, right = reduced[idx], reduced[idx + 1]
+        total = total + right if op == "+" else total - right
+        idx += 2
+    return float(total), []
+
+
+def _field_missing_atoms(doc: Document, field: str) -> list[str]:
+    """复合表达式里缺失/非数值的原子字段；非表达式或可求值 → []。"""
+    _, missing = _eval_field_expression(doc, field)
+    return missing
 
 
 def _amount_diff_pct(actual: float, expected: float) -> float:
@@ -1126,21 +1247,27 @@ def _collect_field_evidence(docs: list[Document], doc_type: str, field: str) -> 
     - values: [(doc, value), ...]（跳过缺失值）
     - missing: 字段级缺失清单 [{doc_type, field, reason, doc_files}]，
       reason ∈ no_docs_of_type | field_missing
+      - 复合表达式字段额外带 missing_atoms（缺的是哪个原子字段）
     """
     typed = _docs_by_type(docs, doc_type)
     if not typed:
         return [], [{"doc_type": doc_type, "field": field, "reason": "no_docs_of_type", "doc_files": []}]
     values: list = []
     missing_files: list[str] = []
+    missing_atoms: set[str] = set()
     for d in typed:
         v = _get_field(d, field)
         if v is None:
             missing_files.append(d.file_name)
+            missing_atoms.update(_field_missing_atoms(d, field))
         else:
             values.append((d, v))
     missing: list[dict] = []
     if missing_files:
-        missing.append({"doc_type": doc_type, "field": field, "reason": "field_missing", "doc_files": missing_files})
+        entry = {"doc_type": doc_type, "field": field, "reason": "field_missing", "doc_files": missing_files}
+        if missing_atoms:
+            entry["missing_atoms"] = sorted(missing_atoms)
+        missing.append(entry)
     return values, missing
 
 
@@ -1299,19 +1426,25 @@ def _aggregate_field(docs: list[Document], doc_type: str, field: str) -> tuple[O
     total = 0.0
     found = False
     missing_files: list[str] = []
+    missing_atoms: set[str] = set()
     for d in target:
         v = _get_field(d, field)
         if v is None:
             missing_files.append(d.file_name)
+            missing_atoms.update(_field_missing_atoms(d, field))
             continue
-        try:
-            total += float(v)
-            found = True
-        except (TypeError, ValueError):
+        num = _to_number(v)
+        if num is None:
             missing_files.append(d.file_name)
+            continue
+        total += num
+        found = True
     missing: list[dict] = []
     if missing_files:
-        missing.append({"doc_type": doc_type, "field": field, "reason": "field_missing", "doc_files": missing_files})
+        entry = {"doc_type": doc_type, "field": field, "reason": "field_missing", "doc_files": missing_files}
+        if missing_atoms:
+            entry["missing_atoms"] = sorted(missing_atoms)
+        missing.append(entry)
     return (total if found else None), missing
 
 

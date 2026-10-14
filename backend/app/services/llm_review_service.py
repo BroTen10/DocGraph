@@ -17,10 +17,11 @@ from __future__ import annotations
 import json
 import logging
 import re
+from datetime import datetime
 from typing import Any, Optional
 
 from ..constants import CHECK_COMPLETENESS, CHECK_STAMP
-from .settings_service import get_prompt
+from .settings_service import get_prompt, get_setting
 from ..llm_client import LLMError, get_llm_client
 from ..models import Document, ReviewResult, Rule
 from .doc_normalizer import normalize_currency_value
@@ -32,6 +33,50 @@ logger = logging.getLogger(__name__)
 FAIL_CONFIDENCE_THRESHOLD = 0.8
 PASS_CONFIDENCE_THRESHOLD = 0.6
 EQUIVALENT_CONFIDENCE_THRESHOLD = 0.8
+
+# 全量复核（可开关）单批条数：控制单次上下文规模，避免规则多时上下文稀释与超长
+CHALLENGE_BATCH_SIZE = 20
+
+
+# ============ 兜底痕迹与人工复核标记（引擎 B-3/B-4 公共部件） ============
+
+def _record_fallback(r: ReviewResult, *, outcome: str, error: Optional[str] = None) -> None:
+    """记录 LLM 兜底链路对某条结果的处置痕迹（detail.llm_fallback）。
+
+    outcome：attempted（已裁决）/ llm_error（调用失败）/ no_verdict（未给出该条结论）
+    / not_covered（兜底链路根本没跑到）。作用是把"是否兜底过"变成可观测事实，
+    而不是靠调用方是否记得处理。
+    """
+    detail = dict(r.detail or {})
+    entry: dict = {"attempted": outcome != "not_covered", "outcome": outcome}
+    if error:
+        entry["error"] = str(error)[:300]
+    detail["llm_fallback"] = entry
+    r.detail = detail
+
+
+def _mark_manual_review(r: ReviewResult, reason: str) -> None:
+    """把结果标成「需人工复核」：只加标记与说明，不改写 result。
+
+    pass 项被标疑时同步重开问题状态（open），避免"静默通过"——这是审计场景里
+    最需要防的错误方向。
+    """
+    detail = dict(r.detail or {})
+    detail["manual_review_required"] = True
+    detail["manual_review_reason"] = reason
+    r.detail = detail
+    if reason and reason not in (r.issue_desc or ""):
+        r.issue_desc = f"{r.issue_desc}；{reason}" if r.issue_desc else reason
+    if r.result == "pass" and r.status != "open":
+        r.status = "open"
+        r.status_history = list(r.status_history or []) + [
+            {
+                "status": "open",
+                "at": datetime.now().isoformat(timespec="seconds"),
+                "by": "llm_challenge",
+                "note": reason,
+            }
+        ]
 
 
 # ============ 定性规则审查（引擎 B-1） ============
@@ -467,7 +512,7 @@ def _is_adjudication_candidate(r: ReviewResult) -> bool:
     覆盖三类：
     1. 条件预检 unknown（字段缺失/纯文本条件/值不可解析）→ 现为 unverifiable；
     2. 条件预检 not_met 但条件值存在语义歧义 → 现为 pass+skip（静默跳过盲区）；
-    3. 断言不可核验（字段数据缺失/无法解析），且至少一侧有字段值可佐证。
+    3. 断言不可核验（字段数据缺失/无法解析），且存在文档级可佐证材料（B：兜底放宽）。
     """
     if r.source == "llm":
         return False  # 已由 LLM 判定，不再二次裁决
@@ -480,10 +525,27 @@ def _is_adjudication_candidate(r: ReviewResult) -> bool:
             return _condition_values_suspicious(cond.get("values"), cond.get("value"))
         return False
     if r.result == "unverifiable" and d.get("evidence"):
-        ev = d.get("evidence") or {}
-        src_docs = (ev.get("source") or {}).get("docs") or []
-        tgt_docs = (ev.get("target") or {}).get("docs") or []
-        return bool(src_docs or tgt_docs)
+        return _has_doc_level_evidence(d.get("evidence") or {})
+    return False
+
+
+def _has_doc_level_evidence(evidence: dict) -> bool:
+    """不可核验结果是否存在"值得交给 LLM 复核"的文档级材料。
+
+    B：原判据只认"某侧已采集到字段值"，导致断言两侧都是复合表达式
+    （如 报关单 件数*数量 vs 送货单 数量*箱数）时两侧采集皆空，
+    确定性引擎判不了、LLM 也拿不到，规则静默停在「无法核验」。
+    现在放宽为：某侧文档存在但因字段缺失/表达式不可求值而未取到值
+    （field_missing 且带 doc_files）也算可佐证材料。
+    但「该类型单据本身不存在」（no_docs_of_type）不算——缺单据是事实，LLM 无法凭空补齐。
+    """
+    for side in ("source", "target"):
+        entry = evidence.get(side) or {}
+        if entry.get("docs"):
+            return True
+        for item in entry.get("missing_fields") or []:
+            if item.get("reason") == "field_missing" and item.get("doc_files"):
+                return True
     return False
 
 
@@ -513,6 +575,8 @@ def semantic_adjudication_fallback(
         d = r.detail or {}
         cond = d.get("condition")
         ev = d.get("evidence") or {}
+        src_ev = ev.get("source") or {}
+        tgt_ev = ev.get("target") or {}
         items.append(
             {
                 "index": i,
@@ -521,8 +585,11 @@ def semantic_adjudication_fallback(
                 "condition": cond,
                 "source_node": r.graph_source,
                 "target_node": r.graph_target,
-                "source_values": [x.get("value") for x in (ev.get("source") or {}).get("docs", [])],
-                "target_values": [x.get("value") for x in (ev.get("target") or {}).get("docs", [])],
+                "source_values": [x.get("value") for x in src_ev.get("docs", [])],
+                "target_values": [x.get("value") for x in tgt_ev.get("docs", [])],
+                # 引擎判不了的原因（缺失字段清单）也交给 LLM，便于按原子字段自行推算
+                "source_missing_fields": [m.get("field") for m in (src_ev.get("missing_fields") or [])],
+                "target_missing_fields": [m.get("field") for m in (tgt_ev.get("missing_fields") or [])],
                 "current_result": r.result,
             }
         )
@@ -546,11 +613,19 @@ def semantic_adjudication_fallback(
         )
     except (LLMError, ValueError, json.JSONDecodeError) as e:
         logger.warning("LLM 语义裁决失败（保留确定性结论）: %s", e)
+        # 兜底强制：调用失败也必须留痕并显性标「需人工确认」，不能静默停在无法核验
+        for r in targets:
+            _record_fallback(r, outcome="llm_error", error=str(e))
+            _mark_manual_review(r, "LLM 语义裁决未执行成功，需人工确认")
         return 0
 
     changed = 0
     raw_results = resp.get("results", [])
+    handled: set[int] = set()
     if not isinstance(raw_results, list):
+        for r in targets:
+            _record_fallback(r, outcome="no_verdict")
+            _mark_manual_review(r, "LLM 语义裁决未返回结果，需人工确认")
         return 0
     for item in raw_results:
         if not isinstance(item, dict):
@@ -558,6 +633,7 @@ def semantic_adjudication_fallback(
         idx = item.get("index")
         if not isinstance(idx, int) or not (0 <= idx < len(targets)):
             continue
+        handled.add(idx)
         r = targets[idx]
         old_result = r.result
         cond_met = item.get("condition_met")
@@ -607,6 +683,152 @@ def semantic_adjudication_fallback(
         r.detail = detail
         r.status = result_meta.default_status(r.result)
         r.severity, r.deviation = result_meta.compute_severity(r.result, r.check_category, detail)
+        _record_fallback(r, outcome="attempted")
         changed += 1
 
+    # 兜底强制：LLM 漏答的条目也要留痕 + 显性标人工确认
+    for i, r in enumerate(targets):
+        if i in handled:
+            continue
+        _record_fallback(r, outcome="no_verdict")
+        _mark_manual_review(r, "LLM 语义裁决未给出该条结论，需人工确认")
+
     return changed
+
+
+def ensure_fallback_coverage(db, contract, docs: list[Document], results: list[ReviewResult]) -> int:
+    """兜底强制（引擎 B-3 收口）：确定性引擎"判不了"的结果必须留下兜底痕迹。
+
+    背景：LLM 裁决的候选筛选、调用成败、是否逐条作答都是隐式过程，一旦某条既没进
+    裁决也没留下任何痕迹，规则就静默停在「无法核验」，人工看不出"其实没兜底过"。
+    本函数在审查链路末尾统一收口：仍缺少 llm_fallback / semantic_adjudication /
+    llm_challenge 痕迹的候选结果，补标「需人工确认」。
+
+    Returns: 被补标记的条数
+    """
+    added = 0
+    for r in results:
+        if r.source == "llm" or not _is_adjudication_candidate(r):
+            continue
+        detail = r.detail or {}
+        if (
+            detail.get("llm_fallback")
+            or detail.get("semantic_adjudication")
+            or detail.get("llm_challenge")
+            or detail.get("manual_review_required")
+        ):
+            continue
+        _record_fallback(r, outcome="not_covered")
+        _mark_manual_review(r, "确定性引擎无法判定且未完成 LLM 兜底，需人工确认")
+        added += 1
+    if added:
+        logger.warning("兜底强制收口：%d 条结果未完成 LLM 兜底，已标记需人工确认", added)
+    return added
+
+
+def semantic_challenge_review(
+    db,
+    contract,
+    docs: list[Document],
+    results: list[ReviewResult],
+) -> int:
+    """LLM 全量复核（引擎 B-4，可选开关）：只提异议，不改判。
+
+    设计取舍：确定性结论必须可复现、可复核（算术结论能拿原始单据验算），
+    因此 LLM 在这里只做"挑战者"——发现口径/条件/算术/漏单据等实质问题时
+    把该条标成「需人工复核」并写明依据，最终结论仍由确定性引擎给出、人工决定。
+
+    - 不改写 r.result / r.confidence；pass 项被标疑时重开问题状态（open）；
+    - 异议置信度低于 review.llm_challenge_min_confidence 时只记证据、不打扰人工；
+    - 调用/解析异常 → 直接返回，不影响任何结论（复核是增强项，不是结论来源）。
+
+    Returns: 被标记存疑的条数。
+    """
+    if not docs:
+        return 0
+    targets = [r for r in results if r.source != "llm"]
+    if not targets:
+        return 0
+
+    min_conf = _to_float(get_setting(db, "review.llm_challenge_min_confidence", 0.7))
+    if min_conf is None:
+        min_conf = 0.7
+    aliases = "、".join(contract.alias_list or []) if contract else ""
+    doc_summary = _doc_summary(docs)
+    marked = 0
+
+    for start in range(0, len(targets), CHALLENGE_BATCH_SIZE):
+        batch = targets[start:start + CHALLENGE_BATCH_SIZE]
+        items: list[dict] = []
+        for i, r in enumerate(batch):
+            ev = (r.detail or {}).get("evidence") or {}
+            items.append(
+                {
+                    "index": i,
+                    "rule": r.rule_text or "",
+                    "check_category": r.check_category,
+                    "doc_type": r.doc_type,
+                    "engine_result": r.result,
+                    "engine_issue": (r.issue_desc or "")[:200],
+                    "source_node": r.graph_source,
+                    "target_node": r.graph_target,
+                    "source_values": [x.get("value") for x in (ev.get("source") or {}).get("docs", [])],
+                    "target_values": [x.get("value") for x in (ev.get("target") or {}).get("docs", [])],
+                }
+            )
+        user_prompt = (
+            f"合同号：{contract.contract_no if contract else '-'}（别名：{aliases or '-'}）\n\n"
+            f"文档信息（OCR 提取字段）：\n{json.dumps(doc_summary, ensure_ascii=False)}\n\n"
+            f"引擎结论（待复核）：\n{json.dumps(items, ensure_ascii=False, default=str)}\n\n"
+            "请输出 JSON。"
+        )
+        try:
+            llm = get_llm_client()
+            resp = llm.chat_json(
+                messages=[
+                    {"role": "system", "content": get_prompt(db, "llm_review.challenge_system")},
+                    {"role": "user", "content": user_prompt},
+                ],
+                temperature=0.1,
+                max_tokens=4096,
+            )
+        except (LLMError, ValueError, json.JSONDecodeError) as e:
+            logger.warning("LLM 全量复核失败（保留确定性结论）: %s", e)
+            continue
+
+        raw_results = resp.get("results", [])
+        if not isinstance(raw_results, list):
+            continue
+        for item in raw_results:
+            if not isinstance(item, dict):
+                continue
+            idx = item.get("index")
+            if not isinstance(idx, int) or not (0 <= idx < len(batch)):
+                continue
+            r = batch[idx]
+            agree = item.get("agree")
+            confidence = _to_float(item.get("confidence"))
+            reason = str(item.get("reason") or "").strip()
+            suggested = str(item.get("suggested_result") or "").strip() or None
+            if suggested not in ("pass", "fail", "unverifiable"):
+                suggested = None
+
+            detail = dict(r.detail or {})
+            detail["llm_challenge"] = {
+                "agree": agree is not False,
+                "suggested_result": suggested,
+                "confidence": confidence,
+                "reason": reason,
+            }
+            r.detail = detail
+
+            if agree is False and confidence is not None and confidence >= min_conf:
+                hint = f"LLM 复核存疑（建议 {suggested or '人工判断'}，置信度 {confidence:.2f}）"
+                if reason:
+                    hint = f"{hint}：{reason}"
+                _mark_manual_review(r, f"{hint}，需人工复核")
+                marked += 1
+
+    if marked:
+        logger.info("LLM 全量复核：%d 条结论被标记为需人工复核（未改写结论）", marked)
+    return marked

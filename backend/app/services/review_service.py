@@ -18,9 +18,10 @@ import logging
 import re
 import threading
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Optional
 
+from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
 from ..config import settings
@@ -61,6 +62,57 @@ from .suggestion_service import build_suggestion_llm
 from . import result_meta
 
 logger = logging.getLogger(__name__)
+
+
+# ============ 中断任务回收（审查任务同样跑在进程内后台线程） ============
+# running 审查任务超过该时长即视为中断（单合同审查通常 < 5 分钟，30 分钟足够宽松）
+REVIEW_STALE_TASK_MINUTES = 30
+
+# 本进程启动时刻（数据库时钟），由 lifespan 启动时写入；早于该时刻的任务不可能还活着。
+# 前提是单进程部署（本地 run.py / Dockerfile 的 uvicorn 均未使用 --workers）。
+_PROCESS_STARTED_DB_TS: Optional[datetime] = None
+
+
+def set_process_start(db: Session) -> None:
+    """记录本进程启动时刻（数据库时钟），供中断审查任务回收使用。"""
+    global _PROCESS_STARTED_DB_TS
+    try:
+        _PROCESS_STARTED_DB_TS = db.execute(select(func.now())).scalar()
+    except Exception:
+        logger.warning("读取数据库时钟失败，中断审查任务回收将只按超时判定", exc_info=True)
+        _PROCESS_STARTED_DB_TS = None
+
+
+def reconcile_stale_review_tasks(db: Session, *, force_all: bool = False) -> int:
+    """回收中断的审查任务，避免任务行永久停在 running。
+
+    与 OCR 任务同理（见 ocr_task_service.reconcile_stale_tasks）：审查管线跑在进程内
+    后台线程，服务重启（含 debug reload）或进程退出会让线程消失，而任务行仍是
+    running —— 前端的任务列表会一直显示"执行中"，人工也无法判断是否失败。
+
+    force_all=True（服务启动时）：此刻不可能有存活任务，全部置 failed；
+    force_all=False（查询/触发时）：只处理「超过 REVIEW_STALE_TASK_MINUTES」或
+    「早于本进程启动时刻」的任务——后者在单进程部署下必然已中断。
+
+    Returns: 被回收的任务数
+    """
+    stmt = select(ReviewTask).where(ReviewTask.status.in_(("pending", "running")))
+    if not force_all:
+        conds = [ReviewTask.start_time < func.now() - timedelta(minutes=REVIEW_STALE_TASK_MINUTES)]
+        if _PROCESS_STARTED_DB_TS is not None:
+            conds.append(ReviewTask.start_time < _PROCESS_STARTED_DB_TS)
+        stmt = stmt.where(or_(*conds))
+    rows = db.execute(stmt).scalars().all()
+    if not rows:
+        return 0
+    for t in rows:
+        t.status = "failed"
+        t.stage = "已中断"
+        t.error = t.error or "任务中断（服务重启或审查进程退出），请重新发起审查"
+        t.end_time = func.now()
+    db.commit()
+    logger.warning("已回收 %d 个中断的审查任务", len(rows))
+    return len(rows)
 
 
 # ============ 辅助函数 ============
@@ -132,6 +184,9 @@ def start_review(
     contract = db.get(Contract, contract_id)
     if contract is None:
         raise ValueError(f"合同不存在: {contract_id}")
+
+    # 先回收中断的旧任务，避免任务列表被陈旧 running 行污染
+    reconcile_stale_review_tasks(db)
 
     # 创建任务
     task = ReviewTask(
@@ -300,6 +355,30 @@ def _run_review_pipeline(
             )
     except Exception as e:
         logger.warning("审查任务 %s: LLM 语义审查失败（不影响确定性结果）: %s", task.id, e, exc_info=True)
+
+    # ============ 阶段2.6：LLM 全量复核（可选开关，只提异议不改判） ============
+    # 默认关闭。开启后确定性结论逐条交给 LLM 复核，但 LLM 只能把存疑项标成
+    # 「需人工复核」，不会改写引擎结论（结论可复现、可拿原始单据复核）。
+    if get_setting(db, "review.llm_full_review_enabled", False):
+        try:
+            from .llm_review_service import semantic_challenge_review
+
+            challenged = semantic_challenge_review(db, contract, docs, results)
+            if challenged:
+                logger.info("审查任务 %s: LLM 全量复核标记 %d 条需人工复核", task.id, challenged)
+        except Exception as e:
+            logger.warning("审查任务 %s: LLM 全量复核失败（不影响确定性结果）: %s", task.id, e, exc_info=True)
+
+    # ============ 阶段2.7：兜底强制收口 ============
+    # 引擎判不了的结果必须留下兜底痕迹或显性「需人工确认」，不允许静默停在无法核验。
+    try:
+        from .llm_review_service import ensure_fallback_coverage
+
+        covered = ensure_fallback_coverage(db, contract, docs, results)
+        if covered:
+            logger.warning("审查任务 %s: %d 条结果缺少兜底痕迹，已标记需人工确认", task.id, covered)
+    except Exception as e:
+        logger.warning("审查任务 %s: 兜底强制收口失败: %s", task.id, e, exc_info=True)
 
     # ============ 阶段3：生成建议 + 持久化 ============
     task.stage = "生成报告中"

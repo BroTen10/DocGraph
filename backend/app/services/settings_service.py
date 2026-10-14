@@ -54,6 +54,20 @@ KNOBS: dict[str, dict] = {
         "kind": "boolean",
         "default": True,
     },
+    "review.llm_full_review_enabled": {
+        "label": "LLM 全量复核（只提异议，不改判）",
+        "group": "运行参数",
+        "description": "开启后，确定性引擎的每条结论都会再交给 LLM 复核；LLM 只能提出异议并把该条标注为「需人工复核」，不会改写引擎结论（避免审查结论不可复现）。",
+        "kind": "boolean",
+        "default": False,
+    },
+    "review.llm_challenge_min_confidence": {
+        "label": "LLM 异议最低置信度",
+        "group": "运行参数",
+        "description": "LLM 全量复核与引擎结论不一致、且置信度 ≥ 该阈值时，才把该条标注为「需人工复核」；低于阈值的异议仅记入证据，不打扰人工。",
+        "kind": "number",
+        "default": 0.7,
+    },
     "rules.auto_confirm_new_types": {
         "label": "规则导入新类型自动激活",
         "group": "运行参数",
