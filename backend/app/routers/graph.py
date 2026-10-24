@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import uuid
 from typing import Any
 
@@ -24,6 +25,7 @@ from ..services import (
 )
 from ..neo4j_client import get_neo4j_client
 
+logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/rules", tags=["graph"])
 
 
@@ -117,6 +119,8 @@ async def import_rules_from_document(
     立即落盘文件并返回 task_id，前端通过 GET /import-tasks/{task_id} 轮询进度。
     skill_ids 参数传逗号分隔的 Skill UUID，不传则使用该规则集默认配置。
     """
+    if rule_service.get_rule_set(db, ctx.tenant.id, rule_set_id) is None:
+        raise HTTPException(status_code=404, detail="规则集不存在")
     if not file.filename:
         raise HTTPException(status_code=400, detail="文件名为空")
 
@@ -130,31 +134,43 @@ async def import_rules_from_document(
     import os
     import tempfile
 
-    # 落盘文件，交由后台线程处理
-    suffix = os.path.splitext(file.filename)[1].lower() or ".pdf"
-    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
-        content = await file.read()
-        tmp.write(content)
-        tmp_path = tmp.name
+    suffix = os.path.splitext(file.filename)[1].lower()
+    if suffix not in {".pdf", ".xlsx", ".xls", ".docx", ".md", ".txt"}:
+        raise HTTPException(
+            status_code=400,
+            detail="仅支持 PDF、Excel、Word、Markdown 或 TXT 规则文档",
+        )
 
-    if rule_service.get_rule_set(db, ctx.tenant.id, rule_set_id) is None:
-        raise HTTPException(status_code=404, detail="规则集不存在")
-    task = rule_import_task.create_task(
-        str(rule_set_id),
-        ctx.tenant.id,
-        ctx.user.id,
-        file.filename,
-    )
+    tmp_path: str | None = None
+    try:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+            tmp_path = tmp.name
+            content = await file.read()
+            tmp.write(content)
 
-    import threading
+        task = rule_import_task.create_task(
+            str(rule_set_id),
+            ctx.tenant.id,
+            ctx.user.id,
+            file.filename,
+        )
 
-    t = threading.Thread(
-        target=rule_import_task.run_import_task,
-        args=(task, tmp_path, file.filename, parsed_skill_ids),
-        daemon=True,
-    )
-    t.start()
-    logger = __import__("logging").getLogger(__name__)
+        import threading
+
+        t = threading.Thread(
+            target=rule_import_task.run_import_task,
+            args=(task, tmp_path, file.filename, parsed_skill_ids),
+            daemon=True,
+        )
+        t.start()
+    except Exception:
+        if tmp_path:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+        raise
+
     logger.info("已启动导入任务 %s (rule_set=%s, file=%s)", task.task_id, rule_set_id, file.filename)
 
     return {

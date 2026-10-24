@@ -5,8 +5,8 @@
 - 启用/停用、改优先级、改名等元数据操作不递增版本。
 
 内置 Skill 策略：
-- 启用/停用/优先级：直接改内置本体（全局生效，所有规则集共享）；
-- 修改内容/名称/描述：不动内置本体，自动在当前规则集下创建/更新自定义副本。
+- 内置本体是全局只读模板，任何租户都不能就地修改；
+- 所有编辑（含启用/停用/优先级）都在当前规则集下创建/更新租户副本。
 """
 
 from __future__ import annotations
@@ -26,9 +26,6 @@ from ..schemas.rule_parse_skill import (
     SkillLearnRequest,
 )
 from .rule_service import get_rule_set
-
-# 元数据字段：更新它们不产生新版本、不触发内置副本
-_META_FIELDS = {"enabled", "priority"}
 
 LEARN_SKILL_NAME = "经验修正（自动累积）"
 
@@ -59,7 +56,19 @@ def list_skills(
     stmt = stmt.where(visible)
 
     rows = db.execute(stmt).scalars().all()
-    return [RuleParseSkillOut.model_validate(r) for r in rows]
+    overridden_builtin_ids = {
+        row.parent_id
+        for row in rows
+        if row.tenant_id == tenant_id
+        and row.rule_set_id == rule_set_id
+        and row.parent_id is not None
+    }
+    effective_rows = [
+        row
+        for row in rows
+        if not (row.is_builtin and row.id in overridden_builtin_ids)
+    ]
+    return [RuleParseSkillOut.model_validate(r) for r in effective_rows]
 
 
 def get_skill(
@@ -139,20 +148,8 @@ def update_skill(
     data = payload.model_dump(exclude_unset=True, exclude={"content", "content_yaml"})
     new_content = payload.resolved_content()  # None = 本次不改内容
 
-    # ---------- 内置 Skill ----------
+    # ---------- 内置 Skill：所有编辑都生成租户副本 ----------
     if skill.is_builtin:
-        substantive = new_content is not None or any(
-            k not in _META_FIELDS for k in data
-        )
-        if not substantive:
-            # 仅启用/停用/优先级 → 直接改内置本体，全局生效，不建副本、不加版本
-            for k, v in data.items():
-                setattr(skill, k, v)
-            db.commit()
-            db.refresh(skill)
-            return RuleParseSkillOut.model_validate(skill)
-
-        # 所有内置 Skill 修改都落到当前租户副本，避免跨租户共享可变状态。
         existing_copy = db.execute(
             select(RuleParseSkill).where(
                 RuleParseSkill.parent_id == skill_id,

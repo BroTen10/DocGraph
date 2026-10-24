@@ -81,6 +81,8 @@ def import_rules_batch(
 
     可选的 skill_ids 参数指定应用的 Skill；不传则使用该规则集已启用的所有 Skill。
     """
+    if rule_service.get_rule_set(db, ctx.tenant.id, rule_set_id) is None:
+        raise HTTPException(status_code=404, detail="规则集不存在")
     try:
         result = rule_import_service.import_rules_with_skills(
             db,

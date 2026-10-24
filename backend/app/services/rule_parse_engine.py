@@ -69,14 +69,20 @@ def compile_directive(
     if rs is None:
         raise ValueError("规则集不存在")
     use_default_skill = rs.use_default_skill
+    overridden_builtin_ids = select(RuleParseSkill.parent_id).where(
+        RuleParseSkill.tenant_id == tenant_id,
+        RuleParseSkill.rule_set_id == rule_set_id,
+        RuleParseSkill.parent_id.is_not(None),
+    )
 
     conditions = [RuleParseSkill.enabled.is_(True)]
     if use_default_skill:
-        # 内置默认 Skill（全局常驻）+ 该规则集自定义 Skill
+        # 未被租户副本覆盖的内置模板 + 该规则集自定义 Skill
         conditions.append(
             (
                 RuleParseSkill.is_builtin.is_(True)
                 & RuleParseSkill.tenant_id.is_(None)
+                & RuleParseSkill.id.not_in(overridden_builtin_ids)
             )
             | (
                 (RuleParseSkill.tenant_id == tenant_id)
