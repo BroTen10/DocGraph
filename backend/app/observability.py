@@ -96,12 +96,12 @@ class RequestContextFilter(logging.Filter):
             record.msg = redact_text(record.msg)
         if isinstance(record.args, dict):
             record.args = {
-                key: redact_text(value) if isinstance(value, str) else value
+                key: sanitize_metadata(value)
                 for key, value in record.args.items()
             }
         elif isinstance(record.args, tuple):
             record.args = tuple(
-                redact_text(value) if isinstance(value, str) else value
+                sanitize_metadata(value)
                 for value in record.args
             )
         return True

@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import uuid
+import logging
 
+import pytest
 from sqlalchemy import select
 
 from conftest import authenticate
@@ -161,3 +163,72 @@ def test_log_text_redacts_tokens_and_credentials():
     assert "abcdef" not in redacted
     assert "eyJhbGciOi" not in redacted
     assert "raw-token" not in redacted
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "contains a space",
+        "x" * 65,
+        "line\nbreak",
+        "",
+    ],
+)
+def test_unsafe_request_ids_are_rejected(value):
+    from app.observability import normalize_request_id
+
+    assert normalize_request_id(value) is None
+
+
+def test_invalid_request_id_is_replaced_in_response(client):
+    response = client.get(
+        "/api/health",
+        headers={"X-Request-ID": "contains a space"},
+    )
+    assert response.status_code == 200
+    generated = response.headers["X-Request-ID"]
+    assert generated != "contains a space"
+    assert len(generated) == 32
+
+
+def test_structured_log_arguments_are_recursively_redacted():
+    from app.observability import RequestContextFilter
+
+    record = logging.LogRecord(
+        name="test",
+        level=logging.INFO,
+        pathname=__file__,
+        lineno=1,
+        msg="payload=%s",
+        args=({"nested": {"password": "never-log", "safe": "visible"}},),
+        exc_info=None,
+    )
+    RequestContextFilter().filter(record)
+    rendered = repr(record.args)
+    assert "never-log" not in rendered
+    assert "visible" in rendered
+
+
+def test_failed_session_creation_does_not_audit_login_success(
+    migrated_db,
+    active_tenant_user,
+    monkeypatch,
+):
+    from app.services import auth_service
+
+    def fail_create_session(*args, **kwargs):
+        raise RuntimeError("session insert failed")
+
+    monkeypatch.setattr(auth_service, "create_session", fail_create_session)
+    with pytest.raises(RuntimeError, match="session insert failed"):
+        auth_service.authenticate(
+            migrated_db,
+            "admin@example.com",
+            "DocGraph2026",
+        )
+
+    with SessionLocal() as db:
+        audit = db.execute(
+            select(AuditLog).where(AuditLog.action == "auth.login.success")
+        ).scalar_one_or_none()
+    assert audit is None

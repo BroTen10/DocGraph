@@ -102,7 +102,11 @@ class Settings(BaseSettings):
             raise ValueError("生产环境必须启用 Secure Cookie")
         if not self.app_debug and not self.public_base_url.startswith("https://"):
             raise ValueError("生产环境 PUBLIC_BASE_URL 必须使用 HTTPS")
-        if self.email_backend == "smtp" and not self.smtp_host.strip():
+        if (
+            not self.app_debug
+            and self.email_backend == "smtp"
+            and not self.smtp_host.strip()
+        ):
             raise ValueError("EMAIL_BACKEND=smtp 时必须配置 SMTP_HOST")
         return self
 

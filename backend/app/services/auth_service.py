@@ -191,15 +191,20 @@ def authenticate(
         result="success",
         metadata={"platform_admin": user.is_platform_admin},
     )
-    db.commit()
 
-    session, raw_session_token, raw_csrf_token = create_session(
-        db,
-        user,
-        tenant_id=tenant.id if tenant else None,
-        ip=ip,
-        user_agent=user_agent,
-    )
+    try:
+        session, raw_session_token, raw_csrf_token = create_session(
+            db,
+            user,
+            tenant_id=tenant.id if tenant else None,
+            ip=ip,
+            user_agent=user_agent,
+        )
+        db.commit()
+        db.refresh(session)
+    except Exception:
+        db.rollback()
+        raise
     return AuthSessionContext(
         session=session,
         raw_session_token=raw_session_token,

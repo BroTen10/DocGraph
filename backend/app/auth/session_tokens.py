@@ -40,7 +40,7 @@ def create_session(
     ip: str | None,
     user_agent: str | None,
 ) -> tuple[AuthSession, str, str]:
-    """Create a server-side session and return raw session and CSRF tokens."""
+    """Add a server-side session to the caller's transaction."""
     now = utcnow()
     raw_session, session_hash = new_token()
     raw_csrf, csrf_hash = new_token()
@@ -56,7 +56,7 @@ def create_session(
         user_agent=user_agent[:512] if user_agent else None,
     )
     db.add(session)
-    db.commit()
+    db.flush()
     db.refresh(session)
     return session, raw_session, raw_csrf
 
