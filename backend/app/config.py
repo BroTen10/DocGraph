@@ -22,6 +22,7 @@ class Settings(BaseSettings):
     app_port: int = 8000
     app_debug: bool = True
     app_secret_key: str = ""
+    api_docs_enabled: bool = False
     session_cookie_secure: bool = True
     session_idle_minutes: int = Field(default=120, ge=5, le=1440)
     session_absolute_hours: int = Field(default=12, ge=1, le=168)

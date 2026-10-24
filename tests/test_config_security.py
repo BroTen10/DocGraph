@@ -26,3 +26,7 @@ def test_sqlalchemy_url_prefers_database_url():
     database_url = "postgresql+psycopg2://postgres:postgres@localhost:15432/docgraph_test"
     configured = Settings(database_url=database_url)
     assert configured.sqlalchemy_url == database_url
+
+
+def test_api_docs_are_disabled_by_default():
+    assert Settings().api_docs_enabled is False

@@ -102,11 +102,15 @@ async def lifespan(app: FastAPI):
     logger.info("=== 后端关闭 ===")
 
 
+_docs_enabled = settings.app_debug or settings.api_docs_enabled
 app = FastAPI(
     title="基于知识图谱的自动文档审查智能体 API",
     version=app_version(),
     description="出口代理贸易单证自动审查 - MVP（多规则集）",
     lifespan=lifespan,
+    docs_url="/docs" if _docs_enabled else None,
+    redoc_url="/redoc" if _docs_enabled else None,
+    openapi_url="/openapi.json" if _docs_enabled else None,
 )
 
 # CORS：白名单来源（批次 6-2 收紧，不再放开 *）；同源部署可留空
