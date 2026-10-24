@@ -7,7 +7,7 @@
 | 服务 | 镜像 / 构建 | 宿主端口 | 说明 |
 | --- | --- | --- | --- |
 | `frontend` | `frontend/Dockerfile`（node 构建 → nginx:1.27-alpine） | `${FRONTEND_HOST_PORT:-8080}` | 统一对外入口，托管 SPA 并反代 `/api` 到 backend |
-| `backend` | `backend/Dockerfile`（python:3.12-slim + uvicorn） | `127.0.0.1:${BACKEND_HOST_PORT:-8800}` | 只绑回环，供本机排障；API 无鉴权，不直接对公网暴露 |
+| `backend` | `backend/Dockerfile`（python:3.12-slim + uvicorn） | `127.0.0.1:${BACKEND_HOST_PORT:-8800}` | 只绑回环；API 有认证和租户权限，统一经 nginx 访问 |
 | `postgres` | `public.ecr.aws/docker/library/postgres:16-alpine` | `15432` | 卷 `postgres_data` |
 | `neo4j` | `public.ecr.aws/docker/library/neo4j:5.26.0-community` | `7474` / `17687` | 卷 `neo4j_data`、`neo4j_logs` |
 | 上传文件 | 卷 `uploads_data` → 容器 `/data/uploads` | — | `UPLOAD_ROOT` 由 compose 注入 |
@@ -20,10 +20,30 @@
 
    ```bash
    cp backend/.env.example backend/.env
-   vi backend/.env          # 至少填 LLM_API_KEY；PG_PASSWORD 要与 compose 的 postgres 口令一致
+   vi backend/.env
    ```
 
    `backend/.env` 不在 git 里，属于机密文件，别提交、别打进镜像。
+
+   生产至少必须配置：
+
+   - `APP_SECRET_KEY`：至少 32 字符的随机值，不能使用示例值；
+   - `PUBLIC_BASE_URL`：已完成 TLS 的 `https://` 对外地址；
+   - `EMAIL_BACKEND=smtp` 以及 `SMTP_HOST`、`MAIL_FROM`、SMTP 凭据；
+   - `LLM_API_KEY` 和一致的 `PG_PASSWORD`；
+   - `DB_RESET_ON_STARTUP=false`。
+
+   首次部署在数据库启动后执行一次平台管理员初始化：
+
+   ```bash
+   cd backend
+   BOOTSTRAP_ADMIN_EMAIL=admin@example.com \
+   BOOTSTRAP_ADMIN_PHONE=13800138000 \
+   BOOTSTRAP_ADMIN_PASSWORD='ReplaceWithAStrongPassword1' \
+   python -m app.bootstrap
+   ```
+
+   `BOOTSTRAP_ADMIN_PASSWORD` 必须包含字母和数字且长于 10 位；命令不会打印口令。
 
    **数据库口令只有一份来源**：`deploy.sh` 用 `docker compose --env-file backend/.env` 启动，
    所以 compose 里的 `POSTGRES_PASSWORD`、`NEO4J_AUTH` 与后端进程读到的 `PG_PASSWORD`、
@@ -40,7 +60,8 @@
    FRONTEND_HOST_PORT=80 bash deploy.sh   # 想直接占 80
    ```
 
-   脚本会：校验 Docker → 检查 `.env` → 拦截 `DB_RESET_ON_STARTUP=true` → 构建 → 启动 → 轮询 `/api/health` → 探测 `/api/`、`/api/constants/doc-types`、`/api/rule-sets`。
+   脚本会：校验 Docker → 检查 `.env`（密钥、HTTPS 地址、SMTP）→ 拦截 `DB_RESET_ON_STARTUP=true`
+   → 构建 → 启动 → 幂等租户迁移 → 轮询 `/api/health`。
 
    `backend`、`frontend` 两个服务挂在 compose 的 **`deploy` profile** 下，所以：
 
@@ -61,7 +82,7 @@ bash deploy.sh                 # 校验 → dc build 重建 backend 镜像 → u
 
 - **必须 rebuild 才生效**：`deploy.sh` 会 `dc build`，改过的代码随镜像更新；`bash deploy.sh restart` 只是重启容器，不带新代码，别拿它当升级手段。
 - **幂等、无数据风险**：可反复执行；`backend/.env` 与数据卷（`postgres_data` / `neo4j_data` / `uploads_data`）都不受影响。
-- **无需手工迁移数据库或重灌图谱**：启动时的 `init_db()` 是幂等建表 + 增量 DDL；规则图谱按规则集快照存于 Neo4j，升级不改动。`requirements.txt` 未变时 pip 层命中缓存，不会重装依赖。
+- **升级前必须备份**：PostgreSQL、Neo4j 和上传卷三者应同时备份。启动时的安全迁移会把存量业务数据归入默认租户并新增租户约束；迁移失败会阻止继续服务，禁止用重置清库绕过。
 - **systemd + nginx 形态**（腾讯云那份指引）：`git pull` → `sudo systemctl restart docgraph-backend`；依赖有变化才重建 venv，前端有改动才 `npm ci && npm run build` 并重新拷贝 `dist`。
 - **升级后自检**：`bash deploy.sh check` 通过，并在「系统设置 → 运行参数」能看到随版本新增的开关（例如 `LLM 全量复核（只提异议，不改判）`，默认关闭）。新增开关只写数据库 `system_settings`，不需要改 `.env` 或 compose。
 
@@ -94,8 +115,11 @@ OCR 与审查任务都跑在进程内后台线程，因此**容器/进程重启�
 - **`DB_RESET_ON_STARTUP` 必须为 false**：true 会 `DROP SCHEMA` 并清空 Neo4j 图谱，脚本会直接拒绝启动。
 - **上传文件在卷里**：老数据在开发机的 `backend/uploads/`，迁移用
   `docker compose cp backend/uploads/. backend:/data/uploads/`。
-- **备份**：`docker compose exec postgres pg_dump -U postgres doc_review > backup.sql`，Neo4j 与上传卷直接打包对应卷目录。
-- **域名 / HTTPS**：容器只提供 HTTP。要么让宿主机 nginx 反代 `127.0.0.1:${FRONTEND_HOST_PORT}` 再用 certbot 签证书，要么把 `FRONTEND_HOST_PORT` 设成 `80` 并另配 TLS 终止。
+- **备份**：PostgreSQL 使用 `pg_dump`，Neo4j 使用 `neo4j-admin database dump`，上传卷使用只读/快照方式打包。恢复演练后才能视为有效备份。
+- **域名 / HTTPS**：容器只提供 HTTP。必须在宿主机 nginx、云负载均衡或其他受控入口终结 TLS，并把 `PUBLIC_BASE_URL` 设为同一个 HTTPS 域名。
+- **HSTS**：只在确认全站 HTTPS 可用后，由 TLS 终结层发送 `Strict-Transport-Security`；不要在纯 HTTP 容器入口发送。
+- **代理头信任**：compose 开启 `TRUST_PROXY_HEADERS=true`，因此 backend 的宿主端口必须保持 `127.0.0.1` 绑定，不能直接暴露。
+- **审计**：登录、审核、成员角色、设置、下载和跨租户拒绝会写入 `audit_logs`；日志包含 request ID，不包含密码、令牌、完整手机号或单证正文。
 
 ## 常见问题
 

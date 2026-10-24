@@ -150,6 +150,32 @@ preflight() {
     [ -n "$key" ] || warn "backend/.env 未设置 PG_PASSWORD，将使用 compose 默认口令 postgres"
     key="$(read_env APP_SECRET_KEY)"
     [ "${#key}" -ge 32 ] || die "backend/.env 的 APP_SECRET_KEY 少于 32 个字符，生产环境必须使用强随机值"
+    case "$key" in
+        change-me*|changeme*|replace-me*|your-secret-key*)
+            die "backend/.env 的 APP_SECRET_KEY 仍是示例值，请生成至少 32 字节的随机密钥"
+            ;;
+    esac
+
+    local public_url email_backend smtp_host mail_from
+    public_url="$(read_env PUBLIC_BASE_URL)"
+    case "$public_url" in
+        https://*) ;;
+        *) die "PUBLIC_BASE_URL 必须是 HTTPS 地址，例如 https://docs.example.com" ;;
+    esac
+    case "$public_url" in
+        *example.com*) die "PUBLIC_BASE_URL 仍是示例域名，请改成真实 HTTPS 地址" ;;
+    esac
+    email_backend="$(read_env EMAIL_BACKEND)"
+    [ -n "$email_backend" ] || email_backend="smtp"
+    if [ "$email_backend" = "smtp" ]; then
+        smtp_host="$(read_env SMTP_HOST)"
+        mail_from="$(read_env MAIL_FROM)"
+        [ -n "$smtp_host" ] || die "EMAIL_BACKEND=smtp 时必须配置 SMTP_HOST"
+        [ -n "$mail_from" ] || die "EMAIL_BACKEND=smtp 时必须配置 MAIL_FROM"
+        [ "$smtp_host" != "smtp.example.com" ] || die "SMTP_HOST 仍是示例值"
+        [ "$mail_from" != "no-reply@example.com" ] || die "MAIL_FROM 仍是示例值"
+    fi
+
     key="$(read_env LLM_API_KEY)"
     case "$key" in
         ""|sk-your-*)

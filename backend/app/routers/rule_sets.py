@@ -16,6 +16,7 @@ from ..auth.dependencies import AuthContext, require_permission
 from ..database import get_db
 from ..models import RuleSet
 from ..schemas.rule_set import RuleSetCreate, RuleSetOut, RuleSetUpdate
+from ..services import audit_service
 from ..tenant_scope import tenant_get
 
 router = APIRouter(prefix="/api/rule-sets", tags=["rule-sets"])
@@ -197,6 +198,15 @@ def delete_rule_set(
         logger.exception("Neo4j 不可用，跳过规则集 %s 的图谱清理", rs.id)
 
     # 4) 删除规则集（Postgres 级联清理规则/快照/合同/文档/审查任务与结果等）
+    audit_service.record(
+        db,
+        ctx.tenant.id,
+        ctx.user.id,
+        "ruleset.delete",
+        target_type="ruleset",
+        target_id=rs.id,
+        result="success",
+    )
     db.delete(rs)
     db.commit()
 

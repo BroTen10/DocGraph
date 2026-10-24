@@ -91,8 +91,19 @@ class Settings(BaseSettings):
     def _validate_security(self):
         if not self.app_debug and len(self.app_secret_key) < 32:
             raise ValueError("生产环境 APP_SECRET_KEY 至少 32 个字符")
+        if not self.app_debug and self.app_secret_key.lower() in {
+            "change-me",
+            "changeme",
+            "replace-me",
+            "your-secret-key",
+        }:
+            raise ValueError("生产环境 APP_SECRET_KEY 不能使用示例值")
         if not self.app_debug and not self.session_cookie_secure:
             raise ValueError("生产环境必须启用 Secure Cookie")
+        if not self.app_debug and not self.public_base_url.startswith("https://"):
+            raise ValueError("生产环境 PUBLIC_BASE_URL 必须使用 HTTPS")
+        if self.email_backend == "smtp" and not self.smtp_host.strip():
+            raise ValueError("EMAIL_BACKEND=smtp 时必须配置 SMTP_HOST")
         return self
 
     @property

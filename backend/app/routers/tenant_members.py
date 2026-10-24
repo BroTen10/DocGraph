@@ -85,6 +85,7 @@ def update_member(
     try:
         member = tenant_member_service.update_member(
             db,
+            ctx.user.id,
             ctx.tenant.id,
             membership_id,
             role=payload.role,
@@ -108,7 +109,7 @@ def resend_invitation(
 ) -> InvitationOut:
     try:
         invitation = tenant_member_service.resend_invitation(
-            db, ctx.tenant.id, invitation_id
+            db, ctx.user.id, ctx.tenant.id, invitation_id
         )
     except EmailDeliveryError as exc:
         raise HTTPException(status_code=503, detail=str(exc))
@@ -142,6 +143,8 @@ def revoke_invitation(
     ctx: AuthContext = Depends(require_permission("members.manage")),
     db: Session = Depends(get_db),
 ) -> dict:
-    if not tenant_member_service.revoke_invitation(db, ctx.tenant.id, invitation_id):
+    if not tenant_member_service.revoke_invitation(
+        db, ctx.user.id, ctx.tenant.id, invitation_id
+    ):
         raise HTTPException(status_code=404, detail="邀请不存在")
     return {"success": True}

@@ -23,6 +23,7 @@ from ..models import (
     UserAccount,
 )
 from .email_service import EmailDeliveryError, send_email
+from . import audit_service
 
 
 class PlatformOperationError(ValueError):
@@ -74,6 +75,16 @@ def create_platform_admin(email: str, phone: str, password: str) -> UserAccount:
             is_platform_admin=True,
         )
         db.add(admin)
+        db.flush()
+        audit_service.record(
+            db,
+            None,
+            admin.id,
+            "platform.admin.bootstrap",
+            target_type="user",
+            target_id=admin.id,
+            result="success",
+        )
         try:
             db.commit()
         except IntegrityError:
@@ -177,6 +188,16 @@ def approve_registration(
     request.reviewed_at = now
     request.review_note = (note or "").strip() or None
     request.rejection_reason = None
+    audit_service.record(
+        db,
+        tenant.id,
+        actor_id,
+        "tenant.approved",
+        target_type="tenant_registration",
+        target_id=request.id,
+        result="success",
+        metadata={"tenant_id": str(tenant.id)},
+    )
     try:
         db.commit()
     except IntegrityError:
@@ -232,6 +253,15 @@ def reject_registration(
     request.rejection_reason = reason
     request.reviewed_by = actor_id
     request.reviewed_at = _utcnow()
+    audit_service.record(
+        db,
+        None,
+        actor_id,
+        "tenant.rejected",
+        target_type="tenant_registration",
+        target_id=request.id,
+        result="success",
+    )
     db.commit()
     return {"status": request.status}
 
@@ -265,13 +295,25 @@ def list_tenants(db: Session) -> list[dict]:
 
 def set_tenant_status(
     db: Session,
+    actor_user_id: uuid.UUID,
     tenant_id: uuid.UUID,
     status: str,
 ) -> dict:
     tenant = db.get(Tenant, tenant_id)
     if tenant is None:
         raise PlatformOperationError("TENANT_NOT_FOUND", "租户不存在")
+    old_status = tenant.status
     tenant.status = status
+    audit_service.record(
+        db,
+        tenant.id,
+        actor_user_id,
+        "tenant.status.update",
+        target_type="tenant",
+        target_id=tenant.id,
+        result="success",
+        metadata={"from_status": old_status, "to_status": status},
+    )
     db.commit()
     if status in {"suspended", "archived"}:
         revoke_tenant_sessions(db, tenant_id)

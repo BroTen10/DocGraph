@@ -22,6 +22,7 @@ from ..schemas.contract import (
     OcrFieldsUpdate,
 )
 from ..services import contract_service
+from ..services import audit_service
 
 router = APIRouter(prefix="/api/contracts", tags=["contracts"])
 
@@ -176,6 +177,17 @@ def get_document_file(
     mime_type, _ = mimetypes.guess_type(doc.file_name)
     if mime_type is None:
         mime_type = "application/octet-stream"
+
+    audit_service.record_and_commit(
+        db,
+        ctx.tenant.id,
+        ctx.user.id,
+        "document.download",
+        target_type="document",
+        target_id=doc.id,
+        result="success",
+        metadata={"file_type": doc.file_type},
+    )
 
     return FileResponse(
         path=str(path),

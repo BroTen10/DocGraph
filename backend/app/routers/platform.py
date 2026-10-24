@@ -151,6 +151,7 @@ def set_tenant_status(
     try:
         result = platform_service.set_tenant_status(
             db,
+            ctx.user.id,
             tenant_id,
             payload.status,
         )

@@ -31,8 +31,9 @@ from ..constants import (
     STAMP_REQUIREMENTS,
 )
 from ..llm_client import LLMError, get_llm_client
-from ..models import AuditLog, DocumentType, SystemSetting
+from ..models import DocumentType, SystemSetting
 from ..prompt_templates import PROMPT_META, PROMPT_TEMPLATES, get_prompt_default
+from . import audit_service
 
 logger = logging.getLogger(__name__)
 
@@ -212,15 +213,14 @@ def update_settings(
             row.value = value
         changed_keys.append(key)
     if changed_keys:
-        db.add(
-            AuditLog(
-                tenant_id=tenant_id,
-                actor_user_id=actor_user_id,
-                action="settings.update",
-                target_type="settings",
-                result="success",
-                metadata_json={"keys": sorted(set(changed_keys))},
-            )
+        audit_service.record(
+            db,
+            tenant_id,
+            actor_user_id,
+            "settings.update",
+            target_type="settings",
+            result="success",
+            metadata={"keys": sorted(set(changed_keys))},
         )
     db.commit()
     return get_all_settings(db, tenant_id)

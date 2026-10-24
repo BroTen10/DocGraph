@@ -12,6 +12,7 @@ from sqlalchemy.orm import Session
 
 from ..database import get_db
 from ..models import Tenant, TenantMembership, UserAccount
+from ..observability import bind_principal
 from .permissions import permissions_for
 from .session_tokens import get_active_session, touch_session
 
@@ -62,6 +63,9 @@ def get_auth_context(
         raise HTTPException(status_code=403, detail="账号状态异常")
 
     touch_session(db, session)
+    bind_principal(user.id, tenant.id if tenant is not None else None)
+    request.state.actor_user_id = str(user.id)
+    request.state.tenant_id = str(tenant.id) if tenant is not None else None
     role = membership.role if membership is not None else None
     permissions = permissions_for(role, user.is_platform_admin)
     return AuthContext(

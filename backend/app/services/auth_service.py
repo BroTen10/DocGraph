@@ -34,6 +34,7 @@ from ..models import (
 )
 from ..schemas.auth import RegisterTenantRequest
 from .email_service import EmailDeliveryError, send_email
+from . import audit_service
 
 logger = logging.getLogger(__name__)
 
@@ -75,14 +76,34 @@ def _login_context_for_user(db: Session, user: UserAccount) -> tuple:
         .limit(1)
     ).scalar_one_or_none()
     if membership is None:
+        audit_service.record(
+            db, None, user.id, "auth.login.denied", result="denied",
+            metadata={"reason": "membership_missing"},
+        )
+        db.commit()
         raise LoginDeniedError("ACCOUNT_UNAVAILABLE", "账号未开通")
     if membership.status != "active":
+        audit_service.record(
+            db, membership.tenant_id, user.id, "auth.login.denied",
+            result="denied", metadata={"reason": "member_disabled"},
+        )
+        db.commit()
         raise LoginDeniedError("MEMBER_DISABLED", "账号已停用")
 
     tenant = db.get(Tenant, membership.tenant_id)
     if tenant is None:
+        audit_service.record(
+            db, membership.tenant_id, user.id, "auth.login.denied",
+            result="denied", metadata={"reason": "tenant_missing"},
+        )
+        db.commit()
         raise LoginDeniedError("ACCOUNT_UNAVAILABLE", "账号所属租户不存在")
     if tenant.status != "active":
+        audit_service.record(
+            db, tenant.id, user.id, "auth.login.denied", result="denied",
+            metadata={"reason": "tenant_inactive"},
+        )
+        db.commit()
         raise LoginDeniedError("TENANT_SUSPENDED", "租户已暂停，请联系平台管理员")
 
     return tenant, membership
@@ -99,26 +120,60 @@ def authenticate(
     try:
         canonical_email = normalize_email(email)
     except ValueError:
+        audit_service.record(
+            db, None, None, "auth.login.failed", result="failure",
+            metadata={"reason": "invalid_credentials"},
+        )
+        db.commit()
         raise ValueError("邮箱或密码错误")
 
     user = db.execute(
         select(UserAccount).where(UserAccount.email_normalized == canonical_email)
     ).scalar_one_or_none()
     if user is None:
+        audit_service.record(
+            db, None, None, "auth.login.failed", result="failure",
+            metadata={"reason": "invalid_credentials"},
+        )
+        db.commit()
         raise ValueError("邮箱或密码错误")
 
     now = _utcnow()
     if user.locked_until is not None and user.locked_until > now:
+        audit_service.record(
+            db, None, user.id, "auth.login.locked", result="failure",
+            metadata={"reason": "account_locked"},
+        )
+        db.commit()
         raise LoginDeniedError("ACCOUNT_LOCKED", "账号已锁定，请稍后再试")
 
     if not verify_password(user.password_hash, password):
         user.failed_login_count += 1
-        if user.failed_login_count >= MAX_LOGIN_FAILURES:
+        lock_triggered = user.failed_login_count >= MAX_LOGIN_FAILURES
+        if lock_triggered:
             user.locked_until = now + timedelta(minutes=LOCK_MINUTES)
+        audit_service.record(
+            db, None, user.id, "auth.login.failed", result="failure",
+            metadata={
+                "reason": "invalid_credentials",
+                "failed_attempts": user.failed_login_count,
+            },
+        )
+        if lock_triggered:
+            audit_service.record(
+                db, None, user.id, "auth.account.locked",
+                target_type="user", target_id=user.id, result="failure",
+                metadata={"lock_minutes": LOCK_MINUTES},
+            )
         db.commit()
         raise ValueError("邮箱或密码错误")
 
     if not user.is_platform_admin and user.email_verified_at is None:
+        audit_service.record(
+            db, None, user.id, "auth.login.denied", result="denied",
+            metadata={"reason": "email_unverified"},
+        )
+        db.commit()
         raise ValueError("账号邮箱未验证")
 
     tenant, membership = _login_context_for_user(db, user)
@@ -126,6 +181,16 @@ def authenticate(
     user.failed_login_count = 0
     user.locked_until = None
     user.last_login_at = now
+    audit_service.record(
+        db,
+        tenant.id if tenant else None,
+        user.id,
+        "auth.login.success",
+        target_type="user",
+        target_id=user.id,
+        result="success",
+        metadata={"platform_admin": user.is_platform_admin},
+    )
     db.commit()
 
     session, raw_session_token, raw_csrf_token = create_session(
@@ -166,6 +231,10 @@ def request_password_reset(db: Session, email: str) -> bool:
             token_hash=token_hash,
             expires_at=_utcnow() + timedelta(minutes=RESET_TOKEN_MINUTES),
         )
+    )
+    audit_service.record(
+        db, None, user.id, "auth.password.reset_requested",
+        target_type="user", target_id=user.id, result="success",
     )
     url = f"{settings.public_base_url}/reset-password?token={raw_token}"
     try:
@@ -209,7 +278,13 @@ def reset_password(db: Session, raw_token: str, new_password: str) -> None:
         raise ValueError("重置链接无效")
 
     user.password_hash = hash_password(new_password)
+    user.failed_login_count = 0
+    user.locked_until = None
     token.used_at = _utcnow()
+    audit_service.record(
+        db, None, user.id, "auth.password.reset",
+        target_type="user", target_id=user.id, result="success",
+    )
     db.commit()
     revoke_user_sessions(db, user.id)
 
@@ -224,6 +299,10 @@ def change_password(
     if not verify_password(user.password_hash, current_password):
         raise ValueError("当前密码不正确")
     user.password_hash = hash_password(new_password)
+    audit_service.record(
+        db, None, user.id, "auth.password.change",
+        target_type="user", target_id=user.id, result="success",
+    )
     db.commit()
     revoke_user_sessions(db, user.id)
 
@@ -283,6 +362,13 @@ def register_tenant(
     )
     db.add(request)
     db.flush()
+    audit_service.record(
+        db, None, None, "registration.submitted",
+        target_type="tenant_registration",
+        target_id=request.id,
+        result="success",
+        metadata={"status": request.status},
+    )
 
     raw_token, token_hash = new_token()
     db.add(
@@ -338,6 +424,12 @@ def verify_registration_token(db: Session, raw_token: str) -> str:
     request.status = "pending_review"
     request.email_verified_at = now
     token.used_at = now
+    audit_service.record(
+        db, None, None, "registration.email_verified",
+        target_type="tenant_registration",
+        target_id=request.id,
+        result="success",
+    )
     db.commit()
     return request.status
 

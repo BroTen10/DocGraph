@@ -14,11 +14,11 @@ from ..auth.security import hash_password, new_token
 from ..auth.session_tokens import revoke_user_sessions
 from ..config import settings
 from ..models import (
-    AuditLog,
     TenantInvitation,
     TenantMembership,
     UserAccount,
 )
+from . import audit_service
 from .email_service import EmailDeliveryError, send_email
 
 logger = logging.getLogger(__name__)
@@ -139,6 +139,17 @@ def invite_member(
         logger.exception("成员邀请邮件发送失败: %s", email)
         raise
 
+    audit_service.record(
+        db,
+        tenant_id,
+        actor_user_id,
+        "invitation.created",
+        target_type="tenant_invitation",
+        target_id=invitation.id,
+        result="success",
+        metadata={"role": role},
+    )
+
     db.commit()
     db.refresh(invitation)
     return invitation
@@ -182,18 +193,27 @@ def accept_invitation(db: Session, raw_token: str, password: str) -> None:
     db.add(user)
     db.flush()
 
-    db.add(
-        TenantMembership(
-            tenant_id=invitation.tenant_id,
-            user_id=user.id,
-            role=invitation.role,
-            status="active",
-            invited_by=invitation.invited_by,
-            joined_at=now,
-        )
+    membership = TenantMembership(
+        tenant_id=invitation.tenant_id,
+        user_id=user.id,
+        role=invitation.role,
+        status="active",
+        invited_by=invitation.invited_by,
+        joined_at=now,
     )
+    db.add(membership)
     invitation.status = "accepted"
     invitation.accepted_at = now
+    audit_service.record(
+        db,
+        invitation.tenant_id,
+        user.id,
+        "invitation.accepted",
+        target_type="tenant_invitation",
+        target_id=invitation.id,
+        result="success",
+        metadata={"role": invitation.role},
+    )
     db.commit()
 
 
@@ -237,6 +257,7 @@ def _has_other_active_admin(
 
 def update_member(
     db: Session,
+    actor_user_id: uuid.UUID,
     tenant_id: uuid.UUID,
     membership_id: uuid.UUID,
     *,
@@ -255,6 +276,8 @@ def update_member(
     if row is None:
         return None
     membership, user = row
+    old_role = membership.role
+    old_status = membership.status
 
     will_change_admin = (role is not None and membership.role == "tenant_admin" and role != "tenant_admin") or (
         status == "disabled" and membership.role == "tenant_admin"
@@ -267,6 +290,29 @@ def update_member(
     if status is not None:
         membership.status = status
 
+    if role is not None and role != old_role:
+        audit_service.record(
+            db,
+            tenant_id,
+            actor_user_id,
+            "member.role.update",
+            target_type="tenant_member",
+            target_id=membership.id,
+            result="success",
+            metadata={"from_role": old_role, "to_role": role},
+        )
+    if status is not None and status != old_status:
+        audit_service.record(
+            db,
+            tenant_id,
+            actor_user_id,
+            "member.status.update",
+            target_type="tenant_member",
+            target_id=membership.id,
+            result="success",
+            metadata={"from_status": old_status, "to_status": status},
+        )
+
     db.commit()
     if status == "disabled":
         revoke_user_sessions(db, user.id)
@@ -275,6 +321,7 @@ def update_member(
 
 def revoke_invitation(
     db: Session,
+    actor_user_id: uuid.UUID,
     tenant_id: uuid.UUID,
     invitation_id: uuid.UUID,
 ) -> bool:
@@ -287,12 +334,22 @@ def revoke_invitation(
     if invitation is None:
         return False
     invitation.status = "revoked"
+    audit_service.record(
+        db,
+        tenant_id,
+        actor_user_id,
+        "invitation.revoked",
+        target_type="tenant_invitation",
+        target_id=invitation.id,
+        result="success",
+    )
     db.commit()
     return True
 
 
 def resend_invitation(
     db: Session,
+    actor_user_id: uuid.UUID,
     tenant_id: uuid.UUID,
     invitation_id: uuid.UUID,
 ) -> TenantInvitation | None:
@@ -315,6 +372,15 @@ def resend_invitation(
     except EmailDeliveryError:
         db.rollback()
         raise
+    audit_service.record(
+        db,
+        tenant_id,
+        actor_user_id,
+        "invitation.resent",
+        target_type="tenant_invitation",
+        target_id=invitation.id,
+        result="success",
+    )
     db.commit()
     db.refresh(invitation)
     return invitation
@@ -340,19 +406,16 @@ def reveal_member_phone(
     if row is None:
         return None
     membership, user = row
-    db.add(
-        AuditLog(
-            tenant_id=tenant_id,
-            actor_user_id=actor_user_id,
-            action="member.phone.reveal",
-            target_type="tenant_member",
-            target_id=membership.id,
-            result="success",
-            metadata_json={"field": "phone"},
-            ip=ip,
-        )
+    audit_service.record_and_commit(
+        db,
+        tenant_id,
+        actor_user_id,
+        "member.phone.reveal",
+        target_type="tenant_member",
+        target_id=membership.id,
+        result="success",
+        metadata={"field": "phone"},
     )
-    db.commit()
     return user.phone_e164
 
 
@@ -373,17 +436,14 @@ def reveal_invitation_phone(
     ).scalar_one_or_none()
     if invitation is None:
         return None
-    db.add(
-        AuditLog(
-            tenant_id=tenant_id,
-            actor_user_id=actor_user_id,
-            action="invitation.phone.reveal",
-            target_type="tenant_invitation",
-            target_id=invitation.id,
-            result="success",
-            metadata_json={"field": "phone"},
-            ip=ip,
-        )
+    audit_service.record_and_commit(
+        db,
+        tenant_id,
+        actor_user_id,
+        "invitation.phone.reveal",
+        target_type="tenant_invitation",
+        target_id=invitation.id,
+        result="success",
+        metadata={"field": "phone"},
     )
-    db.commit()
     return invitation.phone_e164

@@ -75,14 +75,16 @@ services:
       APP_HOST: 0.0.0.0
       APP_PORT: "8800"
       APP_DEBUG: "false"
+      API_DOCS_ENABLED: "false"
       PG_HOST: postgres
       PG_PORT: "5432"
       NEO4J_URI: bolt://neo4j:7687
       UPLOAD_ROOT: /data/uploads
+      TRUST_PROXY_HEADERS: "true"
     volumes:
       - uploads_data:/data/uploads
     ports:
-      # 只绑定回环：后端 API 无鉴权，不直接对公网暴露，统一从前端 nginx 的 /api 进
+      # 只绑定回环：统一从前端 nginx 的 /api 进入，并让代理头信任边界保持受控
       - "127.0.0.1:${BACKEND_HOST_PORT:-8800}:8800"
     depends_on:
       postgres:

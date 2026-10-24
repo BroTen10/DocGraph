@@ -12,12 +12,15 @@
 from __future__ import annotations
 
 import logging
+import time
+import uuid
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Depends, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
+from .auth.rate_limit import client_ip
 from .auth.csrf import (
     csrf_header_matches_session,
     is_public_auth,
@@ -28,6 +31,13 @@ from .auth.dependencies import AuthContext, require_permission
 from .auth.session_tokens import get_active_session
 from .config import settings
 from .database import SessionLocal, get_db, init_db
+from .observability import (
+    RequestContextFilter,
+    bind_principal,
+    bind_request,
+    clear_context,
+    normalize_request_id,
+)
 from .routers import (
     auth,
     contracts,
@@ -46,8 +56,14 @@ from .version import app_version, collect_build_info
 
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    format=(
+        "%(asctime)s [%(levelname)s] %(name)s "
+        "[request_id=%(request_id)s user_id=%(user_id)s "
+        "tenant_id=%(tenant_id)s]: %(message)s"
+    ),
 )
+for _handler in logging.getLogger().handlers:
+    _handler.addFilter(RequestContextFilter())
 logger = logging.getLogger(__name__)
 
 
@@ -154,6 +170,61 @@ async def csrf_protection(request: Request, call_next):
             db.close()
 
     return await call_next(request)
+
+
+@app.middleware("http")
+async def request_correlation(request: Request, call_next):
+    """Attach a safe request ID and record authenticated access denials."""
+    supplied = normalize_request_id(request.headers.get("x-request-id"))
+    request_id = supplied or uuid.uuid4().hex
+    bind_request(request_id, client_ip(request))
+    started = time.perf_counter()
+    try:
+        response = await call_next(request)
+        response.headers["X-Request-ID"] = request_id
+
+        if response.status_code in {403, 404} and request.url.path.startswith("/api/"):
+            from .services import audit_service
+
+            tenant = getattr(request.state, "tenant_id", None)
+            user = getattr(request.state, "actor_user_id", None)
+            if user:
+                route = request.scope.get("route")
+                route_path = getattr(route, "path", request.url.path)
+                db = SessionLocal()
+                try:
+                    audit_service.record_and_commit(
+                        db,
+                        uuid.UUID(tenant) if tenant else None,
+                        uuid.UUID(user),
+                        "security.access.denied",
+                        target_type="api_route",
+                        result="denied",
+                        metadata={
+                            "method": request.method,
+                            "path": route_path,
+                            "status": response.status_code,
+                        },
+                    )
+                except Exception:
+                    logger.exception("记录访问拒绝审计失败")
+                finally:
+                    db.close()
+
+        bind_principal(
+            getattr(request.state, "actor_user_id", None),
+            getattr(request.state, "tenant_id", None),
+        )
+        logger.info(
+            "request completed method=%s path=%s status=%s duration_ms=%.1f",
+            request.method,
+            request.url.path,
+            response.status_code,
+            (time.perf_counter() - started) * 1000,
+        )
+        return response
+    finally:
+        clear_context()
 
 
 # 注册路由

@@ -28,7 +28,7 @@
   <a href="#项目文档">项目文档</a>
 </p>
 
-> **项目状态：MVP。** 当前版本聚焦核心审查链路，内置服务暂不包含登录、权限和租户隔离，请勿将 API 直接暴露到公网。
+> **项目状态：MVP。** 当前版本已包含邮箱注册审核、固定角色权限和多租户隔离。生产环境仍须配置 HTTPS、SMTP、强随机 `APP_SECRET_KEY`，并完成定期备份与安全监控。
 
 ## 项目亮点
 
@@ -73,6 +73,8 @@ flowchart LR
 - **审查执行**：并发处理 OCR 与审查任务，回收中断任务。
 - **结果展示**：呈现三态结果、规则说明和原始单证证据。
 - **版本核验**：对比前后端构建版本和运行提交，降低“部署了旧代码”的风险。
+- **账号与权限**：邮箱注册、平台审核、手机号登记、服务端会话、租户管理员/审查员/只读角色。
+- **租户隔离**：规则集、单证、任务、设置、上传文件和 Neo4j 图谱均按租户隔离。
 
 ## 系统架构
 
@@ -118,7 +120,8 @@ Set-Location DocGraph
 Copy-Item backend\.env.example backend\.env
 ```
 
-编辑 `backend\.env`，至少填写 `LLM_API_KEY`。OCR 未单独配置时会复用该 Key。
+编辑 `backend\.env`，填写 `LLM_API_KEY`、SMTP 配置和 `APP_SECRET_KEY`。本地调试可临时使用
+`EMAIL_BACKEND=console`；生产必须使用真实 SMTP。OCR 未单独配置时会复用 LLM Key。
 
 ### 2. 启动数据库
 
@@ -136,7 +139,7 @@ py -3.12 -m venv .venv
 ```
 
 后端 API：<http://localhost:8800>  
-接口文档：<http://localhost:8800/docs>
+本地 `APP_DEBUG=true` 时接口文档：<http://localhost:8800/docs>。生产默认关闭。
 
 ### 4. 启动前端
 
@@ -148,7 +151,18 @@ npm ci
 npm run dev
 ```
 
-打开 <http://localhost:5173>。首次进入后先创建规则集，再添加文档类型和审查规则。
+首次部署先初始化一个平台管理员（只执行一次）：
+
+```powershell
+Set-Location backend
+$env:BOOTSTRAP_ADMIN_EMAIL="admin@example.com"
+$env:BOOTSTRAP_ADMIN_PHONE="13800138000"
+$env:BOOTSTRAP_ADMIN_PASSWORD="ReplaceWithAStrongPassword1"
+.\.venv\Scripts\python.exe -m app.bootstrap
+```
+
+平台管理员登录后审核新组织注册申请；租户管理员登录后创建规则集、添加文档类型和审查规则。
+正常入口为 <http://localhost:5173>。
 
 > 完成首次依赖安装后，也可以在仓库根目录运行 `start_services.bat` 同时启动前后端。
 
@@ -164,7 +178,8 @@ vi backend/.env
 bash deploy.sh
 ```
 
-默认访问地址为 <http://localhost:8080>。部署脚本会构建前后端镜像、启动数据库并完成健康检查。
+部署入口必须是已完成 TLS 的域名，并把 `PUBLIC_BASE_URL` 配成该 HTTPS 地址。部署脚本会构建镜像、
+启动数据库、执行幂等安全迁移并完成健康检查。
 
 ```bash
 bash deploy.sh check      # 部署后自检
@@ -183,6 +198,12 @@ bash deploy.sh down       # 停止服务
 | 配置 | 默认值 | 说明 |
 | --- | --- | --- |
 | `LLM_API_KEY` | 空 | LLM/OCR 服务密钥，必填 |
+| `APP_SECRET_KEY` | 空 | 至少 32 字符的随机密钥；生产缺少时拒绝启动 |
+| `PUBLIC_BASE_URL` | `https://docs.example.com` | 邀请/验证/重置链接和 Origin 校验的对外地址 |
+| `EMAIL_BACKEND` | `smtp` | `smtp`、`console`（仅开发）或 `outbox`（测试） |
+| `SMTP_HOST` / `MAIL_FROM` | 空 | 生产 SMTP 必填 |
+| `SESSION_IDLE_MINUTES` | `120` | 会话空闲超时 |
+| `SESSION_ABSOLUTE_HOURS` | `12` | 会话绝对有效期 |
 | `LLM_BASE_URL` | OpenAI 兼容地址 | 模型接口 |
 | `LLM_MODEL_NAME` | `deepseek-v4.1-flash` | 审查与抽取模型 |
 | `UPLOAD_ROOT` | `./uploads` | 原始单证存储目录 |
@@ -230,10 +251,24 @@ DocGraph/
 
 ## 安全提示
 
-- 当前 API 没有身份认证和权限控制，请在受控网络或 VPN 中使用。
-- 生产环境只应通过前端入口访问服务，并为入口配置 HTTPS。
+- 所有业务 API 都要求登录和服务端权限校验；仅健康检查、版本和公开认证接口豁免。
+- 生产环境必须通过 HTTPS 入口访问，并正确配置 `PUBLIC_BASE_URL`；HSTS 应在 TLS 终结层启用。
+- 首次平台管理员只能通过一次性 `python -m app.bootstrap` 创建，禁止使用固定默认口令。
 - `backend/.env`、上传的真实单证和数据库卷包含敏感信息，不应提交到 Git。
-- 对外服务前应补充访问控制、审计日志、资源限制和备份策略。
+- 上线前应保存 PostgreSQL、Neo4j 和上传卷备份，并定期检查安全审计日志。
+
+## 备份与升级
+
+升级前先停止写入并备份三个数据面：
+
+```bash
+docker compose exec postgres pg_dump -U postgres doc_review > docgraph-postgres.sql
+docker compose exec neo4j neo4j-admin database dump neo4j --to-path=/backups
+tar -C /var/lib/docker/volumes -czf docgraph-uploads.tar.gz docgraph_uploads_data
+```
+
+随后执行 `bash deploy.sh`。启动过程会幂等添加账号/租户字段、回填默认租户并校验约束。
+禁止用 `DB_RESET_ON_STARTUP=true` 处理生产升级。
 
 ## 开源许可
 
@@ -244,6 +279,7 @@ DocGraph 仓库自身采用 [MIT License](LICENSE)，允许使用、修改、分
 ## 项目文档
 
 - [Docker 单机部署](docs/部署-Docker单机部署.md)
+- [登录权限与多租户隔离需求设计](docs/登录权限与多租户隔离-需求设计.md)
 - [版本管理](docs/版本管理.md)
 - [规则解析控制架构设计](docs/规则解析控制架构设计.md)
 - [泛化规则体系重构设计](docs/泛化规则体系重构设计.md)

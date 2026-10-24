@@ -41,6 +41,7 @@ from ..schemas.auth import (
 )
 from ..schemas.tenant import AcceptInviteRequest, AcceptInviteResponse
 from ..services import auth_service
+from ..services import audit_service
 from ..services.email_service import EmailDeliveryError
 from ..services.tenant_member_service import MemberOperationError, accept_invitation
 
@@ -60,7 +61,12 @@ def _set_session_cookie(response: Response, token: str) -> None:
 
 
 def _clear_session_cookie(response: Response) -> None:
-    response.delete_cookie("docgraph_session", path="/")
+    response.delete_cookie(
+        "docgraph_session",
+        path="/",
+        secure=settings.session_cookie_secure,
+        samesite="lax",
+    )
 
 
 def _effective_role(user: UserAccount, membership) -> str | None:
@@ -247,8 +253,19 @@ def logout(
 ) -> Response:
     """Revoke the current session and clear its cookie."""
     token = request.cookies.get("docgraph_session")
+    session = get_active_session(db, token)
     if token:
         revoke_session(db, token)
+    if session is not None:
+        audit_service.record_and_commit(
+            db,
+            session.tenant_id,
+            session.user_id,
+            "auth.logout",
+            target_type="session",
+            target_id=session.id,
+            result="success",
+        )
     response = Response(status_code=204)
     _clear_session_cookie(response)
     return response
@@ -264,6 +281,15 @@ def logout_all(
     session = get_active_session(db, token)
     if session is not None:
         revoke_user_sessions(db, session.user_id)
+        audit_service.record_and_commit(
+            db,
+            session.tenant_id,
+            session.user_id,
+            "auth.logout_all",
+            target_type="user",
+            target_id=session.user_id,
+            result="success",
+        )
     response = Response(status_code=204)
     _clear_session_cookie(response)
     return response
