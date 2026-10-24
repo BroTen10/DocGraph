@@ -148,6 +148,8 @@ preflight() {
     local key
     key="$(read_env PG_PASSWORD)"
     [ -n "$key" ] || warn "backend/.env 未设置 PG_PASSWORD，将使用 compose 默认口令 postgres"
+    key="$(read_env APP_SECRET_KEY)"
+    [ "${#key}" -ge 32 ] || die "backend/.env 的 APP_SECRET_KEY 少于 32 个字符，生产环境必须使用强随机值"
     key="$(read_env LLM_API_KEY)"
     case "$key" in
         ""|sk-your-*)

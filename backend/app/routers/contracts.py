@@ -10,6 +10,7 @@ from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
 from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 
+from ..auth.dependencies import AuthContext, require_permission
 from ..database import get_db
 from ..models import Document
 from ..schemas.contract import (
@@ -46,6 +47,7 @@ def list_contracts(
     rule_set_id: uuid.UUID | None = Query(
         default=None, description="按规则集过滤（不传则返回全部）"
     ),
+    ctx: AuthContext = Depends(require_permission("review.view")),
     db: Session = Depends(get_db),
 ) -> list[ContractBrief]:
     """合同列表，可按规则集过滤。"""

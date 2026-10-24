@@ -33,6 +33,7 @@ from .routers import (
     doc_types,
     graph,
     ocr,
+    platform,
     reviews,
     rule_parse_skills,
     rule_sets,
@@ -142,6 +143,7 @@ async def csrf_protection(request: Request, call_next):
 # 注册路由
 app.include_router(auth.router)
 app.include_router(tenant_members.router)
+app.include_router(platform.router)
 app.include_router(rule_sets.router)
 app.include_router(contracts.router)
 app.include_router(rules.router)

@@ -2,7 +2,7 @@ import os
 import sys
 from collections.abc import Generator
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from urllib.parse import urlparse
 from uuid import UUID, uuid4
@@ -26,6 +26,10 @@ os.environ["EMAIL_BACKEND"] = "outbox"
 _BACKEND_DIR = Path(__file__).resolve().parents[1] / "backend"
 sys.path.insert(0, str(_BACKEND_DIR))
 os.chdir(_BACKEND_DIR)
+
+
+def _utcnow() -> datetime:
+    return datetime.now(timezone.utc).replace(tzinfo=None)
 
 
 @pytest.fixture
@@ -112,7 +116,7 @@ def make_auth_fixture(migrated_db):
             email_normalized=email,
             phone_e164=f"+86138{phone_suffix:08d}",
             password_hash=hash_password("DocGraph2026"),
-            email_verified_at=datetime.utcnow(),
+            email_verified_at=_utcnow(),
         )
         migrated_db.add(user)
         migrated_db.flush()
@@ -133,8 +137,8 @@ def make_auth_fixture(migrated_db):
                 tenant_id=tenant_id,
                 token_hash=session_hash,
                 csrf_hash=csrf_hash,
-                expires_at=datetime.utcnow() + timedelta(hours=12),
-                idle_expires_at=datetime.utcnow() + timedelta(hours=2),
+                expires_at=_utcnow() + timedelta(hours=12),
+                idle_expires_at=_utcnow() + timedelta(hours=2),
             )
         )
         migrated_db.commit()
@@ -192,7 +196,7 @@ def active_tenant_user(migrated_db):
         email_normalized="admin@example.com",
         phone_e164="+8613600136000",
         password_hash=hash_password("DocGraph2026"),
-        email_verified_at=datetime.utcnow(),
+        email_verified_at=_utcnow(),
     )
     migrated_db.add_all([tenant, user])
     migrated_db.flush()
@@ -206,3 +210,41 @@ def active_tenant_user(migrated_db):
     )
     migrated_db.commit()
     return user
+
+
+@pytest.fixture
+def platform_auth(migrated_db):
+    from app.auth.security import hash_password, new_token
+    from app.models import AuthSession, UserAccount
+
+    user = UserAccount(
+        name="平台管理员",
+        email_normalized="platform@example.com",
+        phone_e164="+8613700137000",
+        password_hash=hash_password("DocGraph2026"),
+        email_verified_at=_utcnow(),
+        is_platform_admin=True,
+    )
+    migrated_db.add(user)
+    migrated_db.flush()
+    raw_session, session_hash = new_token()
+    raw_csrf, csrf_hash = new_token()
+    migrated_db.add(
+        AuthSession(
+            user_id=user.id,
+            tenant_id=None,
+            token_hash=session_hash,
+            csrf_hash=csrf_hash,
+            expires_at=_utcnow() + timedelta(hours=12),
+            idle_expires_at=_utcnow() + timedelta(hours=2),
+        )
+    )
+    migrated_db.commit()
+    return AuthFixture(
+        session_token=raw_session,
+        csrf_token=raw_csrf,
+        user_id=user.id,
+        tenant_id=None,
+        membership_id=None,
+        email="platform@example.com",
+    )

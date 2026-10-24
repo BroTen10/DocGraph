@@ -122,3 +122,18 @@ def revoke_user_sessions(db: Session, user_id: uuid.UUID) -> int:
         session.revoked_at = now
     db.commit()
     return len(rows)
+
+
+def revoke_tenant_sessions(db: Session, tenant_id: uuid.UUID) -> int:
+    """Revoke every active session belonging to one tenant."""
+    rows = db.execute(
+        select(AuthSession).where(
+            AuthSession.tenant_id == tenant_id,
+            AuthSession.revoked_at.is_(None),
+        )
+    ).scalars().all()
+    now = utcnow()
+    for session in rows:
+        session.revoked_at = now
+    db.commit()
+    return len(rows)
