@@ -96,17 +96,19 @@ def register_tenant(
         )
     )
 
+    url = f"{settings.public_base_url}/verify-email?token={raw_token}"
+    try:
+        send_verification_email(payload.email, url)
+    except EmailDeliveryError:
+        db.rollback()
+        logger.exception("注册验证邮件发送失败: %s", payload.email)
+        raise
+
     try:
         db.commit()
     except IntegrityError:
         db.rollback()
         return None
-
-    url = f"{settings.public_base_url}/verify-email?token={raw_token}"
-    try:
-        send_verification_email(payload.email, url)
-    except EmailDeliveryError:
-        logger.exception("注册验证邮件发送失败: %s", payload.email)
 
     return request
 

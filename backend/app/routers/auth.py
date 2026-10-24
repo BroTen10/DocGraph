@@ -13,6 +13,7 @@ from ..schemas.auth import (
     VerifyEmailResponse,
 )
 from ..services import auth_service
+from ..services.email_service import EmailDeliveryError
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
 
@@ -23,7 +24,10 @@ def register_tenant(
     db: Session = Depends(get_db),
 ) -> RegisterResponse:
     """Submit a new tenant application and queue email verification."""
-    auth_service.register_tenant(db, payload)
+    try:
+        auth_service.register_tenant(db, payload)
+    except EmailDeliveryError as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
     return RegisterResponse(
         message="申请已提交，请前往邮箱完成验证",
         status="pending_email",

@@ -30,9 +30,13 @@ os.chdir(_BACKEND_DIR)
 @pytest.fixture
 def initialized_database() -> None:
     from app import models  # noqa: F401
-    from app.database import Base, engine, init_db
+    from sqlalchemy import text
 
-    Base.metadata.drop_all(bind=engine)
+    from app.database import engine, init_db
+
+    with engine.begin() as conn:
+        conn.execute(text("DROP SCHEMA public CASCADE"))
+        conn.execute(text("CREATE SCHEMA public"))
     init_db()
 
 
