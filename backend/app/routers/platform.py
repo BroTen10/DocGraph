@@ -37,6 +37,8 @@ def _registration_out(row) -> RegistrationReviewOut:
         status=row.status,
         email_verified_at=row.email_verified_at,
         terms_accepted_at=row.terms_accepted_at,
+        review_note=row.review_note,
+        rejection_reason=row.rejection_reason,
         created_at=row.created_at,
     )
 

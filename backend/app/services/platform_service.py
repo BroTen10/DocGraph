@@ -9,7 +9,12 @@ from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from ..auth.security import hash_password, normalize_email, validate_password
+from ..auth.security import (
+    hash_password,
+    normalize_cn_phone,
+    normalize_email,
+    validate_password,
+)
 from ..auth.session_tokens import revoke_tenant_sessions
 from ..models import (
     Tenant,
@@ -40,10 +45,15 @@ def _mask_phone(phone_e164: str) -> str:
     return f"{national[:3]}****{national[-4:]}"
 
 
-def create_platform_admin(email: str, password: str) -> UserAccount:
+def create_platform_admin(email: str, phone: str, password: str) -> UserAccount:
     """Create the first platform administrator from an operator-supplied password."""
-    canonical_email = normalize_email(email)
-    validate_password(password)
+    try:
+        canonical_email = normalize_email(email)
+        canonical_phone = normalize_cn_phone(phone)
+        validate_password(password)
+    except ValueError as exc:
+        raise PlatformOperationError("INVALID_ADMIN_INPUT", str(exc)) from exc
+
     from ..database import SessionLocal
 
     with SessionLocal() as db:
@@ -55,12 +65,10 @@ def create_platform_admin(email: str, password: str) -> UserAccount:
         if existing is not None:
             raise PlatformOperationError("ADMIN_EXISTS", "平台管理员已存在")
 
-        # Platform admins still need a globally unique mainland phone even though
-        # it is never used for tenant callbacks.
         admin = UserAccount(
             name="平台管理员",
             email_normalized=canonical_email,
-            phone_e164="+8613000000000",
+            phone_e164=canonical_phone,
             password_hash=hash_password(password),
             email_verified_at=_utcnow(),
             is_platform_admin=True,
@@ -72,7 +80,7 @@ def create_platform_admin(email: str, password: str) -> UserAccount:
             db.rollback()
             raise PlatformOperationError(
                 "ADMIN_CONFLICT",
-                "邮箱或默认手机号与既有账号冲突",
+                "邮箱或手机号与既有账号冲突",
             )
         db.refresh(admin)
         return admin
@@ -88,11 +96,7 @@ def list_registrations(
     if status is not None:
         stmt = stmt.where(TenantRegistrationRequest.status == status)
     else:
-        stmt = stmt.where(
-            TenantRegistrationRequest.status.in_(
-                ("pending_review", "approved", "rejected")
-            )
-        )
+        stmt = stmt.where(TenantRegistrationRequest.status == "pending_review")
     return list(db.execute(stmt).scalars().all())
 
 
@@ -168,8 +172,8 @@ def approve_registration(
     request.status = "approved"
     request.reviewed_by = actor_id
     request.reviewed_at = now
-    if note:
-        request.rejection_reason = None
+    request.review_note = (note or "").strip() or None
+    request.rejection_reason = None
     try:
         db.commit()
     except IntegrityError:

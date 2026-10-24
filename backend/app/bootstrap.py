@@ -1,7 +1,8 @@
 """One-time platform administrator provisioning.
 
-Usage: ``python -m app.bootstrap`` with ``BOOTSTRAP_ADMIN_EMAIL`` and
-``BOOTSTRAP_ADMIN_PASSWORD`` set. The command refuses to run without both.
+Usage: ``python -m app.bootstrap`` with ``BOOTSTRAP_ADMIN_EMAIL``,
+``BOOTSTRAP_ADMIN_PHONE`` and ``BOOTSTRAP_ADMIN_PASSWORD`` set.
+The command refuses to run without all three.
 """
 
 from __future__ import annotations
@@ -12,10 +13,12 @@ import sys
 
 def main() -> int:
     email = os.environ.get("BOOTSTRAP_ADMIN_EMAIL", "").strip()
+    phone = os.environ.get("BOOTSTRAP_ADMIN_PHONE", "").strip()
     password = os.environ.get("BOOTSTRAP_ADMIN_PASSWORD", "")
-    if not email or not password:
+    if not email or not phone or not password:
         print(
-            "缺少 BOOTSTRAP_ADMIN_EMAIL 或 BOOTSTRAP_ADMIN_PASSWORD，拒绝运行",
+            "缺少 BOOTSTRAP_ADMIN_EMAIL、BOOTSTRAP_ADMIN_PHONE 或 "
+            "BOOTSTRAP_ADMIN_PASSWORD，拒绝运行",
             file=sys.stderr,
         )
         return 2
@@ -25,7 +28,7 @@ def main() -> int:
 
     init_db()
     try:
-        create_platform_admin(email, password)
+        create_platform_admin(email, phone, password)
     except PlatformOperationError as exc:
         print(f"{exc.code}: {exc.message}", file=sys.stderr)
         return 1

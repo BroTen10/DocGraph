@@ -60,6 +60,12 @@ def test_approval_creates_active_tenant_and_admin(
     assert response.json()["tenant_status"] == "active"
     assert response.json()["admin_role"] == "tenant_admin"
 
+    migrated_db.expire_all()
+    reviewed = migrated_db.get(TenantRegistrationRequest, registration.id)
+    assert reviewed.review_note == "资料完整"
+    assert reviewed.reviewed_by == platform_auth.user_id
+    assert reviewed.reviewed_at is not None
+
     login = client.post(
         "/api/auth/login",
         json={"email": "applicant@example.com", "password": "DocGraph2026"},
@@ -233,14 +239,19 @@ def test_platform_admin_lists_registrations_and_tenants(
     platform_auth,
 ):
     _registration(migrated_db, email="listed@example.com")
+    _registration(
+        migrated_db,
+        email="rejected-listed@example.com",
+        phone="+8613900139000",
+        status="rejected",
+    )
     headers = authenticate(client, platform_auth)
 
     registrations = client.get("/api/platform/registrations", headers=headers)
     assert registrations.status_code == 200
-    assert any(
-        row["email"] == "listed@example.com"
-        for row in registrations.json()["registrations"]
-    )
+    rows = registrations.json()["registrations"]
+    assert any(row["email"] == "listed@example.com" for row in rows)
+    assert all(row["status"] == "pending_review" for row in rows)
 
     tenants = client.get("/api/platform/tenants", headers=headers)
     assert tenants.status_code == 200
@@ -249,12 +260,14 @@ def test_platform_admin_lists_registrations_and_tenants(
 
 def test_bootstrap_requires_environment(monkeypatch):
     monkeypatch.delenv("BOOTSTRAP_ADMIN_EMAIL", raising=False)
+    monkeypatch.delenv("BOOTSTRAP_ADMIN_PHONE", raising=False)
     monkeypatch.delenv("BOOTSTRAP_ADMIN_PASSWORD", raising=False)
     assert bootstrap.main() == 2
 
 
 def test_bootstrap_creates_platform_admin(migrated_db, monkeypatch):
     monkeypatch.setenv("BOOTSTRAP_ADMIN_EMAIL", "bootstrap@example.com")
+    monkeypatch.setenv("BOOTSTRAP_ADMIN_PHONE", "+86 137-0013-7000")
     monkeypatch.setenv("BOOTSTRAP_ADMIN_PASSWORD", "Bootstrap2026")
     monkeypatch.setattr("app.database.init_db", lambda: None)
 
@@ -267,4 +280,25 @@ def test_bootstrap_creates_platform_admin(migrated_db, monkeypatch):
             )
         ).scalar_one()
         assert row.is_platform_admin
+        assert row.phone_e164 == "+8613700137000"
         assert row.password_hash != "Bootstrap2026"
+
+
+def test_bootstrap_rejects_missing_or_invalid_phone(migrated_db, monkeypatch):
+    monkeypatch.setenv("BOOTSTRAP_ADMIN_EMAIL", "bootstrap@example.com")
+    monkeypatch.setenv("BOOTSTRAP_ADMIN_PASSWORD", "Bootstrap2026")
+    monkeypatch.setattr("app.database.init_db", lambda: None)
+
+    monkeypatch.delenv("BOOTSTRAP_ADMIN_PHONE", raising=False)
+    assert bootstrap.main() == 2
+
+    monkeypatch.setenv("BOOTSTRAP_ADMIN_PHONE", "010-12345678")
+    assert bootstrap.main() == 1
+
+    with SessionLocal() as db:
+        count = db.execute(
+            select(func.count(UserAccount.id)).where(
+                UserAccount.email_normalized == "bootstrap@example.com"
+            )
+        ).scalar_one()
+        assert count == 0

@@ -108,6 +108,7 @@ def init_db() -> None:
 def _run_migrations(engine) -> None:
     """执行增量 DDL 迁移。适用于在已有表上加列等操作。"""
     migrations = [
+        "ALTER TABLE tenant_registration_requests ADD COLUMN IF NOT EXISTS review_note TEXT;",
         "ALTER TABLE rules ADD COLUMN IF NOT EXISTS defects JSONB NOT NULL DEFAULT '[]'::jsonb;",
         "ALTER TABLE rules ADD COLUMN IF NOT EXISTS structure JSONB;",
         # 批次 10：规则自描述（doc_type/check_category 降级为可选派生标签 + scope/intents/provenance）

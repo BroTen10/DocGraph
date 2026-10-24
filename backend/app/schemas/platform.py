@@ -18,6 +18,8 @@ class RegistrationReviewOut(BaseModel):
     status: str
     email_verified_at: datetime | None = None
     terms_accepted_at: datetime | None = None
+    review_note: str | None = None
+    rejection_reason: str | None = None
     created_at: datetime
 
 
