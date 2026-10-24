@@ -17,7 +17,7 @@ class Base(DeclarativeBase):
 
 
 engine = create_engine(
-    settings.pg_dsn,
+    settings.sqlalchemy_url,
     pool_pre_ping=True,
     pool_size=5,
     max_overflow=10,

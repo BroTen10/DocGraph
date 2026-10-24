@@ -3,7 +3,7 @@
 from functools import lru_cache
 from pathlib import Path
 
-from pydantic import field_validator
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -21,6 +21,10 @@ class Settings(BaseSettings):
     app_host: str = "0.0.0.0"
     app_port: int = 8000
     app_debug: bool = True
+    app_secret_key: str = ""
+    session_cookie_secure: bool = True
+    session_idle_minutes: int = Field(default=120, ge=5, le=1440)
+    session_absolute_hours: int = Field(default=12, ge=1, le=168)
     upload_root: str = "./uploads"
     max_file_size_mb: int = 50
     # CORS 白名单（逗号分隔的前端地址）。生产收紧为明确来源，不再允许 *；
@@ -37,6 +41,7 @@ class Settings(BaseSettings):
     db_reset_on_startup: bool = False
 
     # Postgres
+    database_url: str | None = None
     pg_host: str = "localhost"
     pg_port: int = 5432
     pg_db: str = "doc_review"
@@ -65,10 +70,27 @@ class Settings(BaseSettings):
     amount_tolerance_percent: float = 5.0
     weight_tolerance_kg: float = 0.5
 
+    # 邮件与对外链接
+    email_backend: str = "smtp"
+    public_base_url: str = "http://localhost:5173"
+    trust_proxy_headers: bool = False
+
     @field_validator("upload_root")
     @classmethod
     def _abs_upload_root(cls, v: str) -> str:
         return str(Path(v).resolve())
+
+    @model_validator(mode="after")
+    def _validate_security(self):
+        if not self.app_debug and len(self.app_secret_key) < 32:
+            raise ValueError("生产环境 APP_SECRET_KEY 至少 32 个字符")
+        if not self.app_debug and not self.session_cookie_secure:
+            raise ValueError("生产环境必须启用 Secure Cookie")
+        return self
+
+    @property
+    def sqlalchemy_url(self) -> str:
+        return self.database_url or self.pg_dsn
 
     @property
     def pg_dsn(self) -> str:

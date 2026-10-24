@@ -130,10 +130,30 @@ def _git_dir() -> Path | None:
         if dot.is_file():
             text = dot.read_text(encoding="utf-8", errors="replace").strip()
             if text.lower().startswith("gitdir:"):
-                return Path(text.split(":", 1)[1].strip())
+                value = text.split(":", 1)[1].strip()
+                path = Path(value)
+                return (
+                    path.resolve()
+                    if path.is_absolute()
+                    else (_REPO_ROOT / path).resolve()
+                )
     except OSError:
         return None
     return None
+
+
+def _git_ref_dir(git_dir: Path) -> Path:
+    """返回保存 refs/packed-refs 的目录；linked worktree 使用 commondir。"""
+    try:
+        value = (git_dir / "commondir").read_text(
+            encoding="utf-8", errors="replace"
+        ).strip()
+    except OSError:
+        return git_dir
+    if not value:
+        return git_dir
+    common = Path(value)
+    return common.resolve() if common.is_absolute() else (git_dir / common).resolve()
 
 
 def read_git_head() -> tuple[str | None, str | None]:
@@ -158,15 +178,18 @@ def read_git_head() -> tuple[str | None, str | None]:
 
     ref = head.split(":", 1)[1].strip()
     branch = ref.rsplit("/", 1)[-1] or None
+    ref_dir = _git_ref_dir(git_dir)
     sha: str | None = None
     try:
-        sha = _clean((git_dir / ref).read_text(encoding="utf-8", errors="replace"))
+        sha = _clean((ref_dir / ref).read_text(encoding="utf-8", errors="replace"))
     except OSError:
         sha = None
     if sha is None:
         # 引用可能被打包进 packed-refs（git gc 之后很常见）
         try:
-            for line in (git_dir / "packed-refs").read_text(encoding="utf-8", errors="replace").splitlines():
+            for line in (ref_dir / "packed-refs").read_text(
+                encoding="utf-8", errors="replace"
+            ).splitlines():
                 if line.startswith(("#", "^")):
                     continue
                 parts = line.split()
