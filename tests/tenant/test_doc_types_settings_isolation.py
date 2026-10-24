@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from conftest import authenticate
+import pytest
 from sqlalchemy import func, select
 
 from app.models import DocumentType, SystemSetting
@@ -136,3 +137,48 @@ def test_settings_list_only_returns_current_tenant_overrides(
     }
     assert values_a["review.amount_tolerance_percent"] == 9
     assert values_b["review.amount_tolerance_percent"] != 9
+
+
+@pytest.mark.parametrize("filename", ["../../escape.txt", r"..\..\escape.txt"])
+def test_sample_analysis_never_writes_outside_tenant_directory(
+    client,
+    admin_auth,
+    monkeypatch,
+    tmp_path,
+    filename,
+):
+    from app.config import settings
+
+    class FakeLlm:
+        def chat_json(self, **kwargs):
+            return {
+                "detected_name": "测试类型",
+                "description": "测试",
+                "key_fields": [],
+                "stamp_required": None,
+                "business_meaning": "测试",
+            }
+
+    monkeypatch.setattr(settings, "upload_root", str(tmp_path))
+    monkeypatch.setattr("app.llm_client.get_llm_client", lambda: FakeLlm())
+    headers = authenticate(client, admin_auth)
+
+    response = client.post(
+        "/api/doc-types/analyze-sample",
+        files={"file": (filename, b"safe sample content", "text/plain")},
+        headers=headers,
+    )
+
+    assert response.status_code == 200
+    assert [path for path in tmp_path.rglob("*") if path.is_file()] == []
+
+
+def test_setting_read_requires_tenant_identity_when_db_is_present(
+    migrated_db,
+):
+    with pytest.raises(ValueError, match="tenant_id"):
+        get_setting(
+            migrated_db,
+            None,
+            "review.amount_tolerance_percent",
+        )

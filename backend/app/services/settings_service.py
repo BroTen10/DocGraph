@@ -104,23 +104,22 @@ def _meta(key: str) -> dict:
 
 def get_setting(
     db: Optional[Session],
-    tenant_id: uuid.UUID | None,
+    tenant_id: uuid.UUID,
     key: str,
     default: Any = None,
 ) -> Any:
     """读取当前租户的单条设置；无覆盖值回退代码默认值。"""
-    if db is not None and tenant_id is not None:
-        try:
-            row = db.execute(
-                select(SystemSetting).where(
-                    SystemSetting.tenant_id == tenant_id,
-                    SystemSetting.key == key,
-                )
-            ).scalar_one_or_none()
-            if row is not None:
-                return row.value
-        except Exception:
-            logger.warning("读取租户系统设置失败（回退默认）: %s", key, exc_info=True)
+    if db is not None:
+        if tenant_id is None:
+            raise ValueError("读取系统设置时必须提供 tenant_id")
+        row = db.execute(
+            select(SystemSetting).where(
+                SystemSetting.tenant_id == tenant_id,
+                SystemSetting.key == key,
+            )
+        ).scalar_one_or_none()
+        if row is not None:
+            return row.value
     meta = _meta(key)
     if default is not None:
         return default
@@ -129,7 +128,7 @@ def get_setting(
 
 def get_prompt(
     db: Optional[Session],
-    tenant_id: uuid.UUID | None,
+    tenant_id: uuid.UUID,
     key: str,
 ) -> str:
     """读取当前租户的提示词模板（租户覆盖或内置默认）。"""

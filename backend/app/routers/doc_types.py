@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import logging
 import uuid
+from pathlib import Path
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
 from pydantic import BaseModel
@@ -385,6 +386,38 @@ def reject_doc_type(
 
 # ============ 样例文档分析端点 ============
 
+_SAMPLE_ANALYSIS_EXTENSIONS = {
+    ".pdf",
+    ".txt",
+    ".md",
+    ".docx",
+    ".png",
+    ".jpg",
+    ".jpeg",
+}
+
+
+def _safe_sample_upload_path(
+    tenant_id: uuid.UUID,
+    filename: str | None,
+) -> tuple[Path, str]:
+    """返回租户目录内的随机临时文件路径与可展示文件名。"""
+    normalized_name = (filename or "").replace("\\", "/").rsplit("/", 1)[-1]
+    extension = Path(normalized_name).suffix.lower()
+    if extension not in _SAMPLE_ANALYSIS_EXTENSIONS:
+        raise HTTPException(status_code=400, detail="暂不支持该样例文件类型")
+
+    from ..config import settings
+
+    upload_dir = (
+        Path(settings.upload_root) / str(tenant_id) / "_sample_analysis"
+    ).resolve()
+    upload_dir.mkdir(parents=True, exist_ok=True)
+    file_path = (upload_dir / f"{uuid.uuid4().hex}{extension}").resolve()
+    if file_path.parent != upload_dir:
+        raise HTTPException(status_code=400, detail="非法样例文件名")
+    return file_path, normalized_name
+
 
 @router.post("/analyze-sample", response_model=AnalyzeSampleResult)
 async def analyze_sample_document(
@@ -398,93 +431,90 @@ async def analyze_sample_document(
     流程：提取文档文本 → 调用 LLM 分析 → 返回结构化结果。
     用户可在前端确认或编辑后保存为新文档类型。
     """
-    import os
-    from ..config import settings
     from ..llm_client import get_llm_client, LLMError
 
-    # 保存上传文件
     assert ctx.tenant is not None
-    upload_dir = os.path.join(
-        settings.upload_root,
-        str(ctx.tenant.id),
-        "_sample_analysis",
+    file_path, display_name = _safe_sample_upload_path(
+        ctx.tenant.id,
+        file.filename,
     )
-    os.makedirs(upload_dir, exist_ok=True)
-    file_path = os.path.join(upload_dir, f"{uuid.uuid4().hex}_{file.filename}")
-
     content = await file.read()
-    with open(file_path, "wb") as f:
-        f.write(content)
-
-    # 提取文本（简单根据扩展名处理）
-    ext = os.path.splitext(file.filename or "")[1].lower()
-    text_content = ""
     try:
-        if ext == ".pdf":
-            try:
-                import PyPDF2
-                with open(file_path, "rb") as fh:
-                    reader = PyPDF2.PdfReader(fh)
-                    text_content = "\n".join(
-                        page.extract_text() or "" for page in reader.pages
-                    )
-            except ImportError:
-                text_content = "[PDF 文本提取需要 PyPDF2]"
-        elif ext in (".txt", ".md"):
-            text_content = content.decode("utf-8", errors="replace")[:8000]
-        elif ext == ".docx":
-            try:
-                from docx import Document as DocxDoc
-                docx = DocxDoc(file_path)
-                text_content = "\n".join(p.text for p in docx.paragraphs)
-            except ImportError:
-                text_content = "[DOCX 文本提取需要 python-docx]"
-        elif ext in (".png", ".jpg", ".jpeg"):
-            text_content = "[图片文件，需 OCR 处理]"
-        else:
-            text_content = content.decode("utf-8", errors="replace")[:8000]
-    except Exception as e:
-        logger.warning("文本提取失败: %s", e)
-        text_content = "[文本提取失败]"
+        file_path.write_bytes(content)
+        ext = file_path.suffix
+        text_content = ""
+        try:
+            if ext == ".pdf":
+                try:
+                    import PyPDF2
 
-    # 用 LLM 分析
-    from ..services.settings_service import get_prompt
-    llm = get_llm_client()
-    hint_text = f"（提示：该文档可能属于「{doc_type_hint}」类型）" if doc_type_hint else ""
+                    with file_path.open("rb") as fh:
+                        reader = PyPDF2.PdfReader(fh)
+                        text_content = "\n".join(
+                            page.extract_text() or "" for page in reader.pages
+                        )
+                except ImportError:
+                    text_content = "[PDF 文本提取需要 PyPDF2]"
+            elif ext in (".txt", ".md"):
+                text_content = content.decode("utf-8", errors="replace")[:8000]
+            elif ext == ".docx":
+                try:
+                    from docx import Document as DocxDoc
 
-    system_prompt = get_prompt(db, ctx.tenant.id, "doc_analyze.system")
-    user_prompt = get_prompt(db, ctx.tenant.id, "doc_analyze.user").format(
-        file_name=file.filename or "",
-        hint=hint_text,
-        text=text_content[:6000],
-    )
+                    docx = DocxDoc(file_path)
+                    text_content = "\n".join(p.text for p in docx.paragraphs)
+                except ImportError:
+                    text_content = "[DOCX 文本提取需要 python-docx]"
+            elif ext in (".png", ".jpg", ".jpeg"):
+                text_content = "[图片文件，需 OCR 处理]"
+        except Exception as e:
+            logger.warning("文本提取失败: %s", e)
+            text_content = "[文本提取失败]"
 
-    try:
-        resp = llm.chat_json(
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
-            ],
-            temperature=0.1,
-            max_tokens=4096,
+        from ..services.settings_service import get_prompt
+
+        llm = get_llm_client()
+        hint_text = (
+            f"（提示：该文档可能属于「{doc_type_hint}」类型）"
+            if doc_type_hint
+            else ""
         )
-    except (LLMError, ValueError) as e:
-        logger.error("样例文档分析失败: %s", e)
-        raise HTTPException(status_code=500, detail=f"AI 分析失败: {e}")
+        system_prompt = get_prompt(db, ctx.tenant.id, "doc_analyze.system")
+        user_prompt = get_prompt(db, ctx.tenant.id, "doc_analyze.user").format(
+            file_name=display_name,
+            hint=hint_text,
+            text=text_content[:6000],
+        )
 
-    result = AnalyzeSampleResult(
-        detected_name=resp.get("detected_name", "未知类型"),
-        description=resp.get("description", ""),
-        key_fields=resp.get("key_fields", []),
-        stamp_required=resp.get("stamp_required"),
-        business_meaning=resp.get("business_meaning", ""),
-    )
+        try:
+            resp = llm.chat_json(
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+                temperature=0.1,
+                max_tokens=4096,
+            )
+        except (LLMError, ValueError) as e:
+            logger.error("样例文档分析失败: %s", e)
+            raise HTTPException(status_code=500, detail=f"AI 分析失败: {e}")
 
-    logger.info(
-        "样例文档分析完成: %s → 推测类型=%s, 字段数=%d",
-        file.filename, result.detected_name, len(result.key_fields)
-    )
-    return result
+        result = AnalyzeSampleResult(
+            detected_name=resp.get("detected_name", "未知类型"),
+            description=resp.get("description", ""),
+            key_fields=resp.get("key_fields", []),
+            stamp_required=resp.get("stamp_required"),
+            business_meaning=resp.get("business_meaning", ""),
+        )
+        logger.info(
+            "样例文档分析完成: %s → 推测类型=%s, 字段数=%d",
+            display_name,
+            result.detected_name,
+            len(result.key_fields),
+        )
+        return result
+    finally:
+        file_path.unlink(missing_ok=True)
 
 
 # ============ 规则导入后检测新类型端点 ============
