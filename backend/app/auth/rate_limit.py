@@ -6,8 +6,12 @@ import threading
 import time
 from collections import deque
 from dataclasses import dataclass
+from ipaddress import ip_address
+from typing import Mapping
 
-from fastapi import HTTPException
+from fastapi import HTTPException, Request
+
+from ..config import settings
 
 
 @dataclass(frozen=True)
@@ -47,6 +51,52 @@ class SlidingWindowLimiter:
 
 _LOGIN_LIMITER = SlidingWindowLimiter(limit=10, window_seconds=60)
 _PUBLIC_ACTION_LIMITER = SlidingWindowLimiter(limit=5, window_seconds=60)
+
+
+def _valid_ip(value: str | None) -> str | None:
+    """Return the normalized address when ``value`` is a syntactically valid IP."""
+    if not value:
+        return None
+    candidate = value.strip()
+    try:
+        ip_address(candidate)
+    except ValueError:
+        return None
+    return candidate
+
+
+def resolve_client_ip(
+    peer_host: str | None,
+    headers: Mapping[str, str],
+    trust_proxy_headers: bool,
+) -> str | None:
+    """Resolve the effective client IP for rate limiting.
+
+    Proxy headers are only honored when the deployment explicitly trusts them.
+    This deployment keeps the backend port host-loopback-only behind nginx, so
+    untrusted direct clients cannot inject ``X-Real-IP``/``X-Forwarded-For``.
+    """
+    if trust_proxy_headers:
+        real_ip = _valid_ip(headers.get("x-real-ip"))
+        if real_ip is not None:
+            return real_ip
+        forwarded = headers.get("x-forwarded-for")
+        if forwarded:
+            for part in forwarded.split(","):
+                candidate = _valid_ip(part)
+                if candidate is not None:
+                    return candidate
+    return _valid_ip(peer_host)
+
+
+def client_ip(request: Request) -> str | None:
+    """Extract the rate-limit key IP from a request."""
+    peer_host = request.client.host if request.client is not None else None
+    return resolve_client_ip(
+        peer_host,
+        request.headers,
+        settings.trust_proxy_headers,
+    )
 
 
 def _client_key(ip: str | None) -> str:

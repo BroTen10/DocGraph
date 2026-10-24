@@ -16,6 +16,7 @@ from ..auth.session_tokens import (
 )
 from ..auth.permissions import permissions_for
 from ..auth.rate_limit import (
+    client_ip,
     enforce_login_rate,
     enforce_public_action_rate,
 )
@@ -91,7 +92,7 @@ def register_tenant(
     db: Session = Depends(get_db),
 ) -> RegisterResponse:
     """Submit a new tenant application and queue email verification."""
-    enforce_public_action_rate(request.client.host if request.client else None)
+    enforce_public_action_rate(client_ip(request))
     try:
         auth_service.register_tenant(db, payload)
     except EmailDeliveryError as exc:
@@ -125,7 +126,7 @@ def login(
     db: Session = Depends(get_db),
 ) -> LoginResponse:
     """Log a user in and create a revocable server-side session."""
-    ip = request.client.host if request.client is not None else None
+    ip = client_ip(request)
     enforce_login_rate(ip, payload.email)
     user_agent = request.headers.get("user-agent")
     try:
@@ -250,7 +251,7 @@ def forgot_password(
     db: Session = Depends(get_db),
 ) -> ForgotPasswordResponse:
     """Always return an accepted response to avoid account enumeration."""
-    enforce_public_action_rate(request.client.host if request.client else None)
+    enforce_public_action_rate(client_ip(request))
     auth_service.request_password_reset(db, payload.email)
     return ForgotPasswordResponse(message="如果该邮箱已注册，重置邮件已发送")
 
