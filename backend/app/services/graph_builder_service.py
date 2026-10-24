@@ -32,7 +32,7 @@ from sqlalchemy.orm import Session
 from ..config import settings
 from ..constants import CHECK_COMPLETENESS, CHECK_STAMP
 from ..llm_client import LLMError, get_llm_client
-from ..models import Rule, RuleSet, RuleSnapshot
+from ..models import Rule, RuleSnapshot
 from ..neo4j_client import Neo4jClient, get_neo4j_client
 from ..schemas.graph import (
     EdgeData,
@@ -42,7 +42,7 @@ from ..schemas.graph import (
     GraphEditOp,
     RuleGraphConvertResult,
 )
-from .rule_service import get_enabled_rules_for_snapshot
+from .rule_service import get_enabled_rules_for_snapshot, get_rule_set
 from .settings_service import get_prompt, get_setting
 
 logger = logging.getLogger(__name__)
@@ -387,6 +387,7 @@ def _rule_field_refs(rule: Rule) -> list[str]:
 
 def build_graph(
     db: Session,
+    tenant_id: uuid.UUID,
     rule_set_id: uuid.UUID,
     neo4j: Optional[Neo4jClient] = None,
     auto_confirm_all: bool = False,
@@ -404,12 +405,9 @@ def build_graph(
         progress_callback: 可选的进度回调函数 (stage: str, progress: int, message: str) -> None
     """
     neo4j = neo4j or get_neo4j_client()
-    rule_set = db.execute(
-        select(RuleSet).where(RuleSet.id == rule_set_id)
-    ).scalar_one_or_none()
+    rule_set = get_rule_set(db, tenant_id, rule_set_id)
     if rule_set is None:
         raise ValueError("规则集不存在")
-    tenant_id = rule_set.tenant_id
 
     def _report(stage: str, progress: int, message: str) -> None:
         if progress_callback:
@@ -420,7 +418,7 @@ def build_graph(
 
     # 1. 读取启用规则（按 rule_set_id 过滤）
     _report("读取启用规则", 5, "正在读取启用的规则")
-    rules = get_enabled_rules_for_snapshot(db, rule_set_id)
+    rules = get_enabled_rules_for_snapshot(db, tenant_id, rule_set_id)
     if not rules:
         raise ValueError("无已确认且已启用的规则，请先在规则管理中确认并启用规则")
 
@@ -621,16 +619,18 @@ def build_graph(
     )
     neo4j.write_rule_graph(
         graph_id=graph_id,
+        tenant_id=tenant_id,
         entities=[e.model_dump() for e in all_entities],
         relationships=[r.model_dump() for r in all_relationships],
     )
 
     # 5. 统计节点/关系数
-    graph_data = neo4j.get_graph_data(graph_id)
+    graph_data = neo4j.get_graph_data(graph_id, tenant_id)
 
     # 6. 保存规则快照（带 rule_set_id）
     _report("保存规则快照", 95, "正在保存规则快照")
     snapshot = RuleSnapshot(
+        tenant_id=tenant_id,
         rule_set_id=rule_set_id,
         snapshot_time=datetime.now(),
         rule_count=len(rules),
@@ -663,6 +663,7 @@ def build_graph(
         for gid in db.execute(
             select(RuleSnapshot.graph_id)
             .where(
+                RuleSnapshot.tenant_id == tenant_id,
                 RuleSnapshot.rule_set_id == rule_set_id,
                 RuleSnapshot.graph_id.isnot(None),
             )
@@ -671,7 +672,7 @@ def build_graph(
     ]
     for old_gid in old_graph_ids:
         try:
-            removed = neo4j.clear_graph(old_gid)
+            removed = neo4j.clear_graph(old_gid, tenant_id)
             logger.info("已清理旧图谱 %s（%d 节点）", old_gid, removed)
         except Exception as e:
             logger.warning("清理旧图谱 %s 失败: %s", old_gid, e)
@@ -688,15 +689,34 @@ def build_graph(
     )
 
 
-def get_graph(neo4j: Optional[Neo4jClient], graph_id: str) -> GraphData:
+def resolve_snapshot_for_graph(
+    db: Session,
+    tenant_id: uuid.UUID,
+    graph_id: str,
+) -> RuleSnapshot | None:
+    """Resolve graph ownership from PostgreSQL; graph_id never authorizes by itself."""
+    return db.execute(
+        select(RuleSnapshot).where(
+            RuleSnapshot.tenant_id == tenant_id,
+            RuleSnapshot.graph_id == graph_id,
+        )
+    ).scalar_one_or_none()
+
+
+def get_graph(
+    neo4j: Optional[Neo4jClient],
+    tenant_id: uuid.UUID,
+    graph_id: str,
+) -> GraphData:
     """获取图谱可视化数据。"""
     neo4j = neo4j or get_neo4j_client()
-    data = neo4j.get_graph_data(graph_id)
+    data = neo4j.get_graph_data(graph_id, tenant_id)
     return GraphData(**data)
 
 
 def apply_graph_edits(
     neo4j: Optional[Neo4jClient],
+    tenant_id: uuid.UUID,
     graph_id: str,
     edits: list[GraphEditOp],
 ) -> GraphData:
@@ -704,11 +724,63 @@ def apply_graph_edits(
     neo4j = neo4j or get_neo4j_client()
     for op in edits:
         if op.op == "update_node" and op.node_name:
-            neo4j.update_node_properties(graph_id, op.node_name, op.properties)
+            neo4j.update_node_properties(
+                graph_id, tenant_id, op.node_name, op.properties
+            )
         elif op.op == "update_edge" and op.source and op.target:
-            neo4j.update_edge_properties(graph_id, op.source, op.target, op.properties)
+            neo4j.update_edge_properties(
+                graph_id,
+                tenant_id,
+                op.source,
+                op.target,
+                op.properties,
+            )
         elif op.op == "delete_node" and op.node_name:
-            neo4j.delete_node(graph_id, op.node_name)
+            neo4j.delete_node(graph_id, tenant_id, op.node_name)
         elif op.op == "delete_edge" and op.source and op.target:
-            neo4j.delete_edge(graph_id, op.source, op.target)
-    return get_graph(neo4j, graph_id)
+            neo4j.delete_edge(
+                graph_id,
+                tenant_id,
+                op.source,
+                op.target,
+            )
+    return get_graph(neo4j, tenant_id, graph_id)
+
+
+def backfill_graph_tenant_ownership(
+    db: Session,
+    neo4j: Optional[Neo4jClient] = None,
+) -> dict[str, int]:
+    """Backfill legacy graph properties from tenant-owned PostgreSQL snapshots."""
+    neo4j = neo4j or get_neo4j_client()
+    snapshots = db.execute(
+        select(RuleSnapshot).where(RuleSnapshot.graph_id.isnot(None))
+    ).scalars().all()
+    nodes = 0
+    relationships = 0
+    known_graph_ids: set[str] = set()
+    for snapshot in snapshots:
+        graph_id = snapshot.graph_id
+        if not graph_id:
+            continue
+        known_graph_ids.add(graph_id)
+        result = neo4j.backfill_graph_tenant(graph_id, snapshot.tenant_id)
+        nodes += result["nodes"]
+        relationships += result["relationships"]
+
+    orphan_ids = [
+        graph_id
+        for graph_id in neo4j.list_unowned_graph_ids()
+        if graph_id not in known_graph_ids
+    ]
+    if orphan_ids:
+        logger.warning(
+            "发现 %d 个无法映射租户的孤儿图谱，已拒绝访问: %s",
+            len(orphan_ids),
+            ", ".join(orphan_ids[:20]),
+        )
+    return {
+        "nodes": nodes,
+        "relationships": relationships,
+        "orphan_graphs": len(orphan_ids),
+    }

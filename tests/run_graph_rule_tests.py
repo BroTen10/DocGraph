@@ -23,6 +23,7 @@ import os
 import sys
 import time
 import traceback
+import uuid
 
 # ---------- 环境准备：以 backend 为工作目录（读取 .env），并把 tests 加入 import 路径 ----------
 _TEST_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -32,8 +33,18 @@ sys.path.insert(0, _BACKEND_DIR)
 sys.path.insert(0, _TEST_DIR)
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
+from sqlalchemy import select  # noqa: E402
+
 from app.database import SessionLocal  # noqa: E402
-from app.models import Contract, Document, ReviewResult, ReviewTask, Rule, RuleSet  # noqa: E402
+from app.models import (  # noqa: E402
+    Contract,
+    Document,
+    ReviewResult,
+    ReviewTask,
+    Rule,
+    RuleSet,
+    Tenant,
+)
 from app.neo4j_client import get_neo4j_client  # noqa: E402
 from app.services.graph_builder_service import build_graph  # noqa: E402
 from app.services.graph_review_service import run_graph_review_with_contract  # noqa: E402
@@ -68,8 +79,9 @@ def _unique_name(prefix: str) -> str:
     return f"{prefix}-{time.strftime('%Y%m%d%H%M%S')}-{os.getpid()}"
 
 
-def create_rule_set(db, name: str) -> RuleSet:
+def create_rule_set(db, tenant_id, name: str) -> RuleSet:
     rs = RuleSet(
+        tenant_id=tenant_id,
         name=name,
         description="图谱规则自动测试",
         doc_types=[],
@@ -82,14 +94,15 @@ def create_rule_set(db, name: str) -> RuleSet:
     return rs
 
 
-def insert_rules(db, rule_set_id) -> None:
+def insert_rules(db, tenant_id, rule_set_id) -> None:
     """灌入测试规则（直接写库，跳过 LLM 解析；结构字段保证图谱确定性转换）。"""
     from app.services.rule_service import allocate_rule_no
 
     for spec in RULES:
         rule = Rule(
             rule_set_id=rule_set_id,
-            rule_no=allocate_rule_no(db, rule_set_id),
+            rule_no=allocate_rule_no(db, tenant_id, rule_set_id),
+            tenant_id=tenant_id,
             doc_type=spec["doc_type"],
             check_category=spec["check_category"],
             rule_text=spec["rule_text"],
@@ -105,9 +118,16 @@ def insert_rules(db, rule_set_id) -> None:
     db.commit()
 
 
-def create_contract_with_docs(db, rule_set_id, scenario, contract_no: str):
+def create_contract_with_docs(
+    db,
+    tenant_id,
+    rule_set_id,
+    scenario,
+    contract_no: str,
+):
     """创建合成合同 + 文档（ocr_status=done + extracted_fields 预设，跳过 OCR）。"""
     contract = Contract(
+        tenant_id=tenant_id,
         rule_set_id=rule_set_id,
         contract_no=contract_no,
         alias_list=[],
@@ -121,6 +141,7 @@ def create_contract_with_docs(db, rule_set_id, scenario, contract_no: str):
     docs: list[Document] = []
     for i, spec in enumerate(scenario["docs"]):
         d = Document(
+            tenant_id=tenant_id,
             contract_id=contract.id,
             file_name=f"{scenario['id']}_{i}_{spec['doc_type']}.pdf",
             file_path=f"synthetic://{scenario['id']}/{i}",
@@ -189,13 +210,25 @@ def assert_scenario_results(scenario, results) -> list[str]:
     return failures
 
 
-def run_scenario_checks(db, rule_set_id, snapshot_id, scenario) -> None:
+def run_scenario_checks(
+    db, tenant_id, rule_set_id, snapshot_id, scenario
+) -> None:
     """执行单个场景的图谱审查并断言。"""
     print(f"\n=== {scenario['id']} {scenario['name']} ===")
     contract, docs = create_contract_with_docs(
-        db, rule_set_id, scenario, contract_no=f"TEST-{scenario['id']}"
+        db,
+        tenant_id,
+        rule_set_id,
+        scenario,
+        contract_no=f"TEST-{scenario['id']}",
     )
-    results = run_graph_review_with_contract(db, contract, docs, snapshot_id=snapshot_id)
+    results = run_graph_review_with_contract(
+        db,
+        tenant_id,
+        contract,
+        docs,
+        snapshot_id=snapshot_id,
+    )
     failures = assert_scenario_results(scenario, results)
     if failures:
         for f in failures:
@@ -207,14 +240,20 @@ def run_scenario_checks(db, rule_set_id, snapshot_id, scenario) -> None:
 
 # ============ 完整审查链路集成（TC-07） ============
 
-def run_pipeline_integration(db, rule_set_id, snapshot_id, scenario) -> None:
+def run_pipeline_integration(
+    db, tenant_id, rule_set_id, snapshot_id, scenario
+) -> None:
     """走 review_service.start_review（含 snapshot）验证链路确实调用图谱规则。"""
     print(f"\n=== {scenario['id']} {scenario['name']} ===")
     from app.services import review_service
     import app.services.llm_review_service as llm_mod
 
     contract, docs = create_contract_with_docs(
-        db, rule_set_id, scenario, contract_no=f"TEST-{scenario['id']}"
+        db,
+        tenant_id,
+        rule_set_id,
+        scenario,
+        contract_no=f"TEST-{scenario['id']}",
     )
 
     # 测试规则全部有 structure.assertion，LLM 语义审查本身即为空；
@@ -226,7 +265,13 @@ def run_pipeline_integration(db, rule_set_id, snapshot_id, scenario) -> None:
     llm_mod.semantic_equivalence_fallback = lambda *a, **k: 0
     review_service.build_suggestion_llm = lambda *a, **k: "（自动化测试生成建议）"
     try:
-        task = review_service.start_review(db, contract.id, snapshot_id=snapshot_id)
+        task = review_service.start_review(
+            db,
+            tenant_id,
+            uuid.uuid4(),
+            contract.id,
+            snapshot_id=snapshot_id,
+        )
         deadline = time.time() + 120
         final = None
         while time.time() < deadline:
@@ -271,16 +316,20 @@ def run_pipeline_integration(db, rule_set_id, snapshot_id, scenario) -> None:
 
 # ============ 无图谱边界（TC-08） ============
 
-def run_negative_check(db) -> None:
+def run_negative_check(db, tenant_id) -> None:
     print(f"\n=== {NEGATIVE_SCENARIO['id']} {NEGATIVE_SCENARIO['name']} ===")
-    rs = create_rule_set(db, _unique_name("测试-无图谱边界"))
+    rs = create_rule_set(db, tenant_id, _unique_name("测试-无图谱边界"))
     try:
         scenario = {"id": "TC-08", "name": "neg", "docs": SCENARIOS[0]["docs"]}
         contract, docs = create_contract_with_docs(
-            db, rs.id, scenario, contract_no="TEST-TC-08"
+            db,
+            tenant_id,
+            rs.id,
+            scenario,
+            contract_no="TEST-TC-08",
         )
         try:
-            run_graph_review_with_contract(db, contract, docs)
+            run_graph_review_with_contract(db, tenant_id, contract, docs)
             check("TC-08 无快照时抛 ValueError", False, "未抛出异常，静默执行了审查")
         except ValueError:
             check("TC-08 无快照时抛 ValueError", True)
@@ -293,11 +342,11 @@ def run_negative_check(db) -> None:
 
 # ============ 清理 ============
 
-def cleanup(db, rule_set_id, graph_id) -> None:
+def cleanup(db, tenant_id, rule_set_id, graph_id) -> None:
     """删除测试规则集（PG 级联清理规则/快照/合同/任务/结果）+ 清除 Neo4j 图谱。"""
     if graph_id:
         try:
-            removed = get_neo4j_client().clear_graph(graph_id)
+            removed = get_neo4j_client().clear_graph(graph_id, tenant_id)
             print(f"  已清理 Neo4j 测试图谱 {graph_id}（剩余节点 {removed}）")
         except Exception:
             print("  Neo4j 测试图谱清理失败（不影响 PG 清理）")
@@ -315,20 +364,30 @@ def main() -> int:
     db = SessionLocal()
     rule_set_id = None
     graph_id = None
+    default_tenant = db.execute(
+        select(Tenant).where(Tenant.code == "default")
+    ).scalar_one()
+    tenant_id = default_tenant.id
     try:
         print("=" * 72)
         print("图谱规则自动测试：最简测试集")
         print("=" * 72)
 
         # 1. 规则集 + 规则
-        rs = create_rule_set(db, _unique_name("测试-图谱规则"))
+        rs = create_rule_set(db, tenant_id, _unique_name("测试-图谱规则"))
         rule_set_id = rs.id
-        insert_rules(db, rule_set_id)
+        insert_rules(db, tenant_id, rule_set_id)
         check("创建测试规则集并灌入 4 条结构化规则", True)
 
         # 2. 构建图谱（程序化转换，不调 LLM）
         print("\n--- 构建规则图谱 ---")
-        resp = build_graph(db, rule_set_id, auto_confirm_all=True, operator="auto-test")
+        resp = build_graph(
+            db,
+            tenant_id,
+            rule_set_id,
+            auto_confirm_all=True,
+            operator="auto-test",
+        )
         graph_id = resp.graph_id
         snapshot_id = resp.snapshot_id
         print(f"  graph_id={graph_id} snapshot_id={snapshot_id}")
@@ -338,9 +397,9 @@ def main() -> int:
         # 3. 校验图谱内容：三类关系正确写入
         print("\n--- 校验图谱内容（三类关系） ---")
         neo4j = get_neo4j_client()
-        required = neo4j.get_required_docs(graph_id)
-        stamp = neo4j.get_stamp_requirements(graph_id)
-        compares = neo4j.get_compare_relationships(graph_id)
+        required = neo4j.get_required_docs(graph_id, tenant_id)
+        stamp = neo4j.get_stamp_requirements(graph_id, tenant_id)
+        compares = neo4j.get_compare_relationships(graph_id, tenant_id)
         check(
             "REQUIRED 关系包含 出口报关单",
             any(rec.get("target") == "出口报关单" for rec in required),
@@ -362,13 +421,19 @@ def main() -> int:
         # 4. 逐场景执行图谱审查
         print("\n--- 图谱规则审查场景 ---")
         for scenario in SCENARIOS:
-            run_scenario_checks(db, rule_set_id, snapshot_id, scenario)
+            run_scenario_checks(db, tenant_id, rule_set_id, snapshot_id, scenario)
 
         # 5. 完整链路集成
-        run_pipeline_integration(db, rule_set_id, snapshot_id, PIPELINE_SCENARIO)
+        run_pipeline_integration(
+            db,
+            tenant_id,
+            rule_set_id,
+            snapshot_id,
+            PIPELINE_SCENARIO,
+        )
 
         # 6. 无图谱边界
-        run_negative_check(db)
+        run_negative_check(db, tenant_id)
 
     except Exception as e:
         _FAIL += 1
@@ -377,7 +442,7 @@ def main() -> int:
     finally:
         print("\n--- 清理 ---")
         if rule_set_id:
-            cleanup(db, rule_set_id, graph_id)
+            cleanup(db, tenant_id, rule_set_id, graph_id)
         db.close()
 
     print("\n" + "=" * 72)

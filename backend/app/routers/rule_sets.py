@@ -189,7 +189,7 @@ def delete_rule_set(
         neo4j = get_neo4j_client()
         for gid in graph_ids:
             try:
-                neo4j.clear_graph(gid)
+                neo4j.clear_graph(gid, ctx.tenant.id)
                 graphs_cleared += 1
             except Exception:
                 logger.exception("清理规则集 %s 的图谱 %s 失败", rs.id, gid)

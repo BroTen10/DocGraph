@@ -69,6 +69,7 @@ async def lifespan(app: FastAPI):
     # 3. 回收上一个进程遗留的 OCR 任务：OCR 跑在进程内后台线程，进程退出后
     #    任务行会永久停在 running/pending，导致前端一直显示"识别中"并禁用按钮
     from .database import SessionLocal
+    from .services.graph_builder_service import backfill_graph_tenant_ownership
     from .services.ocr_task_service import reconcile_stale_tasks, set_process_start
     from .services.review_service import (
         reconcile_stale_review_tasks,
@@ -79,6 +80,16 @@ async def lifespan(app: FastAPI):
     try:
         set_process_start(_db)
         set_review_process_start(_db)
+        try:
+            graph_migration = backfill_graph_tenant_ownership(_db)
+            logger.info(
+                "Neo4j 旧图谱租户回填完成：%d 节点 / %d 关系，孤儿图谱 %d",
+                graph_migration["nodes"],
+                graph_migration["relationships"],
+                graph_migration["orphan_graphs"],
+            )
+        except Exception:
+            logger.exception("Neo4j 旧图谱租户回填失败，旧图暂不可访问")
         stale = reconcile_stale_tasks(_db, force_all=True)
         if stale:
             logger.warning("启动时回收 %d 个中断的 OCR 任务", stale)

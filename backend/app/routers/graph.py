@@ -64,14 +64,20 @@ class BuildTaskStatus(BaseModel):
 def build_graph_async(
     rule_set_id: uuid.UUID = Query(..., description="规则集 ID"),
     auto_confirm_all: bool = False,
-    operator: str = "system",
+    db: Session = Depends(get_db),
+    ctx: AuthContext = Depends(require_permission("graph.manage")),
 ) -> AsyncBuildResponse:
     """异步启动图谱构建（后台线程执行），返回 task_id 用于轮询进度。
 
     适合规则较多、LLM 调用耗时较长的场景。
     rule_set_id 用于按规则集隔离规则与快照。
     """
+    if rule_service.get_rule_set(db, ctx.tenant.id, rule_set_id) is None:
+        raise HTTPException(status_code=404, detail="规则集不存在")
+    operator = f"{ctx.user.name} <{ctx.user.id}>"
     task_id = graph_build_progress.start_async_build(
+        tenant_id=ctx.tenant.id,
+        user_id=ctx.user.id,
         rule_set_id=str(rule_set_id),
         operator=operator,
         auto_confirm_all=auto_confirm_all,
@@ -80,18 +86,24 @@ def build_graph_async(
 
 
 @router.get("/build-graph-status/{task_id}", response_model=BuildTaskStatus)
-def get_build_status(task_id: str) -> BuildTaskStatus:
+def get_build_status(
+    task_id: str,
+    ctx: AuthContext = Depends(require_permission("graph.view")),
+) -> BuildTaskStatus:
     """查询异步图谱构建任务进度。"""
-    state = graph_build_progress.get_build_task(task_id)
+    state = graph_build_progress.get_build_task(task_id, ctx.tenant.id)
     if state is None:
         raise HTTPException(status_code=404, detail="构建任务不存在")
     return BuildTaskStatus(**state.to_dict())
 
 
 @router.get("/build-graph-tasks", response_model=list[BuildTaskStatus])
-def list_build_tasks(limit: int = Query(default=20, ge=1, le=100)) -> list[BuildTaskStatus]:
+def list_build_tasks(
+    limit: int = Query(default=20, ge=1, le=100),
+    ctx: AuthContext = Depends(require_permission("graph.view")),
+) -> list[BuildTaskStatus]:
     """列出最近的图谱构建任务。"""
-    tasks = graph_build_progress.list_build_tasks(limit=limit)
+    tasks = graph_build_progress.list_build_tasks(ctx.tenant.id, limit=limit)
     return [BuildTaskStatus(**t) for t in tasks]
 
 
@@ -229,24 +241,54 @@ def get_latest_graph(
         raise HTTPException(status_code=404, detail=str(e)) from e
     if snap is None or not snap.graph_id:
         raise HTTPException(status_code=404, detail="暂无图谱，请先构建")
-    return graph_builder_service.get_graph(None, snap.graph_id)
+    return graph_builder_service.get_graph(None, ctx.tenant.id, snap.graph_id)
 
 
 @router.get("/graph/ontology")
-def get_graph_ontology(graph_id: str = Query(...)) -> dict:
+def get_graph_ontology(
+    graph_id: str = Query(...),
+    db: Session = Depends(get_db),
+    ctx: AuthContext = Depends(require_permission("graph.view")),
+) -> dict:
     """查询图谱本体层（批次 10 Phase D）：文档类型（含字段）、检查意图（含规则数）、规则清单。"""
-    return get_neo4j_client().get_ontology(graph_id)
+    snapshot = graph_builder_service.resolve_snapshot_for_graph(
+        db, ctx.tenant.id, graph_id
+    )
+    if snapshot is None:
+        raise HTTPException(status_code=404, detail="图谱不存在")
+    return get_neo4j_client().get_ontology(graph_id, ctx.tenant.id)
 
 
 @router.get("/graph/{graph_id}", response_model=GraphData)
-def get_graph(graph_id: str) -> GraphData:
+def get_graph(
+    graph_id: str,
+    db: Session = Depends(get_db),
+    ctx: AuthContext = Depends(require_permission("graph.view")),
+) -> GraphData:
     """查看指定图谱。"""
-    return graph_builder_service.get_graph(None, graph_id)
+    snapshot = graph_builder_service.resolve_snapshot_for_graph(
+        db, ctx.tenant.id, graph_id
+    )
+    if snapshot is None:
+        raise HTTPException(status_code=404, detail="图谱不存在")
+    return graph_builder_service.get_graph(None, ctx.tenant.id, graph_id)
 
 
 @router.put("/graph/confirm", response_model=GraphData)
 def confirm_graph(
-    payload: GraphConfirmRequest, db: Session = Depends(get_db)
+    payload: GraphConfirmRequest,
+    db: Session = Depends(get_db),
+    ctx: AuthContext = Depends(require_permission("graph.manage")),
 ) -> GraphData:
     """人工确认/编辑图谱后写入生效。"""
-    return graph_builder_service.apply_graph_edits(None, payload.graph_id, payload.edits)
+    snapshot = graph_builder_service.resolve_snapshot_for_graph(
+        db, ctx.tenant.id, payload.graph_id
+    )
+    if snapshot is None:
+        raise HTTPException(status_code=404, detail="图谱不存在")
+    return graph_builder_service.apply_graph_edits(
+        None,
+        ctx.tenant.id,
+        payload.graph_id,
+        payload.edits,
+    )

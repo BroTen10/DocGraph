@@ -30,6 +30,7 @@ from sqlalchemy.orm import Session
 
 from ..models import Contract, Document, ReviewResult, RuleSnapshot
 from ..neo4j_client import Neo4jClient, get_neo4j_client
+from ..tenant_scope import tenant_get
 from .contract_normalizer import extract_contract_numbers, normalize_contract_no
 from .doc_normalizer import (
     is_currency_field,
@@ -265,6 +266,7 @@ def _make_result_from_graph(
 
 def run_graph_review(
     db: Session,
+    tenant_id: uuid.UUID,
     contract: Contract,
     docs: list[Document],
     neo4j: Optional[Neo4jClient] = None,
@@ -285,13 +287,15 @@ def run_graph_review(
         ValueError: 没有可用图谱时抛出（调用方可 fallback）
     """
     neo4j = neo4j or get_neo4j_client()
+    if contract.tenant_id != tenant_id:
+        raise ValueError("合同不属于当前租户")
 
     # 1. 取快照的 graph_id：
     #    - 传入 snapshot_id 时优先使用（并校验属于当前规则集，防止跨规则集用错图）
     #    - 未传时按 contract.rule_set_id 取最新快照
     from sqlalchemy import select
     if snapshot_id is not None:
-        snapshot = db.get(RuleSnapshot, snapshot_id)
+        snapshot = tenant_get(db, RuleSnapshot, snapshot_id, tenant_id)
         if snapshot is None or not snapshot.graph_id:
             raise ValueError(f"图谱快照不存在或未构建: {snapshot_id}")
         if snapshot.rule_set_id != contract.rule_set_id:
@@ -299,7 +303,10 @@ def run_graph_review(
     else:
         stmt = (
             select(RuleSnapshot)
-            .where(RuleSnapshot.rule_set_id == contract.rule_set_id)
+            .where(
+                RuleSnapshot.tenant_id == tenant_id,
+                RuleSnapshot.rule_set_id == contract.rule_set_id,
+            )
             .order_by(RuleSnapshot.snapshot_time.desc())
             .limit(1)
         )
@@ -316,21 +323,21 @@ def run_graph_review(
 
     # 2. REQUIRED 关系 → 齐套性检查
     try:
-        required_rels = neo4j.get_required_docs(graph_id)
+        required_rels = neo4j.get_required_docs(graph_id, tenant_id)
         results.extend(_check_required_docs(required_rels, docs))
     except Exception as e:
         logger.error("齐套性图谱查询失败: %s", e, exc_info=True)
 
     # 3. MUST_STAMP 关系 → 印章检查
     try:
-        stamp_rels = neo4j.get_stamp_requirements(graph_id)
+        stamp_rels = neo4j.get_stamp_requirements(graph_id, tenant_id)
         results.extend(_check_stamp_requirements(stamp_rels, docs))
     except Exception as e:
         logger.error("印章图谱查询失败: %s", e, exc_info=True)
 
     # 4. COMPARE_TO 关系 → 字段比对（信息准确性 / 时间逻辑）
     try:
-        compare_rels = neo4j.get_compare_relationships(graph_id)
+        compare_rels = neo4j.get_compare_relationships(graph_id, tenant_id)
         results.extend(_check_compare_relationships(compare_rels, docs, contract))
     except Exception as e:
         logger.error("字段比对图谱查询失败: %s", e, exc_info=True)
@@ -1450,6 +1457,7 @@ def _aggregate_field(docs: list[Document], doc_type: str, field: str) -> tuple[O
 
 def run_graph_review_with_contract(
     db: Session,
+    tenant_id: uuid.UUID,
     contract: Contract,
     docs: list[Document],
     neo4j: Optional[Neo4jClient] = None,
@@ -1458,6 +1466,13 @@ def run_graph_review_with_contract(
     """与 run_graph_review 相同，但设置当前合同上下文供 _cmp_contains 使用。"""
     token = _current_contract_var.set(contract)
     try:
-        return run_graph_review(db, contract, docs, neo4j, snapshot_id=snapshot_id)
+        return run_graph_review(
+            db,
+            tenant_id,
+            contract,
+            docs,
+            neo4j,
+            snapshot_id=snapshot_id,
+        )
     finally:
         _current_contract_var.reset(token)

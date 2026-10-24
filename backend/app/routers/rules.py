@@ -115,7 +115,11 @@ def update_rule(
             snap = get_latest_snapshot(db, ctx.tenant.id, rule.rule_set_id)
             if snap and snap.graph_id:
                 neo4j = get_neo4j_client()
-                neo4j.remove_nodes_by_rule_id(snap.graph_id, str(rule_id))
+                neo4j.remove_nodes_by_rule_id(
+                    snap.graph_id,
+                    ctx.tenant.id,
+                    str(rule_id),
+                )
                 logger.info("规则 %s 已禁用，已从图谱 %s 中移除对应节点", rule_id, snap.graph_id)
         except Exception:
             logger.warning("规则禁用后同步图谱失败（不影响规则更新）", exc_info=True)

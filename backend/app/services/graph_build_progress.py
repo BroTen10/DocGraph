@@ -17,6 +17,7 @@ from typing import Any, Optional
 from sqlalchemy.orm import Session
 
 from ..database import SessionLocal
+from ..tenant_scope import bind_tenant
 from . import graph_builder_service
 
 logger = logging.getLogger(__name__)
@@ -34,11 +35,15 @@ class GraphBuildTaskState:
     def __init__(
         self,
         task_id: str,
+        tenant_id: str,
+        user_id: str,
         rule_set_id: str,
         operator: str,
         auto_confirm_all: bool,
     ):
         self.task_id = task_id
+        self.tenant_id = tenant_id
+        self.user_id = user_id
         self.rule_set_id: str = rule_set_id
         self.status: str = "running"  # running / completed / failed
         self.progress: int = 0  # 0-100
@@ -74,6 +79,8 @@ class GraphBuildTaskState:
         """序列化为可返回前端的字典。"""
         return {
             "task_id": self.task_id,
+            "tenant_id": self.tenant_id,
+            "user_id": self.user_id,
             "rule_set_id": self.rule_set_id,
             "status": self.status,
             "progress": self.progress,
@@ -94,17 +101,30 @@ class GraphBuildTaskState:
         }
 
 
-def get_build_task(task_id: str) -> Optional[GraphBuildTaskState]:
-    """查询构建任务进度。"""
+def get_build_task(
+    task_id: str,
+    tenant_id: str | uuid.UUID,
+) -> Optional[GraphBuildTaskState]:
+    """查询当前租户的构建任务进度。"""
     with _build_tasks_lock:
-        return _build_tasks.get(task_id)
+        task = _build_tasks.get(task_id)
+        if task is None or task.tenant_id != str(tenant_id):
+            return None
+        return task
 
 
-def list_build_tasks(limit: int = 20) -> list[dict[str, Any]]:
-    """列出最近的构建任务。"""
+def list_build_tasks(
+    tenant_id: str | uuid.UUID,
+    limit: int = 20,
+) -> list[dict[str, Any]]:
+    """列出最近且属于指定租户的构建任务。"""
     with _build_tasks_lock:
         tasks = sorted(
-            _build_tasks.values(),
+            [
+                task
+                for task in _build_tasks.values()
+                if task.tenant_id == str(tenant_id)
+            ],
             key=lambda t: t.started_at,
             reverse=True,
         )[:limit]
@@ -112,6 +132,8 @@ def list_build_tasks(limit: int = 20) -> list[dict[str, Any]]:
 
 
 def start_async_build(
+    tenant_id: str | uuid.UUID,
+    user_id: str | uuid.UUID,
     rule_set_id: str,
     operator: str = "system",
     auto_confirm_all: bool = False,
@@ -122,7 +144,14 @@ def start_async_build(
     rule_set_id 用于按规则集隔离规则与快照。
     """
     task_id = str(uuid.uuid4())
-    state = GraphBuildTaskState(task_id, rule_set_id, operator, auto_confirm_all)
+    state = GraphBuildTaskState(
+        task_id,
+        str(tenant_id),
+        str(user_id),
+        rule_set_id,
+        operator,
+        auto_confirm_all,
+    )
     with _build_tasks_lock:
         _build_tasks[task_id] = state
 
@@ -131,7 +160,13 @@ def start_async_build(
 
     thread = threading.Thread(
         target=_run_async_build,
-        args=(task_id, rule_set_id, operator, auto_confirm_all),
+        args=(
+            task_id,
+            str(tenant_id),
+            rule_set_id,
+            operator,
+            auto_confirm_all,
+        ),
         name=f"graph-build-{task_id}",
         daemon=True,
     )
@@ -160,16 +195,21 @@ def _cleanup_old_tasks(max_keep: int = 50) -> None:
 
 
 def _run_async_build(
-    task_id: str, rule_set_id: str, operator: str, auto_confirm_all: bool
+    task_id: str,
+    tenant_id: str,
+    rule_set_id: str,
+    operator: str,
+    auto_confirm_all: bool,
 ) -> None:
     """后台线程执行图谱构建。"""
-    state = get_build_task(task_id)
+    state = get_build_task(task_id, tenant_id)
     if state is None:
         logger.error("构建任务 %s 不存在", task_id)
         return
 
     db: Session = SessionLocal()
     try:
+        bind_tenant(db, uuid.UUID(tenant_id))
         state.progress = 3
         state.stage = "初始化"
         state.add_message("info", "开始", "开始图谱构建任务")
@@ -194,6 +234,7 @@ def _run_async_build(
         # 调用 build_graph（在后台线程中执行，传入 rule_set_id 与进度回调）
         result = graph_builder_service.build_graph(
             db=db,
+            tenant_id=uuid.UUID(tenant_id),
             rule_set_id=uuid.UUID(rule_set_id),
             auto_confirm_all=auto_confirm_all,
             operator=operator,
@@ -240,3 +281,25 @@ def _run_async_build(
         )
     finally:
         db.close()
+
+
+def create_state_for_test(
+    *,
+    tenant_id: str | uuid.UUID,
+    user_id: str | uuid.UUID = "test-user",
+    rule_set_id: str = "test-rule-set",
+    operator: str = "pytest",
+    auto_confirm_all: bool = True,
+) -> GraphBuildTaskState:
+    """Create a deterministic in-memory state for tenant-scope tests."""
+    state = GraphBuildTaskState(
+        task_id=str(uuid.uuid4()),
+        tenant_id=str(tenant_id),
+        user_id=str(user_id),
+        rule_set_id=rule_set_id,
+        operator=operator,
+        auto_confirm_all=auto_confirm_all,
+    )
+    with _build_tasks_lock:
+        _build_tasks[state.task_id] = state
+    return state

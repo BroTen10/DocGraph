@@ -334,7 +334,13 @@ def _run_review_pipeline(
     graph_used = False
     try:
         from .graph_review_service import run_graph_review_with_contract
-        results_from_graph = run_graph_review_with_contract(db, contract, docs, snapshot_id=snapshot_id)
+        results_from_graph = run_graph_review_with_contract(
+            db,
+            tenant_id,
+            contract,
+            docs,
+            snapshot_id=snapshot_id,
+        )
         if results_from_graph:
             graph_used = True
             logger.info("审查任务 %s: 使用图谱驱动，生成 %d 条结果", task.id, len(results_from_graph))
