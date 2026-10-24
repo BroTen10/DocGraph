@@ -50,9 +50,12 @@ def init_db() -> None:
     """
     # 导入所有模型以触发注册
     from .models import (
+        audit_log,      # noqa: F401
+        auth_session,   # noqa: F401
         contract,       # noqa: F401
         document,       # noqa: F401
         document_type,  # noqa: F401
+        identity,       # noqa: F401
         ocr_task,       # noqa: F401
         review_result,  # noqa: F401
         review_task,    # noqa: F401
