@@ -16,6 +16,8 @@ class Base(DeclarativeBase):
     """所有 ORM 模型的基类。"""
 
 
+from .tenant_scope import TenantAwareSession  # noqa: E402
+
 engine = create_engine(
     settings.sqlalchemy_url,
     pool_pre_ping=True,
@@ -24,7 +26,16 @@ engine = create_engine(
     echo=False,
 )
 
-SessionLocal = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)
+SessionLocal = sessionmaker(
+    bind=engine,
+    class_=TenantAwareSession,
+    autoflush=False,
+    expire_on_commit=False,
+)
+
+# 导入即注册 SQLAlchemy 租户过滤/写入保护事件；必须在任何业务查询前完成。
+from . import tenant_scope as _tenant_scope  # noqa: E402,F401
+from .tenant_scope import bind_tenant, tenant_get, tenant_select  # noqa: E402,F401
 
 
 def get_db() -> Generator[Session, None, None]:
