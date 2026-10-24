@@ -14,6 +14,7 @@ from ..auth.security import hash_password, new_token
 from ..auth.session_tokens import revoke_user_sessions
 from ..config import settings
 from ..models import (
+    AuditLog,
     TenantInvitation,
     TenantMembership,
     UserAccount,
@@ -50,7 +51,6 @@ def membership_to_dict(membership: TenantMembership, user: UserAccount) -> dict:
         "id": membership.id,
         "name": user.name,
         "email": user.email_normalized,
-        "phone": user.phone_e164,
         "phone_masked": _mask_phone(user.phone_e164),
         "role": membership.role,
         "status": membership.status,
@@ -318,3 +318,72 @@ def resend_invitation(
     db.commit()
     db.refresh(invitation)
     return invitation
+
+
+def reveal_member_phone(
+    db: Session,
+    actor_user_id: uuid.UUID,
+    tenant_id: uuid.UUID,
+    membership_id: uuid.UUID,
+    *,
+    ip: str | None = None,
+) -> str | None:
+    """Return one member phone and append a tenant-scoped access audit."""
+    row = db.execute(
+        select(TenantMembership, UserAccount)
+        .join(UserAccount, UserAccount.id == TenantMembership.user_id)
+        .where(
+            TenantMembership.tenant_id == tenant_id,
+            TenantMembership.id == membership_id,
+        )
+    ).first()
+    if row is None:
+        return None
+    membership, user = row
+    db.add(
+        AuditLog(
+            tenant_id=tenant_id,
+            actor_user_id=actor_user_id,
+            action="member.phone.reveal",
+            target_type="tenant_member",
+            target_id=membership.id,
+            result="success",
+            metadata_json={"field": "phone"},
+            ip=ip,
+        )
+    )
+    db.commit()
+    return user.phone_e164
+
+
+def reveal_invitation_phone(
+    db: Session,
+    actor_user_id: uuid.UUID,
+    tenant_id: uuid.UUID,
+    invitation_id: uuid.UUID,
+    *,
+    ip: str | None = None,
+) -> str | None:
+    """Return one invitation phone and append a tenant-scoped access audit."""
+    invitation = db.execute(
+        select(TenantInvitation).where(
+            TenantInvitation.tenant_id == tenant_id,
+            TenantInvitation.id == invitation_id,
+        )
+    ).scalar_one_or_none()
+    if invitation is None:
+        return None
+    db.add(
+        AuditLog(
+            tenant_id=tenant_id,
+            actor_user_id=actor_user_id,
+            action="invitation.phone.reveal",
+            target_type="tenant_invitation",
+            target_id=invitation.id,
+            result="success",
+            metadata_json={"field": "phone"},
+            ip=ip,
+        )
+    )
+    db.commit()
+    return invitation.phone_e164

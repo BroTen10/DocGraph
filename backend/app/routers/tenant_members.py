@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import uuid
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
 
@@ -15,7 +15,9 @@ from ..schemas.tenant import (
     InviteMemberRequest,
     MemberListResponse,
     MemberUpdateRequest,
+    RevealedPhoneResponse,
 )
+from ..auth.rate_limit import client_ip
 from ..services import tenant_member_service
 from ..services.email_service import EmailDeliveryError
 from ..services.tenant_member_service import MemberOperationError
@@ -29,6 +31,25 @@ def list_members(
     db: Session = Depends(get_db),
 ) -> MemberListResponse:
     return MemberListResponse(**tenant_member_service.list_members(db, ctx.tenant.id))
+
+
+@router.get("/{membership_id}/phone", response_model=RevealedPhoneResponse)
+def reveal_member_phone(
+    membership_id: uuid.UUID,
+    request: Request,
+    ctx: AuthContext = Depends(require_permission("members.read")),
+    db: Session = Depends(get_db),
+) -> RevealedPhoneResponse:
+    phone = tenant_member_service.reveal_member_phone(
+        db,
+        ctx.user.id,
+        ctx.tenant.id,
+        membership_id,
+        ip=client_ip(request),
+    )
+    if phone is None:
+        raise HTTPException(status_code=404, detail="成员不存在")
+    return RevealedPhoneResponse(phone=phone)
 
 
 @router.post("/invite", status_code=201, response_model=InvitationOut)
@@ -94,6 +115,25 @@ def resend_invitation(
     if invitation is None:
         raise HTTPException(status_code=404, detail="邀请不存在")
     return InvitationOut(**tenant_member_service.invitation_to_dict(invitation))
+
+
+@router.get("/invitations/{invitation_id}/phone", response_model=RevealedPhoneResponse)
+def reveal_invitation_phone(
+    invitation_id: uuid.UUID,
+    request: Request,
+    ctx: AuthContext = Depends(require_permission("members.read")),
+    db: Session = Depends(get_db),
+) -> RevealedPhoneResponse:
+    phone = tenant_member_service.reveal_invitation_phone(
+        db,
+        ctx.user.id,
+        ctx.tenant.id,
+        invitation_id,
+        ip=client_ip(request),
+    )
+    if phone is None:
+        raise HTTPException(status_code=404, detail="邀请不存在")
+    return RevealedPhoneResponse(phone=phone)
 
 
 @router.delete("/invitations/{invitation_id}", response_model=dict)

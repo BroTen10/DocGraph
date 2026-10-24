@@ -3,6 +3,10 @@
 from __future__ import annotations
 
 from conftest import authenticate
+from sqlalchemy import select
+
+from app.database import SessionLocal
+from app.models import AuditLog
 
 
 def _raw_token_from_invite(delivered: dict) -> str:
@@ -94,3 +98,70 @@ def test_member_list_is_tenant_scoped(client, admin_auth, admin_b):
     emails = {item["email"] for item in response.json()["members"]}
     assert admin_auth.email in emails
     assert admin_b.email not in emails
+    assert all("phone" not in item for item in response.json()["members"])
+
+
+def test_reveal_member_phone_is_scoped_and_audited(client, admin_auth, admin_b):
+    headers = authenticate(client, admin_auth)
+    response = client.get(
+        f"/api/tenant/members/{admin_auth.membership_id}/phone",
+        headers=headers,
+    )
+    assert response.status_code == 200
+    assert response.json()["phone"].startswith("+86")
+
+    with SessionLocal() as db:
+        audit = db.execute(
+            select(AuditLog)
+            .where(
+                AuditLog.tenant_id == admin_auth.tenant_id,
+                AuditLog.actor_user_id == admin_auth.user_id,
+                AuditLog.action == "member.phone.reveal",
+            )
+            .order_by(AuditLog.created_at.desc())
+        ).scalars().first()
+        assert audit is not None
+        assert str(audit.target_id) == str(admin_auth.membership_id)
+
+    headers = authenticate(client, admin_b)
+    assert client.get(
+        f"/api/tenant/members/{admin_auth.membership_id}/phone",
+        headers=headers,
+    ).status_code == 404
+
+
+def test_reveal_invitation_phone_is_audited(client, admin_auth, monkeypatch):
+    headers = authenticate(client, admin_auth)
+    monkeypatch.setattr(
+        "app.services.tenant_member_service.send_invitation_email",
+        lambda email, url: None,
+    )
+    invited = client.post(
+        "/api/tenant/members/invite",
+        json={
+            "name": "赵六",
+            "email": "zhao@example.com",
+            "phone": "13700137000",
+            "role": "viewer",
+        },
+        headers=headers,
+    )
+    assert invited.status_code == 201
+    invitation_id = invited.json()["id"]
+    assert "phone" not in invited.json()
+
+    revealed = client.get(
+        f"/api/tenant/members/invitations/{invitation_id}/phone",
+        headers=headers,
+    )
+    assert revealed.status_code == 200
+    assert revealed.json()["phone"] == "+8613700137000"
+
+    with SessionLocal() as db:
+        audit = db.execute(
+            select(AuditLog).where(
+                AuditLog.tenant_id == admin_auth.tenant_id,
+                AuditLog.action == "invitation.phone.reveal",
+            )
+        ).scalars().first()
+        assert audit is not None

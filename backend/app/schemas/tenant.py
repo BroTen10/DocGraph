@@ -72,7 +72,6 @@ class MemberOut(BaseModel):
     id: UUID
     name: str
     email: str
-    phone: str
     phone_masked: str
     role: str
     status: str
@@ -101,3 +100,7 @@ class MemberListResponse(BaseModel):
 
 class AcceptInviteResponse(BaseModel):
     message: str
+
+
+class RevealedPhoneResponse(BaseModel):
+    phone: str

@@ -81,7 +81,6 @@ export interface Member {
   id: string
   name: string
   email: string
-  phone: string
   phone_masked: string
   role: TenantRole
   status: 'active' | 'disabled'
@@ -116,6 +115,10 @@ export interface InviteMemberRequest {
 export interface MemberUpdateRequest {
   role?: TenantRole
   status?: 'active' | 'disabled'
+}
+
+export interface RevealedPhoneResponse {
+  phone: string
 }
 
 export interface RegistrationReview {

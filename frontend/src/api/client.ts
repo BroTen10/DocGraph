@@ -34,6 +34,7 @@ import type {
   RegisterTenantRequest,
   RegisterTenantResponse,
   RegistrationListResponse,
+  RevealedPhoneResponse,
   ResetPasswordResponse,
   ReviewActionResponse,
   ReviewResultByDoc,
@@ -250,9 +251,17 @@ export const tenantMembersApi = {
     http.post<Invitation>('/tenant/members/invite', data).then((r) => r.data),
   update: (membershipId: string, data: MemberUpdateRequest) =>
     http.patch<Member>(`/tenant/members/${membershipId}`, data).then((r) => r.data),
+  revealPhone: (membershipId: string) =>
+    http
+      .get<RevealedPhoneResponse>(`/tenant/members/${membershipId}/phone`)
+      .then((r) => r.data),
   resend: (invitationId: string) =>
     http
       .post<Invitation>(`/tenant/members/invitations/${invitationId}/resend`)
+      .then((r) => r.data),
+  revealInvitationPhone: (invitationId: string) =>
+    http
+      .get<RevealedPhoneResponse>(`/tenant/members/invitations/${invitationId}/phone`)
       .then((r) => r.data),
   revoke: (invitationId: string) =>
     http
