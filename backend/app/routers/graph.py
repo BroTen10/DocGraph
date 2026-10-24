@@ -286,9 +286,12 @@ def confirm_graph(
     )
     if snapshot is None:
         raise HTTPException(status_code=404, detail="图谱不存在")
-    return graph_builder_service.apply_graph_edits(
-        None,
-        ctx.tenant.id,
-        payload.graph_id,
-        payload.edits,
-    )
+    try:
+        return graph_builder_service.apply_graph_edits(
+            None,
+            ctx.tenant.id,
+            payload.graph_id,
+            payload.edits,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc

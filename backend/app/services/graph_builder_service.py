@@ -47,6 +47,63 @@ from .settings_service import get_prompt, get_setting
 
 logger = logging.getLogger(__name__)
 
+RESERVED_GRAPH_IDENTITY_PROPERTIES = frozenset(
+    {"name", "graph_id", "tenant_id", "source", "target", "type", "id"}
+)
+NODE_EDITABLE_PROPERTIES = frozenset(
+    {
+        "description",
+        "rule_text",
+        "display_name",
+        "business_meaning",
+        "stamp_required",
+        "status",
+        "category",
+        "is_required",
+        "priority",
+        "layer",
+        "low_confidence",
+        "confidence",
+        "tolerance",
+        "tolerance_params",
+        "role",
+        "currency",
+        "unit",
+        "aggregate",
+        "doc_type",
+        "check_category",
+        "rule_id",
+        "operator",
+        "condition",
+        "exceptions",
+        "key_fields",
+        "intents",
+    }
+)
+EDGE_EDITABLE_PROPERTIES = frozenset(
+    {
+        "rule_id",
+        "rule_text",
+        "doc_type",
+        "check_category",
+        "operator",
+        "tolerance",
+        "tolerance_params",
+        "condition",
+        "exceptions",
+        "layer",
+        "low_confidence",
+        "confidence",
+        "aggregate",
+        "currency",
+        "unit",
+        "role",
+    }
+)
+SUPPORTED_GRAPH_EDIT_OPS = frozenset(
+    {"update_node", "update_edge", "delete_node", "delete_edge"}
+)
+
 
 # ============ LLM 提示词 ============
 _SYSTEM_PROMPT = """你是规则图谱构建助手。任务：把自然语言审查规则转换为知识图谱的结构化表示。
@@ -722,10 +779,46 @@ def apply_graph_edits(
 ) -> GraphData:
     """应用人工编辑（确认生效）。"""
     neo4j = neo4j or get_neo4j_client()
+    planned: list[tuple[GraphEditOp, dict]] = []
     for op in edits:
+        if op.op not in SUPPORTED_GRAPH_EDIT_OPS:
+            raise ValueError(f"不支持的图谱编辑操作: {op.op}")
+
+        if op.op in {"update_node", "update_edge"}:
+            reserved = sorted(
+                RESERVED_GRAPH_IDENTITY_PROPERTIES.intersection(op.properties)
+            )
+            if reserved:
+                raise ValueError(
+                    "图谱身份字段不可编辑: " + ", ".join(reserved)
+                )
+            allowed = (
+                NODE_EDITABLE_PROPERTIES
+                if op.op == "update_node"
+                else EDGE_EDITABLE_PROPERTIES
+            )
+            unknown = sorted(set(op.properties).difference(allowed))
+            if unknown:
+                raise ValueError(
+                    "图谱属性不在可编辑白名单中: " + ", ".join(unknown)
+                )
+        elif op.properties:
+            raise ValueError("删除操作不接受 properties")
+
+        if op.op == "update_node" and not op.node_name:
+            raise ValueError("update_node 缺少 node_name")
+        if op.op in {"update_edge", "delete_edge"} and (
+            not op.source or not op.target
+        ):
+            raise ValueError(f"{op.op} 缺少 source 或 target")
+        if op.op == "delete_node" and not op.node_name:
+            raise ValueError("delete_node 缺少 node_name")
+        planned.append((op, dict(op.properties)))
+
+    for op, properties in planned:
         if op.op == "update_node" and op.node_name:
             neo4j.update_node_properties(
-                graph_id, tenant_id, op.node_name, op.properties
+                graph_id, tenant_id, op.node_name, properties
             )
         elif op.op == "update_edge" and op.source and op.target:
             neo4j.update_edge_properties(
@@ -733,7 +826,7 @@ def apply_graph_edits(
                 tenant_id,
                 op.source,
                 op.target,
-                op.properties,
+                properties,
             )
         elif op.op == "delete_node" and op.node_name:
             neo4j.delete_node(graph_id, tenant_id, op.node_name)

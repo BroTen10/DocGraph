@@ -34,6 +34,30 @@ import dayjs from 'dayjs'
 
 const { Text, Paragraph } = Typography
 
+const GRAPH_NODE_EDITABLE_PROPERTIES = new Set([
+  'description', 'rule_text', 'display_name', 'business_meaning',
+  'stamp_required', 'status', 'category', 'is_required', 'priority', 'layer',
+  'low_confidence', 'confidence', 'tolerance', 'tolerance_params', 'role',
+  'currency', 'unit', 'aggregate', 'doc_type', 'check_category', 'rule_id',
+  'operator', 'condition', 'exceptions', 'key_fields', 'intents',
+])
+const GRAPH_EDGE_EDITABLE_PROPERTIES = new Set([
+  'rule_id', 'rule_text', 'doc_type', 'check_category', 'operator',
+  'tolerance', 'tolerance_params', 'condition', 'exceptions', 'layer',
+  'low_confidence', 'confidence', 'aggregate', 'currency', 'unit', 'role',
+])
+
+function editableGraphProperties(
+  kind: 'node' | 'edge',
+  properties: Record<string, unknown>,
+): Record<string, unknown> {
+  const allowed =
+    kind === 'node' ? GRAPH_NODE_EDITABLE_PROPERTIES : GRAPH_EDGE_EDITABLE_PROPERTIES
+  return Object.fromEntries(
+    Object.entries(properties || {}).filter(([key]) => allowed.has(key)),
+  )
+}
+
 /** 构建任务状态颜色（antd Badge 预设状态色） */
 const BUILD_STATUS_COLOR: Record<string, NonNullable<BadgeProps['status']>> = {
   running: 'processing',
@@ -237,7 +261,11 @@ export default function GraphPage() {
     if (!node) return
     setEditTarget({ kind: 'node', name: nodeName })
     editForm.setFieldsValue({
-      properties_json: JSON.stringify(node.properties || {}, null, 2),
+      properties_json: JSON.stringify(
+        editableGraphProperties('node', node.properties),
+        null,
+        2,
+      ),
     })
     setEditOpen(true)
   }
@@ -248,7 +276,11 @@ export default function GraphPage() {
     setSelectedEdge(edge)
     setEditTarget({ kind: 'edge', source, target })
     editForm.setFieldsValue({
-      properties_json: JSON.stringify(edge.properties || {}, null, 2),
+      properties_json: JSON.stringify(
+        editableGraphProperties('edge', edge.properties),
+        null,
+        2,
+      ),
     })
     setEditOpen(true)
   }
@@ -257,7 +289,17 @@ export default function GraphPage() {
     if (!graph || !editTarget) return
     try {
       const values = await editForm.validateFields()
-      const props = JSON.parse(values.properties_json)
+      const parsed = JSON.parse(values.properties_json)
+      const allowed =
+        editTarget.kind === 'node'
+          ? GRAPH_NODE_EDITABLE_PROPERTIES
+          : GRAPH_EDGE_EDITABLE_PROPERTIES
+      const invalidKeys = Object.keys(parsed).filter((key) => !allowed.has(key))
+      if (invalidKeys.length > 0) {
+        message.error(`不可编辑字段：${invalidKeys.join('、')}`)
+        return
+      }
+      const props = editableGraphProperties(editTarget.kind, parsed)
       const op =
         editTarget.kind === 'node'
           ? { op: 'update_node', node_name: editTarget.name, properties: props }

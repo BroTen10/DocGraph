@@ -4,7 +4,7 @@ import uuid
 
 from app.models import RuleSet, RuleSnapshot
 from app.neo4j_client import get_neo4j_client
-from app.services import graph_build_progress
+from app.services import graph_builder_service, graph_build_progress
 from app.services.graph_builder_service import backfill_graph_tenant_ownership
 
 from conftest import authenticate
@@ -193,3 +193,174 @@ def test_startup_ownership_backfill_uses_snapshot_tenant(
         ] == ["迁移节点"]
     finally:
         neo4j.clear_graph(snapshot.graph_id, admin_auth.tenant_id)
+
+
+def test_graph_edit_rejects_identity_and_unknown_properties(
+    client,
+    migrated_db,
+    admin_auth,
+):
+    _, snapshot = _create_snapshot(migrated_db, admin_auth.tenant_id)
+    neo4j = _write_graph(migrated_db, snapshot, admin_auth.tenant_id)
+    headers = authenticate(client, admin_auth)
+    try:
+        identity_edit = client.put(
+            "/api/rules/graph/confirm",
+            json={
+                "graph_id": snapshot.graph_id,
+                "edits": [
+                    {
+                        "op": "update_node",
+                        "node_name": "测试合同号",
+                        "properties": {"tenant_id": str(uuid.uuid4())},
+                    }
+                ],
+            },
+            headers=headers,
+        )
+        assert identity_edit.status_code == 400
+
+        unknown_edit = client.put(
+            "/api/rules/graph/confirm",
+            json={
+                "graph_id": snapshot.graph_id,
+                "edits": [
+                    {
+                        "op": "update_edge",
+                        "source": "测试合同号",
+                        "target": "测试发票号",
+                        "properties": {"arbitrary_identity": "other"},
+                    }
+                ],
+            },
+            headers=headers,
+        )
+        assert unknown_edit.status_code == 400
+
+        allowed_edit = client.put(
+            "/api/rules/graph/confirm",
+            json={
+                "graph_id": snapshot.graph_id,
+                "edits": [
+                    {
+                        "op": "update_node",
+                        "node_name": "测试合同号",
+                        "properties": {"description": "人工确认说明"},
+                    }
+                ],
+            },
+            headers=headers,
+        )
+        assert allowed_edit.status_code == 200
+        node = next(
+            item
+            for item in allowed_edit.json()["nodes"]
+            if item["name"] == "测试合同号"
+        )
+        assert node["properties"]["description"] == "人工确认说明"
+        assert node["properties"]["tenant_id"] == str(admin_auth.tenant_id)
+        assert node["properties"]["graph_id"] == snapshot.graph_id
+    finally:
+        neo4j.clear_graph(snapshot.graph_id, admin_auth.tenant_id)
+
+
+def test_neo4j_property_update_strips_identity_fields():
+    tenant_a = uuid.uuid4()
+    tenant_b = uuid.uuid4()
+    graph_id = f"graph_identity_{uuid.uuid4().hex}"
+    neo4j = get_neo4j_client()
+    try:
+        neo4j.write_rule_graph(
+            graph_id,
+            tenant_a,
+            [
+                {"name": "保护节点", "type": "Field", "attributes": {}},
+                {"name": "目标节点", "type": "Field", "attributes": {}},
+            ],
+            [
+                {
+                    "source": "保护节点",
+                    "target": "目标节点",
+                    "type": "COMPARE_TO",
+                    "attributes": {"rule_id": "R0001", "operator": "等于"},
+                }
+            ],
+        )
+        neo4j.update_node_properties(
+            graph_id,
+            tenant_a,
+            "保护节点",
+            {
+                "tenant_id": str(tenant_b),
+                "graph_id": "other_graph",
+                "name": "renamed",
+                "description": "允许说明",
+            },
+        )
+        neo4j.update_edge_properties(
+            graph_id,
+            tenant_a,
+            "保护节点",
+            "目标节点",
+            {
+                "tenant_id": str(tenant_b),
+                "graph_id": "other_graph",
+                "rule_text": "允许更新说明",
+            },
+        )
+
+        tenant_a_graph = neo4j.get_graph_data(graph_id, tenant_a)
+        tenant_b_graph = neo4j.get_graph_data(graph_id, tenant_b)
+        node = next(
+            item for item in tenant_a_graph["nodes"] if item["name"] == "保护节点"
+        )
+        assert node["properties"]["tenant_id"] == str(tenant_a)
+        assert node["properties"]["graph_id"] == graph_id
+        assert node["properties"]["description"] == "允许说明"
+        assert tenant_b_graph["nodes"] == []
+        assert tenant_a_graph["edges"][0]["properties"]["tenant_id"] == str(tenant_a)
+        assert tenant_a_graph["edges"][0]["properties"]["graph_id"] == graph_id
+        assert (
+            tenant_a_graph["edges"][0]["properties"]["rule_text"]
+            == "允许更新说明"
+        )
+    finally:
+        neo4j.clear_graph(graph_id, tenant_a)
+        neo4j.clear_graph(graph_id, tenant_b)
+
+
+def test_apply_graph_edits_rejects_reserved_properties_directly():
+    class StubNeo4j:
+        def __init__(self):
+            self.updated = False
+
+        def update_node_properties(self, *_args, **_kwargs):
+            self.updated = True
+
+        def get_graph_data(self, *_args, **_kwargs):
+            return {
+                "graph_id": "g1",
+                "nodes": [],
+                "edges": [],
+                "node_count": 0,
+                "edge_count": 0,
+            }
+
+    stub = StubNeo4j()
+    edit = graph_builder_service.GraphEditOp(
+        op="update_node",
+        node_name="节点",
+        properties={"graph_id": "attacker"},
+    )
+    try:
+        graph_builder_service.apply_graph_edits(
+            stub,
+            uuid.uuid4(),
+            "g1",
+            [edit],
+        )
+    except ValueError as exc:
+        assert "graph_id" in str(exc)
+    else:
+        raise AssertionError("reserved graph identity must be rejected")
+    assert stub.updated is False

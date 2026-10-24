@@ -22,6 +22,10 @@ logger = logging.getLogger(__name__)
 _global_driver: Optional["Neo4jClient"] = None
 _global_lock = threading.Lock()
 
+_RESERVED_GRAPH_IDENTITY_PROPERTIES = frozenset(
+    {"name", "graph_id", "tenant_id", "source", "target", "type", "id"}
+)
+
 
 class Neo4jClient:
     """Neo4j 连接池管理与查询执行。"""
@@ -343,6 +347,13 @@ class Neo4jClient:
         node_name: str,
         properties: dict,
     ) -> None:
+        safe_properties = {
+            key: value
+            for key, value in properties.items()
+            if key not in _RESERVED_GRAPH_IDENTITY_PROPERTIES
+        }
+        if not safe_properties:
+            return
         self.execute_write(
             "MATCH (n:RuleEntity {name: $name, graph_id: $graph_id, tenant_id: $tenant_id}) "
             "SET n += $props",
@@ -350,7 +361,7 @@ class Neo4jClient:
                 "name": node_name,
                 "graph_id": graph_id,
                 "tenant_id": str(tenant_id),
-                "props": self._sanitize_props(properties),
+                "props": self._sanitize_props(safe_properties),
             },
         )
 
@@ -362,6 +373,13 @@ class Neo4jClient:
         target: str,
         properties: dict,
     ) -> None:
+        safe_properties = {
+            key: value
+            for key, value in properties.items()
+            if key not in _RESERVED_GRAPH_IDENTITY_PROPERTIES
+        }
+        if not safe_properties:
+            return
         self.execute_write(
             "MATCH (a:RuleEntity {name: $src, graph_id: $graph_id, tenant_id: $tenant_id})"
             "-[r]->(b:RuleEntity {name: $tgt, graph_id: $graph_id, tenant_id: $tenant_id}) "
@@ -372,7 +390,7 @@ class Neo4jClient:
                 "tgt": target,
                 "graph_id": graph_id,
                 "tenant_id": str(tenant_id),
-                "props": self._sanitize_props(properties),
+                "props": self._sanitize_props(safe_properties),
             },
         )
 
@@ -451,6 +469,18 @@ class Neo4jClient:
     ) -> dict[str, int]:
         """只给旧图中尚无租户属性的节点/关系补租户归属。"""
         tenant = str(tenant_id)
+        conflicts = self.execute_read(
+            "MATCH (n:RuleEntity {graph_id: $graph_id}) "
+            "WHERE n.tenant_id IS NOT NULL AND n.tenant_id <> $tenant_id "
+            "RETURN count(DISTINCT n.tenant_id) AS cnt",
+            {"graph_id": graph_id, "tenant_id": tenant},
+        )
+        if conflicts and int(conflicts[0]["cnt"]) > 0:
+            logger.warning(
+                "图谱 %s 存在与快照租户冲突的节点归属，冲突租户数=%s",
+                graph_id,
+                conflicts[0]["cnt"],
+            )
         node_rows = self.execute_write(
             "MATCH (n:RuleEntity {graph_id: $graph_id}) "
             "WHERE n.tenant_id IS NULL "
