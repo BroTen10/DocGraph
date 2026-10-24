@@ -21,6 +21,7 @@ from app.models import (
     RuleSet,
     RuleSnapshot,
     SystemSetting,
+    TenantInvitation,
 )
 from app.neo4j_client import get_neo4j_client
 
@@ -339,6 +340,31 @@ def test_tenant_ab_full_resource_isolation(
         temp_root=tmp_path,
         tolerance=7.5,
     )
+    invitation_a = TenantInvitation(
+        tenant_id=admin_auth.tenant_id,
+        name="A租户邀请",
+        email_normalized="invite-a@example.com",
+        phone_e164="+8613800001001",
+        role="reviewer",
+        token_hash=uuid4().hex * 2,
+        status="invited",
+        expires_at=datetime.now() + timedelta(hours=72),
+        invited_by=admin_auth.user_id,
+    )
+    invitation_b = TenantInvitation(
+        tenant_id=admin_b.tenant_id,
+        name="B租户邀请",
+        email_normalized="invite-b@example.com",
+        phone_e164="+8613800001002",
+        role="reviewer",
+        token_hash=uuid4().hex * 2,
+        status="invited",
+        expires_at=datetime.now() + timedelta(hours=72),
+        invited_by=admin_b.user_id,
+    )
+    migrated_db.add_all([invitation_a, invitation_b])
+    migrated_db.commit()
+    assert admin_b.membership_id is not None
 
     neo4j = get_neo4j_client()
     graph_ids = [bundle_a.snapshot.graph_id, bundle_b.snapshot.graph_id]
@@ -362,6 +388,57 @@ def test_tenant_ab_full_resource_isolation(
         assert {item["id"] for item in rule_sets.json()} == {
             str(bundle_a.rule_set.id)
         }
+        contracts_a = client.get(
+            "/api/contracts",
+            params={"rule_set_id": str(bundle_a.rule_set.id)},
+        )
+        assert contracts_a.status_code == 200
+        assert {item["id"] for item in contracts_a.json()} == {
+            str(bundle_a.contract.id)
+        }
+        doc_types_a = client.get("/api/doc-types")
+        assert doc_types_a.status_code == 200
+        doc_type_ids_a = {
+            item["id"] for item in doc_types_a.json()["doc_types"]
+        }
+        assert str(bundle_a.doc_type.id) in doc_type_ids_a
+        assert str(bundle_b.doc_type.id) not in doc_type_ids_a
+        reviews_a = client.get(
+            "/api/reviews",
+            params={"rule_set_id": str(bundle_a.rule_set.id)},
+        )
+        assert reviews_a.status_code == 200
+        assert {item["id"] for item in reviews_a.json()} == {
+            str(bundle_a.review_task.id)
+        }
+        ocr_tasks_a = client.get(
+            "/api/ocr/tasks",
+            params={"rule_set_id": str(bundle_a.rule_set.id)},
+        )
+        assert ocr_tasks_a.status_code == 200
+        assert {item["id"] for item in ocr_tasks_a.json()} == {
+            str(bundle_a.ocr_task.id)
+        }
+        rules_a = client.get(
+            "/api/rules",
+            params={"rule_set_id": str(bundle_a.rule_set.id)},
+        )
+        assert rules_a.status_code == 200
+        assert {item["id"] for item in rules_a.json()} == {
+            str(bundle_a.rule.id)
+        }
+        members_a = client.get("/api/tenant/members")
+        assert members_a.status_code == 200
+        member_ids_a = {
+            item["id"] for item in members_a.json()["members"]
+        }
+        invitation_ids_a = {
+            item["id"] for item in members_a.json()["invitations"]
+        }
+        assert str(admin_auth.membership_id) in member_ids_a
+        assert str(admin_b.membership_id) not in member_ids_a
+        assert str(invitation_a.id) in invitation_ids_a
+        assert str(invitation_b.id) not in invitation_ids_a
         assert client.get(f"/api/contracts/{bundle_a.contract.id}").status_code == 200
         assert client.get(f"/api/doc-types/{bundle_a.doc_type.id}").status_code == 200
         assert client.get(f"/api/rules/snapshots/{bundle_a.snapshot.id}").status_code == 200
@@ -375,12 +452,35 @@ def test_tenant_ab_full_resource_isolation(
         assert client.get(
             f"/api/rules/graph/{bundle_a.snapshot.graph_id}"
         ).status_code == 200
+        graph_a = client.get(
+            f"/api/rules/graph/{bundle_a.snapshot.graph_id}"
+        ).json()
+        assert {node["name"] for node in graph_a["nodes"]} == {
+            "A最终验收节点"
+        }
 
         settings_a = client.get("/api/settings").json()["settings"]
         value_a = next(
             item["value"] for item in settings_a if item["key"] == SETTING_KEY
         )
         assert value_a == 2.5
+        settings_update = client.put(
+            "/api/settings",
+            json={
+                "items": [
+                    {"key": SETTING_KEY, "value": 3.25},
+                ]
+            },
+            headers=headers_a,
+        )
+        assert settings_update.status_code == 200
+        settings_a_updated = client.get("/api/settings").json()["settings"]
+        value_a_updated = next(
+            item["value"]
+            for item in settings_a_updated
+            if item["key"] == SETTING_KEY
+        )
+        assert value_a_updated == 3.25
 
         foreign_paths = [
             f"/api/rule-sets/{bundle_b.rule_set.id}",
@@ -424,6 +524,57 @@ def test_tenant_ab_full_resource_isolation(
         assert {item["id"] for item in rule_sets_b.json()} == {
             str(bundle_b.rule_set.id)
         }
+        contracts_b = client.get(
+            "/api/contracts",
+            params={"rule_set_id": str(bundle_b.rule_set.id)},
+        )
+        assert contracts_b.status_code == 200
+        assert {item["id"] for item in contracts_b.json()} == {
+            str(bundle_b.contract.id)
+        }
+        doc_types_b = client.get("/api/doc-types")
+        assert doc_types_b.status_code == 200
+        doc_type_ids_b = {
+            item["id"] for item in doc_types_b.json()["doc_types"]
+        }
+        assert str(bundle_b.doc_type.id) in doc_type_ids_b
+        assert str(bundle_a.doc_type.id) not in doc_type_ids_b
+        reviews_b = client.get(
+            "/api/reviews",
+            params={"rule_set_id": str(bundle_b.rule_set.id)},
+        )
+        assert reviews_b.status_code == 200
+        assert {item["id"] for item in reviews_b.json()} == {
+            str(bundle_b.review_task.id)
+        }
+        ocr_tasks_b = client.get(
+            "/api/ocr/tasks",
+            params={"rule_set_id": str(bundle_b.rule_set.id)},
+        )
+        assert ocr_tasks_b.status_code == 200
+        assert {item["id"] for item in ocr_tasks_b.json()} == {
+            str(bundle_b.ocr_task.id)
+        }
+        rules_b = client.get(
+            "/api/rules",
+            params={"rule_set_id": str(bundle_b.rule_set.id)},
+        )
+        assert rules_b.status_code == 200
+        assert {item["id"] for item in rules_b.json()} == {
+            str(bundle_b.rule.id)
+        }
+        members_b = client.get("/api/tenant/members")
+        assert members_b.status_code == 200
+        member_ids_b = {
+            item["id"] for item in members_b.json()["members"]
+        }
+        invitation_ids_b = {
+            item["id"] for item in members_b.json()["invitations"]
+        }
+        assert str(admin_b.membership_id) in member_ids_b
+        assert str(admin_auth.membership_id) not in member_ids_b
+        assert str(invitation_b.id) in invitation_ids_b
+        assert str(invitation_a.id) not in invitation_ids_b
         assert client.get(f"/api/contracts/{bundle_b.contract.id}").status_code == 200
         assert client.get(f"/api/doc-types/{bundle_b.doc_type.id}").status_code == 200
         assert client.get(f"/api/rules/snapshots/{bundle_b.snapshot.id}").status_code == 200
@@ -437,6 +588,12 @@ def test_tenant_ab_full_resource_isolation(
         assert client.get(
             f"/api/rules/graph/{bundle_b.snapshot.graph_id}"
         ).status_code == 200
+        graph_b = client.get(
+            f"/api/rules/graph/{bundle_b.snapshot.graph_id}"
+        ).json()
+        assert {node["name"] for node in graph_b["nodes"]} == {
+            "B最终验收节点"
+        }
 
         settings_b = client.get("/api/settings").json()["settings"]
         value_b = next(
