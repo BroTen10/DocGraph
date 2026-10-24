@@ -12,17 +12,22 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 
+from ..auth.dependencies import AuthContext, require_permission
 from ..database import get_db
 from ..models import RuleSet
 from ..schemas.rule_set import RuleSetCreate, RuleSetOut, RuleSetUpdate
+from ..tenant_scope import tenant_get
 
 router = APIRouter(prefix="/api/rule-sets", tags=["rule-sets"])
 
 
 @router.get("", response_model=list[RuleSetOut])
-def list_rule_sets(db: Session = Depends(get_db)) -> list[RuleSetOut]:
+def list_rule_sets(
+    ctx: AuthContext = Depends(require_permission("review.view")),
+    db: Session = Depends(get_db),
+) -> list[RuleSetOut]:
     """规则集列表（按创建时间倒序，默认规则集置顶）。"""
-    stmt = select(RuleSet).order_by(
+    stmt = select(RuleSet).where(RuleSet.tenant_id == ctx.tenant.id).order_by(
         RuleSet.is_default.desc(),
         RuleSet.created_at.desc(),
     )
@@ -32,21 +37,34 @@ def list_rule_sets(db: Session = Depends(get_db)) -> list[RuleSetOut]:
 
 @router.post("", response_model=RuleSetOut, status_code=201)
 def create_rule_set(
-    payload: RuleSetCreate, db: Session = Depends(get_db)
+    payload: RuleSetCreate,
+    ctx: AuthContext = Depends(require_permission("rules.manage")),
+    db: Session = Depends(get_db),
 ) -> RuleSetOut:
     """创建规则集。"""
     # 名称唯一性校验
     existing = db.execute(
-        select(RuleSet).where(RuleSet.name == payload.name)
+        select(RuleSet).where(
+            RuleSet.tenant_id == ctx.tenant.id,
+            RuleSet.name == payload.name,
+        )
     ).scalars().first()
     if existing is not None:
         raise HTTPException(status_code=400, detail=f"规则集名称已存在: {payload.name}")
 
     # 如果请求设为默认，先把其他默认置为 False
     if payload.is_default:
-        db.execute(update(RuleSet).where(RuleSet.is_default.is_(True)).values(is_default=False))
+        db.execute(
+            update(RuleSet)
+            .where(
+                RuleSet.tenant_id == ctx.tenant.id,
+                RuleSet.is_default.is_(True),
+            )
+            .values(is_default=False)
+        )
 
     rs = RuleSet(
+        tenant_id=ctx.tenant.id,
         name=payload.name,
         description=payload.description,
         doc_types=payload.doc_types,
@@ -61,9 +79,13 @@ def create_rule_set(
 
 
 @router.get("/{rule_set_id}", response_model=RuleSetOut)
-def get_rule_set(rule_set_id: uuid.UUID, db: Session = Depends(get_db)) -> RuleSetOut:
+def get_rule_set(
+    rule_set_id: uuid.UUID,
+    ctx: AuthContext = Depends(require_permission("review.view")),
+    db: Session = Depends(get_db),
+) -> RuleSetOut:
     """获取规则集详情。"""
-    rs = db.get(RuleSet, rule_set_id)
+    rs = tenant_get(db, RuleSet, rule_set_id, ctx.tenant.id)
     if rs is None:
         raise HTTPException(status_code=404, detail="规则集不存在")
     return RuleSetOut.model_validate(rs)
@@ -73,10 +95,11 @@ def get_rule_set(rule_set_id: uuid.UUID, db: Session = Depends(get_db)) -> RuleS
 def update_rule_set(
     rule_set_id: uuid.UUID,
     payload: RuleSetUpdate,
+    ctx: AuthContext = Depends(require_permission("rules.manage")),
     db: Session = Depends(get_db),
 ) -> RuleSetOut:
     """更新规则集。"""
-    rs = db.get(RuleSet, rule_set_id)
+    rs = tenant_get(db, RuleSet, rule_set_id, ctx.tenant.id)
     if rs is None:
         raise HTTPException(status_code=404, detail="规则集不存在")
 
@@ -85,14 +108,24 @@ def update_rule_set(
     # 名称唯一性校验
     if "name" in data and data["name"] != rs.name:
         existing = db.execute(
-            select(RuleSet).where(RuleSet.name == data["name"])
+            select(RuleSet).where(
+                RuleSet.tenant_id == ctx.tenant.id,
+                RuleSet.name == data["name"],
+            )
         ).scalars().first()
         if existing is not None:
             raise HTTPException(status_code=400, detail=f"规则集名称已存在: {data['name']}")
 
     # 设为默认时，先把其他默认置为 False
     if data.get("is_default") is True and not rs.is_default:
-        db.execute(update(RuleSet).where(RuleSet.is_default.is_(True)).values(is_default=False))
+        db.execute(
+            update(RuleSet)
+            .where(
+                RuleSet.tenant_id == ctx.tenant.id,
+                RuleSet.is_default.is_(True),
+            )
+            .values(is_default=False)
+        )
 
     for k, v in data.items():
         setattr(rs, k, v)
@@ -102,7 +135,11 @@ def update_rule_set(
 
 
 @router.delete("/{rule_set_id}")
-def delete_rule_set(rule_set_id: uuid.UUID, db: Session = Depends(get_db)) -> dict:
+def delete_rule_set(
+    rule_set_id: uuid.UUID,
+    ctx: AuthContext = Depends(require_permission("rules.manage")),
+    db: Session = Depends(get_db),
+) -> dict:
     """删除规则集并清空其全部数据（级联删除关联的规则/快照/合同/文档/审查结果，
     并清理 Neo4j 图谱节点与磁盘上该规则集的上传文件）。此操作不可恢复。"""
     import logging
@@ -115,7 +152,7 @@ def delete_rule_set(rule_set_id: uuid.UUID, db: Session = Depends(get_db)) -> di
 
     logger = logging.getLogger(__name__)
 
-    rs = db.get(RuleSet, rule_set_id)
+    rs = tenant_get(db, RuleSet, rule_set_id, ctx.tenant.id)
     if rs is None:
         raise HTTPException(status_code=404, detail="规则集不存在")
 
@@ -124,6 +161,7 @@ def delete_rule_set(rule_set_id: uuid.UUID, db: Session = Depends(get_db)) -> di
         db.execute(
             select(RuleSnapshot.graph_id)
             .where(
+                RuleSnapshot.tenant_id == ctx.tenant.id,
                 RuleSnapshot.rule_set_id == rs.id,
                 RuleSnapshot.graph_id.isnot(None),
             )
@@ -137,7 +175,10 @@ def delete_rule_set(rule_set_id: uuid.UUID, db: Session = Depends(get_db)) -> di
         for p in db.execute(
             select(Document.file_path)
             .join(Contract, Contract.id == Document.contract_id)
-            .where(Contract.rule_set_id == rs.id)
+            .where(
+                Contract.tenant_id == ctx.tenant.id,
+                Contract.rule_set_id == rs.id,
+            )
         ).scalars().all()
         if p
     }
@@ -155,20 +196,22 @@ def delete_rule_set(rule_set_id: uuid.UUID, db: Session = Depends(get_db)) -> di
     except Exception:
         logger.exception("Neo4j 不可用，跳过规则集 %s 的图谱清理", rs.id)
 
-    # 4) 清理磁盘上传文件（仅删除上传根目录内的目录，防止误删其他路径）
+    # 4) 删除规则集（Postgres 级联清理规则/快照/合同/文档/审查任务与结果等）
+    db.delete(rs)
+    db.commit()
+
+    # 5) 提交成功后清理新租户目录及兼容旧目录结构的文件目录
+    rule_set_dir = upload_root / str(ctx.tenant.id) / str(rs.id)
+    file_dirs.add(str(rule_set_dir))
     file_dirs_removed = 0
     for d in file_dirs:
-        p = Path(d)
+        p = Path(d).resolve()
         try:
             if p.is_relative_to(upload_root) and p.exists():
                 shutil.rmtree(p)
                 file_dirs_removed += 1
         except Exception:
             logger.exception("清理规则集 %s 的上传目录 %s 失败", rs.id, d)
-
-    # 5) 删除规则集（Postgres 级联清理规则/快照/合同/文档/审查任务与结果等）
-    db.delete(rs)
-    db.commit()
 
     return {
         "success": True,
@@ -179,14 +222,25 @@ def delete_rule_set(rule_set_id: uuid.UUID, db: Session = Depends(get_db)) -> di
 
 
 @router.post("/{rule_set_id}/set-default", response_model=RuleSetOut)
-def set_default(rule_set_id: uuid.UUID, db: Session = Depends(get_db)) -> RuleSetOut:
+def set_default(
+    rule_set_id: uuid.UUID,
+    ctx: AuthContext = Depends(require_permission("rules.manage")),
+    db: Session = Depends(get_db),
+) -> RuleSetOut:
     """将指定规则集设为默认（同一时刻只能有一个默认）。"""
-    rs = db.get(RuleSet, rule_set_id)
+    rs = tenant_get(db, RuleSet, rule_set_id, ctx.tenant.id)
     if rs is None:
         raise HTTPException(status_code=404, detail="规则集不存在")
     if not rs.is_default:
         # 先把其他默认置为 False
-        db.execute(update(RuleSet).where(RuleSet.is_default.is_(True)).values(is_default=False))
+        db.execute(
+            update(RuleSet)
+            .where(
+                RuleSet.tenant_id == ctx.tenant.id,
+                RuleSet.is_default.is_(True),
+            )
+            .values(is_default=False)
+        )
         rs.is_default = True
         db.commit()
         db.refresh(rs)

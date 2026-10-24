@@ -15,7 +15,8 @@ from sqlalchemy.orm import Session
 
 from ..config import settings
 from ..constants import REQUIRED_DOC_TYPES
-from ..models import Contract, Document, DocumentType
+from ..models import Contract, Document, DocumentType, RuleSet
+from ..tenant_scope import tenant_get
 from ..schemas.contract import (
     ContractBrief,
     ContractDetail,
@@ -42,28 +43,36 @@ def _safe_filename(filename: str) -> str:
     return out.strip() or f"file_{uuid.uuid4().hex[:8]}"
 
 
-def _load_doc_type_registry(db: Session) -> dict[str, bool]:
+def _load_doc_type_registry(
+    db: Session,
+    tenant_id: uuid.UUID,
+) -> dict[str, bool]:
     """从 DocumentType 动态清单构建 name → is_required 注册表（active + pending_review）。
     批次 10 Phase B：新发现的类型无需改代码即可参与文件分类。"""
     rows = db.execute(
         select(DocumentType.name, DocumentType.is_required).where(
+            DocumentType.tenant_id == tenant_id,
             DocumentType.status.in_(("active", "pending_review"))
         )
     ).all()
     return {name: bool(is_required) for name, is_required in rows}
 
 
-def _contract_upload_dir(contract_no: str) -> Path:
-    """合同文件存储目录：uploads/{contract_no}/"""
+def _contract_upload_dir(
+    tenant_id: uuid.UUID,
+    rule_set_id: uuid.UUID,
+    contract_id: uuid.UUID,
+) -> Path:
+    """合同文件存储目录：uploads/{tenant}/{ruleset}/{contract}/。"""
     root = settings.ensure_upload_root()
-    safe = _safe_filename(contract_no)
-    d = root / safe
+    d = root / str(tenant_id) / str(rule_set_id) / str(contract_id)
     d.mkdir(parents=True, exist_ok=True)
     return d
 
 
 async def upload_contract_folder(
     db: Session,
+    tenant_id: uuid.UUID,
     rule_set_id: uuid.UUID,
     files: list[UploadFile],
 ) -> ContractUploadResponse:
@@ -74,9 +83,11 @@ async def upload_contract_folder(
     """
     if not files:
         raise ValueError("未接收到任何文件")
+    if tenant_get(db, RuleSet, rule_set_id, tenant_id) is None:
+        raise ValueError("规则集不存在")
 
     # 动态文档类型注册表（批次 10 Phase B）
-    registry = _load_doc_type_registry(db)
+    registry = _load_doc_type_registry(db, tenant_id)
 
     # 1. 第一遍：保存文件 + 收集文件名用于合同号识别
     saved: list[tuple[str, Path, str, bool]] = []  # (orig_name, path, doc_type, is_required)
@@ -85,14 +96,14 @@ async def upload_contract_folder(
         orig_name = f.filename or f"file_{uuid.uuid4().hex[:8]}"
         safe_name = _safe_filename(orig_name)
         # 先存到临时目录，确定合同号后再移动
-        tmp_dir = settings.ensure_upload_root() / "_tmp"
+        tmp_dir = settings.ensure_upload_root() / "_tmp" / str(tenant_id)
         tmp_dir.mkdir(parents=True, exist_ok=True)
         tmp_path = tmp_dir / f"{uuid.uuid4().hex}_{safe_name}"
         content = await f.read()
         tmp_path.write_bytes(content)
         doc_type, is_required = classify_file(orig_name, registry=registry)
         # 批次 11：写时归一——分类结果映射到规范类型名（别名不再落库为并列类型）
-        doc_type = normalize_doc_type(db, doc_type) or doc_type
+        doc_type = normalize_doc_type(db, doc_type, tenant_id=tenant_id) or doc_type
         # 从文件名提取合同号
         contract_candidates.extend(extract_contract_numbers(orig_name))
         saved.append((orig_name, tmp_path, doc_type, is_required))
@@ -106,6 +117,7 @@ async def upload_contract_folder(
 
     # 3. 创建 Contract 记录（带 rule_set_id）
     contract = Contract(
+        tenant_id=tenant_id,
         rule_set_id=rule_set_id,
         contract_no=canonical,
         alias_list=alias_list,
@@ -115,7 +127,7 @@ async def upload_contract_folder(
     db.flush()  # 拿到 contract.id
 
     # 4. 把文件移动到合同目录，创建 Document 记录
-    target_dir = _contract_upload_dir(canonical)
+    target_dir = _contract_upload_dir(tenant_id, rule_set_id, contract.id)
     classified_list: list[dict] = []
     for orig_name, tmp_path, doc_type, is_required in saved:
         safe_name = _safe_filename(orig_name)
@@ -128,6 +140,7 @@ async def upload_contract_folder(
         shutil.move(str(tmp_path), str(final_path))
 
         doc = Document(
+            tenant_id=tenant_id,
             contract_id=contract.id,
             file_name=orig_name,
             file_path=str(final_path),
@@ -160,7 +173,9 @@ async def upload_contract_folder(
 
 
 def list_contracts(
-    db: Session, rule_set_id: Optional[uuid.UUID] = None
+    db: Session,
+    tenant_id: uuid.UUID,
+    rule_set_id: Optional[uuid.UUID] = None,
 ) -> list[ContractBrief]:
     """合同列表（含文件数），可按规则集过滤。"""
     stmt = (
@@ -168,7 +183,12 @@ def list_contracts(
             Contract,
             func.count(Document.id).label("file_count"),
         )
-        .outerjoin(Document, Document.contract_id == Contract.id)
+        .outerjoin(
+            Document,
+            (Document.contract_id == Contract.id)
+            & (Document.tenant_id == Contract.tenant_id),
+        )
+        .where(Contract.tenant_id == tenant_id)
         .group_by(Contract.id)
         .order_by(Contract.upload_time.desc())
     )
@@ -183,9 +203,13 @@ def list_contracts(
     return out
 
 
-def get_contract_detail(db: Session, contract_id: uuid.UUID) -> Optional[ContractDetail]:
+def get_contract_detail(
+    db: Session,
+    tenant_id: uuid.UUID,
+    contract_id: uuid.UUID,
+) -> Optional[ContractDetail]:
     """合同详情（含文件清单）。"""
-    contract = db.get(Contract, contract_id)
+    contract = tenant_get(db, Contract, contract_id, tenant_id)
     if contract is None:
         return None
     docs = [
@@ -197,30 +221,47 @@ def get_contract_detail(db: Session, contract_id: uuid.UUID) -> Optional[Contrac
     return detail
 
 
-def delete_contract(db: Session, contract_id: uuid.UUID) -> bool:
+def delete_contract(
+    db: Session,
+    tenant_id: uuid.UUID,
+    contract_id: uuid.UUID,
+) -> bool:
     """删除合同及其文件。"""
-    contract = db.get(Contract, contract_id)
+    contract = tenant_get(db, Contract, contract_id, tenant_id)
     if contract is None:
         return False
-    contract_no = contract.contract_no
-    # 删除文件目录
-    target_dir = settings.ensure_upload_root() / _safe_filename(contract_no)
-    if target_dir.exists():
-        shutil.rmtree(target_dir, ignore_errors=True)
+    file_dirs = {
+        Path(document.file_path).parent
+        for document in contract.documents
+        if document.file_path
+    }
     db.delete(contract)
     db.commit()
+    upload_root = settings.ensure_upload_root().resolve()
+    for target_dir in file_dirs:
+        try:
+            resolved = target_dir.resolve()
+            if resolved.is_relative_to(upload_root) and resolved.exists():
+                shutil.rmtree(resolved, ignore_errors=True)
+        except OSError:
+            logger.warning("清理合同文件目录失败: %s", target_dir, exc_info=True)
     return True
 
 
 def update_doc_type(
-    db: Session, doc_id: uuid.UUID, doc_type: str
+    db: Session,
+    tenant_id: uuid.UUID,
+    doc_id: uuid.UUID,
+    doc_type: str,
 ) -> Optional[Document]:
     """修正单个文件的业务类型。"""
-    doc = db.get(Document, doc_id)
+    doc = tenant_get(db, Document, doc_id, tenant_id)
     if doc is None:
         return None
     # 批次 11：写时归一——前端/接口传入的别名统一落库为规范名
-    doc.doc_type = normalize_doc_type(db, doc_type) or doc_type
+    doc.doc_type = (
+        normalize_doc_type(db, doc_type, tenant_id=tenant_id) or doc_type
+    )
     doc.is_required = doc_type in REQUIRED_DOC_TYPES
     db.commit()
     db.refresh(doc)
@@ -229,6 +270,7 @@ def update_doc_type(
 
 def update_doc_ocr_fields(
     db: Session,
+    tenant_id: uuid.UUID,
     doc_id: uuid.UUID,
     extracted_fields: dict,
     has_stamp: Optional[bool] = None,
@@ -239,7 +281,7 @@ def update_doc_ocr_fields(
     复用与 OCR 写入一致的字段归一（别名映射 + 数值/日期规范化），
     保证审查读取的 extracted_fields 与自动提取路径口径一致。
     """
-    doc = db.get(Document, doc_id)
+    doc = tenant_get(db, Document, doc_id, tenant_id)
     if doc is None:
         return None
 
@@ -253,7 +295,7 @@ def update_doc_ocr_fields(
     doc.extracted_fields = normalize_fields(
         doc.doc_type,
         fields,
-        aliases=resolve_field_aliases(db, doc.doc_type),
+        aliases=resolve_field_aliases(db, doc.doc_type, tenant_id=tenant_id),
     )
     if update_has_stamp:
         doc.has_stamp = has_stamp
@@ -265,15 +307,15 @@ def update_doc_ocr_fields(
 
 def update_contract_aliases(
     db: Session,
+    tenant_id: uuid.UUID,
     contract_id: uuid.UUID,
     contract_no: str,
     alias_list: list[str],
 ) -> Optional[Contract]:
     """修正合同号归一化结果。"""
-    contract = db.get(Contract, contract_id)
+    contract = tenant_get(db, Contract, contract_id, tenant_id)
     if contract is None:
         return None
-    old_no = contract.contract_no
     # 合并别名（保留原有 + 用户传入）
     merged = merge_aliases(contract.alias_list or [], alias_list or [])
     # 确保新主号在别名中
@@ -281,18 +323,15 @@ def update_contract_aliases(
         merged.insert(0, contract_no)
     contract.contract_no = contract_no
     contract.alias_list = merged
-    # 重命名文件目录
-    if old_no != contract_no:
-        old_dir = settings.ensure_upload_root() / _safe_filename(old_no)
-        new_dir = settings.ensure_upload_root() / _safe_filename(contract_no)
-        if old_dir.exists():
-            new_dir.parent.mkdir(parents=True, exist_ok=True)
-            old_dir.rename(new_dir)
-        # 更新所有文档路径
-        for doc in contract.documents:
-            old_path = Path(doc.file_path)
-            new_path = new_dir / old_path.name
-            doc.file_path = str(new_path)
     db.commit()
     db.refresh(contract)
     return contract
+
+
+def get_document(
+    db: Session,
+    tenant_id: uuid.UUID,
+    doc_id: uuid.UUID,
+) -> Optional[Document]:
+    """读取当前租户的单个文档；供下载和 OCR 详情路由复用。"""
+    return tenant_get(db, Document, doc_id, tenant_id)

@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import logging
 import re
+import uuid
 from typing import Any, Optional
 
 from sqlalchemy import select
@@ -169,18 +170,27 @@ def normalize_party_name(value: Any) -> Optional[str]:
     return "".join(core_parts)
 
 
-def _registry_rows(db: Optional[Session]) -> list[DocumentType]:
+def _registry_rows(
+    db: Optional[Session],
+    tenant_id: uuid.UUID | None = None,
+) -> list[DocumentType]:
     """读取文档类型注册表；db 不可用时返回空（纯常量兜底）。"""
     if db is None:
         return []
     try:
-        return list(db.execute(select(DocumentType)).scalars().all())
+        stmt = select(DocumentType)
+        if tenant_id is not None:
+            stmt = stmt.where(DocumentType.tenant_id == tenant_id)
+        return list(db.execute(stmt).scalars().all())
     except Exception:  # pragma: no cover
         logger.warning("读取文档类型注册表失败，回退常量别名", exc_info=True)
         return []
 
 
-def build_doc_type_alias_index(db: Optional[Session] = None) -> dict[str, str]:
+def build_doc_type_alias_index(
+    db: Optional[Session] = None,
+    tenant_id: uuid.UUID | None = None,
+) -> dict[str, str]:
     """构建 alias -> 规范名 索引（常量内置 + 注册表 active 类型声明的别名）。
 
     注册表别名优先于常量（用户可在文档类型页覆盖/扩展）。
@@ -191,7 +201,7 @@ def build_doc_type_alias_index(db: Optional[Session] = None) -> dict[str, str]:
             a = str(a).strip()
             if a:
                 index.setdefault(a, canonical)
-    for dt in _registry_rows(db):
+    for dt in _registry_rows(db, tenant_id):
         if not dt or dt.status != "active":
             continue
         for a in (dt.aliases or []):
@@ -201,7 +211,11 @@ def build_doc_type_alias_index(db: Optional[Session] = None) -> dict[str, str]:
     return index
 
 
-def normalize_doc_type(db: Optional[Session], name: Any) -> str:
+def normalize_doc_type(
+    db: Optional[Session],
+    name: Any,
+    tenant_id: uuid.UUID | None = None,
+) -> str:
     """名称 → 规范类型名。
 
     命中显式别名 → 返回规范名；本身是 active 类型名 → 原样返回；
@@ -212,20 +226,24 @@ def normalize_doc_type(db: Optional[Session], name: Any) -> str:
     s = str(name).strip()
     if not s:
         return ""
-    index = build_doc_type_alias_index(db)
+    index = build_doc_type_alias_index(db, tenant_id)
     if s in index:
         return index[s]
-    for dt in _registry_rows(db):
+    for dt in _registry_rows(db, tenant_id):
         if dt.status == "active" and dt.name == s:
             return s
     return s
 
 
-def resolve_field_aliases(db: Optional[Session], doc_type: Any) -> dict:
+def resolve_field_aliases(
+    db: Optional[Session],
+    doc_type: Any,
+    tenant_id: uuid.UUID | None = None,
+) -> dict:
     """解析某文档类型的字段别名表（常量 + 注册表，注册表优先）。"""
     doc_type = str(doc_type or "").strip()
     aliases: dict = dict(C.FIELD_ALIASES.get(doc_type, {}))
-    for dt in _registry_rows(db):
+    for dt in _registry_rows(db, tenant_id):
         if dt.name == doc_type and dt.field_aliases:
             merged = dict(aliases)
             merged.update(dt.field_aliases or {})
@@ -233,11 +251,15 @@ def resolve_field_aliases(db: Optional[Session], doc_type: Any) -> dict:
     return aliases
 
 
-def _canonical_fields(db: Optional[Session], doc_type: Any) -> set[str]:
+def _canonical_fields(
+    db: Optional[Session],
+    doc_type: Any,
+    tenant_id: uuid.UUID | None = None,
+) -> set[str]:
     """规范字段集合（constants 模板 + 注册表 key_fields）。"""
     doc_type = str(doc_type or "").strip()
     fields: set[str] = set(C.FIELD_TEMPLATES.get(doc_type, []))
-    for dt in _registry_rows(db):
+    for dt in _registry_rows(db, tenant_id):
         if dt.name == doc_type:
             fields.update(dt.key_fields or [])
             break
@@ -256,6 +278,7 @@ def normalize_field(
     doc_type: Any,
     field: Any,
     aggregate: Optional[str] = None,
+    tenant_id: uuid.UUID | None = None,
 ) -> tuple[str, Optional[str]]:
     """字段引用 → (规范字段名, 聚合语义)。
 
@@ -267,19 +290,23 @@ def normalize_field(
     s = str(field).strip()
     if not s:
         return field, aggregate
-    aliases = resolve_field_aliases(db, doc_type)
+    aliases = resolve_field_aliases(db, doc_type, tenant_id=tenant_id)
     if s in aliases:
         m = aliases[s]
         if isinstance(m, dict):
             return str(m.get("field") or s), (m.get("aggregate") or aggregate or None)
         return str(m), aggregate
     base = _strip_aggregate_words(s)
-    if base != s and base in _canonical_fields(db, doc_type):
+    if base != s and base in _canonical_fields(db, doc_type, tenant_id=tenant_id):
         return base, aggregate or "SUM"
     return s, aggregate
 
 
-def normalize_scope(db: Optional[Session], scope: Any) -> Any:
+def normalize_scope(
+    db: Optional[Session],
+    scope: Any,
+    tenant_id: uuid.UUID | None = None,
+) -> Any:
     """规则 scope 归一：doc_types 列表中的每个名称映射到规范名。"""
     if not isinstance(scope, dict):
         return scope
@@ -289,7 +316,7 @@ def normalize_scope(db: Optional[Session], scope: Any) -> Any:
         normalized = []
         seen = set()
         for x in dt_list:
-            nx = normalize_doc_type(db, x) or str(x)
+            nx = normalize_doc_type(db, x, tenant_id=tenant_id) or str(x)
             if nx not in seen:
                 seen.add(nx)
                 normalized.append(nx)
@@ -301,13 +328,17 @@ def normalize_structure(
     db: Optional[Session],
     structure: Any,
     rule_doc_type: Any = None,
+    tenant_id: uuid.UUID | None = None,
 ) -> Any:
     """规则 structure 归一：assertion 两侧 + condition + exceptions 的
     doc_type / field 全部映射到规范名。聚合语义（SUM）在字段归一时保留/补全。
     """
     if not isinstance(structure, dict):
         return structure
-    rule_doc_type = normalize_doc_type(db, rule_doc_type) or rule_doc_type
+    rule_doc_type = (
+        normalize_doc_type(db, rule_doc_type, tenant_id=tenant_id)
+        or rule_doc_type
+    )
     out = dict(structure)
 
     assertion = out.get("assertion")
@@ -322,9 +353,18 @@ def normalize_structure(
                 continue
             s2 = dict(sd)
             if s2.get("doc_type"):
-                s2["doc_type"] = normalize_doc_type(db, s2["doc_type"]) or s2["doc_type"]
+                s2["doc_type"] = (
+                    normalize_doc_type(db, s2["doc_type"], tenant_id=tenant_id)
+                    or s2["doc_type"]
+                )
             side_dt = s2.get("doc_type") or rule_doc_type
-            fld, agg = normalize_field(db, side_dt, s2.get("field"), s2.get("aggregate"))
+            fld, agg = normalize_field(
+                db,
+                side_dt,
+                s2.get("field"),
+                s2.get("aggregate"),
+                tenant_id=tenant_id,
+            )
             s2["field"] = fld
             if agg:
                 s2["aggregate"] = agg
@@ -337,7 +377,13 @@ def normalize_structure(
         op = normalize_operator(c2.get("operator"))
         if op:
             c2["operator"] = op
-        fld, _ = normalize_field(db, rule_doc_type, c2.get("field"), None)
+        fld, _ = normalize_field(
+            db,
+            rule_doc_type,
+            c2.get("field"),
+            None,
+            tenant_id=tenant_id,
+        )
         c2["field"] = fld
         # 币别类条件的值按注册表归一（如规则解析输出 "USD" → "美元"）
         if is_currency_field(fld) and c2.get("value") is not None:
@@ -350,7 +396,13 @@ def normalize_structure(
         for e in exceptions:
             if isinstance(e, dict) and e.get("field"):
                 e2 = dict(e)
-                fld, _ = normalize_field(db, rule_doc_type, e2.get("field"), None)
+                fld, _ = normalize_field(
+                    db,
+                    rule_doc_type,
+                    e2.get("field"),
+                    None,
+                    tenant_id=tenant_id,
+                )
                 e2["field"] = fld
                 if is_currency_field(fld) and e2.get("value") is not None:
                     e2["value"] = normalize_currency_value(e2["value"])
@@ -366,6 +418,7 @@ def normalize_extracted_keys(
     db: Optional[Session],
     doc_type: Any,
     fields: Any,
+    tenant_id: uuid.UUID | None = None,
 ) -> Any:
     """存量文档 extracted_fields 的字段键归一（按该类型字段别名表重命名）。
 
@@ -373,7 +426,7 @@ def normalize_extracted_keys(
     """
     if not isinstance(fields, dict):
         return fields
-    aliases = resolve_field_aliases(db, doc_type)
+    aliases = resolve_field_aliases(db, doc_type, tenant_id=tenant_id)
     if not aliases:
         return fields
     out: dict[str, Any] = {}

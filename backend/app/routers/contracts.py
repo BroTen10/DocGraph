@@ -12,7 +12,6 @@ from sqlalchemy.orm import Session
 
 from ..auth.dependencies import AuthContext, require_permission
 from ..database import get_db
-from ..models import Document
 from ..schemas.contract import (
     ContractAliasUpdate,
     ContractBrief,
@@ -31,11 +30,17 @@ router = APIRouter(prefix="/api/contracts", tags=["contracts"])
 async def upload_contract_folder(
     rule_set_id: uuid.UUID = Query(..., description="所属规则集 ID"),
     files: list[UploadFile] = File(...),
+    ctx: AuthContext = Depends(require_permission("review.execute")),
     db: Session = Depends(get_db),
 ) -> ContractUploadResponse:
     """上传合同文件夹（一个合同 = 一组文件），归属到指定规则集。"""
     try:
-        return await contract_service.upload_contract_folder(db, rule_set_id, files)
+        return await contract_service.upload_contract_folder(
+            db,
+            ctx.tenant.id,
+            rule_set_id,
+            files,
+        )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
@@ -51,22 +56,30 @@ def list_contracts(
     db: Session = Depends(get_db),
 ) -> list[ContractBrief]:
     """合同列表，可按规则集过滤。"""
-    return contract_service.list_contracts(db, rule_set_id)
+    return contract_service.list_contracts(db, ctx.tenant.id, rule_set_id)
 
 
 @router.get("/{contract_id}", response_model=ContractDetail)
-def get_contract(contract_id: uuid.UUID, db: Session = Depends(get_db)) -> ContractDetail:
+def get_contract(
+    contract_id: uuid.UUID,
+    ctx: AuthContext = Depends(require_permission("review.view")),
+    db: Session = Depends(get_db),
+) -> ContractDetail:
     """合同详情（含文件清单）。"""
-    detail = contract_service.get_contract_detail(db, contract_id)
+    detail = contract_service.get_contract_detail(db, ctx.tenant.id, contract_id)
     if detail is None:
         raise HTTPException(status_code=404, detail="合同不存在")
     return detail
 
 
 @router.delete("/{contract_id}")
-def delete_contract(contract_id: uuid.UUID, db: Session = Depends(get_db)) -> dict:
+def delete_contract(
+    contract_id: uuid.UUID,
+    ctx: AuthContext = Depends(require_permission("review.execute")),
+    db: Session = Depends(get_db),
+) -> dict:
     """删除合同及其文件。"""
-    if not contract_service.delete_contract(db, contract_id):
+    if not contract_service.delete_contract(db, ctx.tenant.id, contract_id):
         raise HTTPException(status_code=404, detail="合同不存在")
     return {"success": True, "message": "合同已删除"}
 
@@ -75,11 +88,16 @@ def delete_contract(contract_id: uuid.UUID, db: Session = Depends(get_db)) -> di
 def update_contract_aliases(
     contract_id: uuid.UUID,
     payload: ContractAliasUpdate,
+    ctx: AuthContext = Depends(require_permission("review.execute")),
     db: Session = Depends(get_db),
 ) -> ContractBrief:
     """修正合同号归一化结果。"""
     contract = contract_service.update_contract_aliases(
-        db, contract_id, payload.contract_no, payload.alias_list
+        db,
+        ctx.tenant.id,
+        contract_id,
+        payload.contract_no,
+        payload.alias_list,
     )
     if contract is None:
         raise HTTPException(status_code=404, detail="合同不存在")
@@ -90,10 +108,16 @@ def update_contract_aliases(
 def update_doc_type(
     doc_id: uuid.UUID,
     payload: DocTypeUpdate,
+    ctx: AuthContext = Depends(require_permission("review.execute")),
     db: Session = Depends(get_db),
 ) -> dict:
     """修正单个文件的业务类型。"""
-    doc = contract_service.update_doc_type(db, doc_id, payload.doc_type)
+    doc = contract_service.update_doc_type(
+        db,
+        ctx.tenant.id,
+        doc_id,
+        payload.doc_type,
+    )
     if doc is None:
         raise HTTPException(status_code=404, detail="文件不存在")
     return {
@@ -108,6 +132,7 @@ def update_doc_type(
 def update_doc_ocr_fields(
     doc_id: uuid.UUID,
     payload: OcrFieldsUpdate,
+    ctx: AuthContext = Depends(require_permission("review.execute")),
     db: Session = Depends(get_db),
 ) -> DocumentBrief:
     """人工修正 OCR 结构化字段（OCR 对照界面保存入口）。
@@ -118,6 +143,7 @@ def update_doc_ocr_fields(
     update_has_stamp = "has_stamp" in payload.model_fields_set
     doc = contract_service.update_doc_ocr_fields(
         db,
+        ctx.tenant.id,
         doc_id,
         payload.extracted_fields,
         has_stamp=payload.has_stamp if update_has_stamp else None,
@@ -129,12 +155,16 @@ def update_doc_ocr_fields(
 
 
 @router.get("/documents/{doc_id}/file")
-def get_document_file(doc_id: uuid.UUID, db: Session = Depends(get_db)):
+def get_document_file(
+    doc_id: uuid.UUID,
+    ctx: AuthContext = Depends(require_permission("review.view")),
+    db: Session = Depends(get_db),
+):
     """获取原始文件（用于前端预览：PDF/图片直接展示，DOCX 下载）。
 
     返回文件流，浏览器根据 Content-Type 自动渲染。
     """
-    doc = db.get(Document, doc_id)
+    doc = contract_service.get_document(db, ctx.tenant.id, doc_id)
     if doc is None:
         raise HTTPException(status_code=404, detail="文件不存在")
 
@@ -156,10 +186,12 @@ def get_document_file(doc_id: uuid.UUID, db: Session = Depends(get_db)):
 
 @router.get("/documents/{doc_id}/ocr", response_model=DocumentBrief)
 def get_document_ocr(
-    doc_id: uuid.UUID, db: Session = Depends(get_db)
+    doc_id: uuid.UUID,
+    ctx: AuthContext = Depends(require_permission("review.view")),
+    db: Session = Depends(get_db),
 ) -> DocumentBrief:
     """获取单个文档的 OCR 识别详情（文本 + 字段 + 置信度）。"""
-    doc = db.get(Document, doc_id)
+    doc = contract_service.get_document(db, ctx.tenant.id, doc_id)
     if doc is None:
         raise HTTPException(status_code=404, detail="文件不存在")
     return DocumentBrief.model_validate(doc)
