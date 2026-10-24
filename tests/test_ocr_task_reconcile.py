@@ -28,8 +28,9 @@ sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
 from sqlalchemy import func, select  # noqa: E402
 
-from app.database import SessionLocal  # noqa: E402
-from app.models import OcrTask, RuleSet  # noqa: E402
+from app.database import SessionLocal, bind_tenant  # noqa: E402
+from app.models import OcrTask, RuleSet, Tenant  # noqa: E402
+from app.tenant_scope import tenant_get  # noqa: E402
 from app.services import ocr_task_service  # noqa: E402
 
 _FAILED: list[str] = []
@@ -44,13 +45,25 @@ def check(name: str, ok: bool, detail: str = "") -> None:
 def main() -> None:
     db = SessionLocal()
     created: list[uuid.UUID] = []
+    rule_set_id = None
+    tenant_id = None
     try:
-        rule_set = db.execute(select(RuleSet).limit(1)).scalar()
-        if rule_set is None:
-            print("跳过：库中还没有规则集，无法挂载临时任务")
-            return
+        tenant = db.execute(
+            select(Tenant).where(Tenant.code == "default")
+        ).scalar_one()
+        tenant_id = tenant.id
+        bind_tenant(db, tenant_id)
+        rule_set = RuleSet(
+            tenant_id=tenant_id,
+            name=f"ocr-reconcile-{uuid.uuid4().hex}",
+            description="OCR 任务中断回收回归测试",
+            doc_types=[],
+            check_categories=[],
+            is_default=False,
+        )
+        db.add(rule_set)
+        db.commit()
         rule_set_id = rule_set.id
-        tenant_id = rule_set.tenant_id
 
         now_ts = db.execute(select(func.now())).scalar()
         ocr_task_service.set_process_start(db)
@@ -96,11 +109,18 @@ def main() -> None:
         again = ocr_task_service.reconcile_stale_tasks(db, tenant_id=tenant_id)
         check("重复调用不再回收已完成回收的任务", again == 0, f"again={again}")
     finally:
-        for tid in created:
-            row = db.get(OcrTask, tid)
-            if row is not None:
-                db.delete(row)
-        db.commit()
+        db.rollback()
+        if tenant_id is not None:
+            for tid in created:
+                row = tenant_get(db, OcrTask, tid, tenant_id)
+                if row is not None:
+                    db.delete(row)
+            db.commit()
+            if rule_set_id is not None:
+                rule_set = tenant_get(db, RuleSet, rule_set_id, tenant_id)
+                if rule_set is not None:
+                    db.delete(rule_set)
+                    db.commit()
         print(f"（已清理 {len(created)} 条临时任务）")
         db.close()
 
@@ -109,6 +129,11 @@ def main() -> None:
         print(f"FAILED {len(_FAILED)}: {', '.join(_FAILED)}")
         raise SystemExit(1)
     print("全部通过")
+
+
+def test_ocr_task_reconcile(initialized_database) -> None:
+    _FAILED.clear()
+    main()
 
 
 if __name__ == "__main__":

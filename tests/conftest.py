@@ -79,6 +79,32 @@ def db(initialized_database) -> Generator:
 
 
 @pytest.fixture
+def default_tenant_id(initialized_database):
+    from sqlalchemy import select
+
+    from app.database import SessionLocal
+    from app.models import Tenant
+
+    with SessionLocal() as session:
+        return session.execute(
+            select(Tenant.id).where(Tenant.code == "default")
+        ).scalar_one()
+
+
+@pytest.fixture
+def tenant_session(default_tenant_id) -> Generator:
+    from app.database import SessionLocal, bind_tenant
+
+    session = SessionLocal()
+    bind_tenant(session, default_tenant_id)
+    try:
+        yield session
+    finally:
+        session.rollback()
+        session.close()
+
+
+@pytest.fixture
 def client(initialized_database) -> Generator:
     from fastapi.testclient import TestClient
 

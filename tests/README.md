@@ -54,6 +54,10 @@ flowchart TD
 ## 运行方式
 
 前置条件：Postgres 与 Neo4j 已启动（配置见 `backend/.env`），无需启动后端服务。
+测试数据统一挂在初始化时生成的 `code=default` 租户下；测试会话通过
+`bind_tenant()` 显式绑定该租户。若在隔离工作区运行，请通过
+`TEST_DATABASE_URL` 指向名称以 `_test` 结尾的专用数据库，并设置
+`DATABASE_URL` 供独立脚本使用。
 
 ```bat
 backend\.venv\Scripts\python.exe tests\run_graph_rule_tests.py
@@ -62,6 +66,27 @@ backend\.venv\Scripts\python.exe tests\run_graph_rule_tests.py
 或双击 `tests\run_graph_rule_tests.bat`。
 
 退出码：0 = 全部通过，1 = 存在失败断言。
+
+测试创建的规则集、合同、任务和图谱均使用临时 UUID 并带默认租户归属；
+清理时按租户和对象 ID 删除，不执行全局清空。
+
+## 中断任务回收回归
+
+`test_review_task_reconcile.py` 和 `test_ocr_task_reconcile.py` 既可直接运行，
+也会作为 pytest 用例进入默认测试收集。两者会在默认租户下创建临时规则集与合同，
+并在 `finally` 中按租户范围清理。
+
+```bat
+backend\.venv\Scripts\python.exe tests\test_review_task_reconcile.py
+backend\.venv\Scripts\python.exe tests\test_ocr_task_reconcile.py
+```
+
+完整测试可从仓库根目录运行；根目录 `pytest.ini` 统一加载 `tests/`、
+安全验收文件和后端 Python 路径：
+
+```powershell
+backend\.venv\Scripts\python.exe -m pytest tests -q
+```
 
 ## 断言覆盖（验证"图谱规则被正确调用"）
 

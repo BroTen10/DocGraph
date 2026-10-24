@@ -35,7 +35,7 @@ sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
 from sqlalchemy import select  # noqa: E402
 
-from app.database import SessionLocal  # noqa: E402
+from app.database import SessionLocal, bind_tenant  # noqa: E402
 from app.models import (  # noqa: E402
     Contract,
     Document,
@@ -48,6 +48,7 @@ from app.models import (  # noqa: E402
 from app.neo4j_client import get_neo4j_client  # noqa: E402
 from app.services.graph_builder_service import build_graph  # noqa: E402
 from app.services.graph_review_service import run_graph_review_with_contract  # noqa: E402
+from app.tenant_scope import tenant_get  # noqa: E402
 
 from minimal_test_set import (  # noqa: E402
     EXPECTED_GRAPH_NODES,
@@ -277,8 +278,9 @@ def run_pipeline_integration(
         while time.time() < deadline:
             time.sleep(0.5)
             tdb = SessionLocal()
+            bind_tenant(tdb, tenant_id)
             try:
-                t = tdb.get(ReviewTask, task.id)
+                t = tenant_get(tdb, ReviewTask, task.id, tenant_id)
                 if t is not None and t.status in ("completed", "failed"):
                     final = t
                     break
@@ -293,11 +295,15 @@ def run_pipeline_integration(
             return
 
         tdb = SessionLocal()
+        bind_tenant(tdb, tenant_id)
         try:
             from sqlalchemy import select
             rows = list(
                 tdb.execute(
-                    select(ReviewResult).where(ReviewResult.task_id == task.id)
+                    select(ReviewResult).where(
+                        ReviewResult.tenant_id == tenant_id,
+                        ReviewResult.task_id == task.id,
+                    )
                 ).scalars().all()
             )
         finally:
@@ -334,7 +340,7 @@ def run_negative_check(db, tenant_id) -> None:
         except ValueError:
             check("TC-08 无快照时抛 ValueError", True)
     finally:
-        rs_obj = db.get(RuleSet, rs.id)
+        rs_obj = tenant_get(db, RuleSet, rs.id, tenant_id)
         if rs_obj:
             db.delete(rs_obj)
             db.commit()
@@ -350,7 +356,7 @@ def cleanup(db, tenant_id, rule_set_id, graph_id) -> None:
             print(f"  已清理 Neo4j 测试图谱 {graph_id}（剩余节点 {removed}）")
         except Exception:
             print("  Neo4j 测试图谱清理失败（不影响 PG 清理）")
-    rs = db.get(RuleSet, rule_set_id)
+    rs = tenant_get(db, RuleSet, rule_set_id, tenant_id)
     if rs:
         db.delete(rs)
         db.commit()
@@ -368,6 +374,7 @@ def main() -> int:
         select(Tenant).where(Tenant.code == "default")
     ).scalar_one()
     tenant_id = default_tenant.id
+    bind_tenant(db, tenant_id)
     try:
         print("=" * 72)
         print("图谱规则自动测试：最简测试集")
