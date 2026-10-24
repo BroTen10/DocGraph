@@ -14,11 +14,19 @@ from __future__ import annotations
 import logging
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, Depends
+from fastapi import FastAPI, Depends, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
+from .auth.csrf import (
+    csrf_header_matches_session,
+    is_public_auth,
+    is_unsafe,
+    origin_matches,
+)
+from .auth.session_tokens import get_active_session
 from .config import settings
-from .database import get_db, init_db
+from .database import SessionLocal, get_db, init_db
 from .routers import (
     auth,
     contracts,
@@ -95,6 +103,40 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.middleware("http")
+async def csrf_protection(request: Request, call_next):
+    """Validate Origin and CSRF for state-changing requests."""
+    if not is_unsafe(request):
+        return await call_next(request)
+
+    if not origin_matches(request):
+        return JSONResponse(
+            status_code=403,
+            content={"code": "ORIGIN_INVALID", "message": "请求来源不合法"},
+        )
+
+    if not is_public_auth(request):
+        db = SessionLocal()
+        try:
+            raw_session = request.cookies.get("docgraph_session")
+            session = get_active_session(db, raw_session)
+            if session is None:
+                return JSONResponse(
+                    status_code=401,
+                    content={"code": "UNAUTHENTICATED", "message": "未登录或会话已失效"},
+                )
+            if not csrf_header_matches_session(request, session.csrf_hash):
+                return JSONResponse(
+                    status_code=403,
+                    content={"code": "CSRF_INVALID", "message": "CSRF 校验失败"},
+                )
+        finally:
+            db.close()
+
+    return await call_next(request)
+
 
 # 注册路由
 app.include_router(auth.router)

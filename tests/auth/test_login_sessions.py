@@ -22,13 +22,15 @@ def test_login_me_logout(client, active_tenant_user):
     assert response.json()["user"]["role"] == "tenant_admin"
     assert response.cookies.get("docgraph_session")
     assert response.json()["csrf_token"]
+    csrf_headers = {"X-CSRF-Token": response.json()["csrf_token"]}
 
     me = client.get("/api/auth/me")
     assert me.status_code == 200
     assert me.json()["user"]["email"] == "admin@example.com"
     assert me.json()["user"]["phone_masked"] == "136****6000"
 
-    assert client.post("/api/auth/logout").status_code == 204
+    csrf_headers = {"X-CSRF-Token": me.json()["csrf_token"]}
+    assert client.post("/api/auth/logout", headers=csrf_headers).status_code == 204
     assert client.get("/api/auth/me").status_code == 401
 
 
@@ -104,13 +106,15 @@ def test_forgot_password_unknown_email_is_generic(client, active_tenant_user):
 
 
 def test_change_password_requires_current_password(client, active_tenant_user):
-    assert client.post(
+    login = client.post(
         "/api/auth/login",
         json={
             "email": "admin@example.com",
             "password": "DocGraph2026",
         },
-    ).status_code == 200
+    )
+    assert login.status_code == 200
+    csrf_headers = {"X-CSRF-Token": login.json()["csrf_token"]}
 
     wrong = client.put(
         "/api/auth/password",
@@ -118,6 +122,7 @@ def test_change_password_requires_current_password(client, active_tenant_user):
             "current_password": "NotRight1",
             "new_password": "ChangedPass2026",
         },
+        headers=csrf_headers,
     )
     assert wrong.status_code == 400
 
@@ -127,6 +132,7 @@ def test_change_password_requires_current_password(client, active_tenant_user):
             "current_password": "DocGraph2026",
             "new_password": "ChangedPass2026",
         },
+        headers=csrf_headers,
     )
     assert changed.status_code == 204
     assert client.get("/api/auth/me").status_code == 401

@@ -53,6 +53,15 @@ def migrated_db(initialized_database) -> Generator:
         db.close()
 
 
+@pytest.fixture(autouse=True)
+def reset_rate_limits():
+    from app.auth.rate_limit import reset_limiters
+
+    reset_limiters()
+    yield
+    reset_limiters()
+
+
 @pytest.fixture
 def db(initialized_database) -> Generator:
     from app.database import SessionLocal

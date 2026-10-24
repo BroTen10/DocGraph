@@ -11,6 +11,7 @@ from fastapi import APIRouter, Depends
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
+from ..auth.dependencies import AuthContext, require_permission
 from ..database import get_db
 from ..services import settings_service
 
@@ -33,7 +34,10 @@ class OptimizePromptRequest(BaseModel):
 
 
 @router.get("")
-def list_settings(db: Session = Depends(get_db)) -> dict:
+def list_settings(
+    db: Session = Depends(get_db),
+    ctx: AuthContext = Depends(require_permission("settings.read")),
+) -> dict:
     """返回全部可配置项（含内置默认值与 DB 覆盖值）。"""
     return {"settings": settings_service.get_all_settings(db)}
 
@@ -42,6 +46,7 @@ def list_settings(db: Session = Depends(get_db)) -> dict:
 def update_settings(
     payload: SettingsUpdateRequest,
     db: Session = Depends(get_db),
+    ctx: AuthContext = Depends(require_permission("settings.update")),
 ) -> dict:
     """批量更新；value 为 null 表示重置回默认。"""
     items = [{"key": it.key, "value": it.value} for it in payload.items]
@@ -52,6 +57,7 @@ def update_settings(
 def optimize_prompt(
     payload: OptimizePromptRequest,
     db: Session = Depends(get_db),
+    ctx: AuthContext = Depends(require_permission("settings.update")),
 ) -> dict:
     """LLM 生成提示词优化建议（不直接应用）。"""
     return settings_service.optimize_prompt(

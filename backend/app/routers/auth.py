@@ -14,6 +14,11 @@ from ..auth.session_tokens import (
     rotate_csrf,
     touch_session,
 )
+from ..auth.permissions import permissions_for
+from ..auth.rate_limit import (
+    enforce_login_rate,
+    enforce_public_action_rate,
+)
 from ..config import settings
 from ..database import get_db
 from ..models import Tenant, TenantMembership, UserAccount
@@ -58,6 +63,7 @@ def _clear_session_cookie(response: Response) -> None:
 def _session_response(context) -> LoginResponse:
     user = context.user
     tenant = context.tenant
+    role = context.membership.role if context.membership is not None else None
     return LoginResponse(
         message="登录成功",
         csrf_token=context.raw_csrf_token,
@@ -66,24 +72,26 @@ def _session_response(context) -> LoginResponse:
             name=user.name,
             email=user.email_normalized,
             phone_masked=auth_service.mask_phone(user.phone_e164),
-            role=context.membership.role if context.membership is not None else None,
+            role=role,
         ),
         tenant=(
             LoginTenantOut(id=str(tenant.id), name=tenant.name)
             if tenant is not None
             else None
         ),
-        role=context.membership.role if context.membership is not None else None,
-        permissions=[],
+        role=role,
+        permissions=sorted(permissions_for(role, user.is_platform_admin)),
     )
 
 
 @router.post("/register", response_model=RegisterResponse, status_code=202)
 def register_tenant(
     payload: RegisterTenantRequest,
+    request: Request,
     db: Session = Depends(get_db),
 ) -> RegisterResponse:
     """Submit a new tenant application and queue email verification."""
+    enforce_public_action_rate(request.client.host if request.client else None)
     try:
         auth_service.register_tenant(db, payload)
     except EmailDeliveryError as exc:
@@ -118,6 +126,7 @@ def login(
 ) -> LoginResponse:
     """Log a user in and create a revocable server-side session."""
     ip = request.client.host if request.client is not None else None
+    enforce_login_rate(ip, payload.email)
     user_agent = request.headers.get("user-agent")
     try:
         context = auth_service.authenticate(
@@ -179,6 +188,12 @@ def me(
             raise HTTPException(status_code=403, detail="账号或租户状态异常")
         membership, tenant = row
 
+    permissions = sorted(
+        permissions_for(
+            membership.role if membership is not None else None,
+            user.is_platform_admin,
+        )
+    )
     return MeResponse(
         message="ok",
         csrf_token=raw_csrf,
@@ -195,7 +210,7 @@ def me(
             else None
         ),
         role=membership.role if membership is not None else None,
-        permissions=[],
+        permissions=permissions,
     )
 
 
@@ -231,9 +246,11 @@ def logout_all(
 @router.post("/password/forgot", response_model=ForgotPasswordResponse, status_code=202)
 def forgot_password(
     payload: ForgotPasswordRequest,
+    request: Request,
     db: Session = Depends(get_db),
 ) -> ForgotPasswordResponse:
     """Always return an accepted response to avoid account enumeration."""
+    enforce_public_action_rate(request.client.host if request.client else None)
     auth_service.request_password_reset(db, payload.email)
     return ForgotPasswordResponse(message="如果该邮箱已注册，重置邮件已发送")
 
