@@ -25,6 +25,7 @@ from ..schemas.rule_parse_skill import (
     RuleParseSkillUpdate,
     SkillLearnRequest,
 )
+from .rule_service import get_rule_set
 
 # 元数据字段：更新它们不产生新版本、不触发内置副本
 _META_FIELDS = {"enabled", "priority"}
@@ -34,33 +35,63 @@ LEARN_SKILL_NAME = "经验修正（自动累积）"
 
 def list_skills(
     db: Session,
-    rule_set_id: uuid.UUID | None = None,
+    tenant_id: uuid.UUID,
+    rule_set_id: uuid.UUID,
     include_builtin: bool = True,
 ) -> list[RuleParseSkillOut]:
     """获取 Skill 列表。"""
+    if get_rule_set(db, tenant_id, rule_set_id) is None:
+        raise ValueError("规则集不存在")
     stmt = select(RuleParseSkill).order_by(
         RuleParseSkill.is_builtin.desc(),
         RuleParseSkill.priority,
         RuleParseSkill.name,
     )
-    if rule_set_id:
-        stmt = stmt.where(
-            (RuleParseSkill.rule_set_id == rule_set_id)
-            | (RuleParseSkill.is_builtin.is_(True))
+    visible = (
+        (RuleParseSkill.tenant_id == tenant_id)
+        & (RuleParseSkill.rule_set_id == rule_set_id)
+    )
+    if include_builtin:
+        visible = visible | (
+            RuleParseSkill.is_builtin.is_(True)
+            & RuleParseSkill.tenant_id.is_(None)
         )
-    else:
-        stmt = stmt.where(RuleParseSkill.rule_set_id.is_(None))
+    stmt = stmt.where(visible)
 
     rows = db.execute(stmt).scalars().all()
     return [RuleParseSkillOut.model_validate(r) for r in rows]
 
 
-def get_skill(db: Session, skill_id: uuid.UUID) -> Optional[RuleParseSkill]:
-    return db.get(RuleParseSkill, skill_id)
+def get_skill(
+    db: Session,
+    tenant_id: uuid.UUID,
+    rule_set_id: uuid.UUID,
+    skill_id: uuid.UUID,
+    *,
+    include_builtin: bool = True,
+) -> Optional[RuleParseSkill]:
+    if get_rule_set(db, tenant_id, rule_set_id) is None:
+        return None
+    visible = (
+        (RuleParseSkill.tenant_id == tenant_id)
+        & (RuleParseSkill.rule_set_id == rule_set_id)
+    )
+    if include_builtin:
+        visible = visible | (
+            RuleParseSkill.is_builtin.is_(True)
+            & RuleParseSkill.tenant_id.is_(None)
+        )
+    return db.execute(
+        select(RuleParseSkill).where(
+            RuleParseSkill.id == skill_id,
+            visible,
+        )
+    ).scalar_one_or_none()
 
 
 def create_skill(
     db: Session,
+    tenant_id: uuid.UUID,
     rule_set_id: uuid.UUID,
     payload: RuleParseSkillCreate,
 ) -> RuleParseSkillOut:
@@ -69,8 +100,11 @@ def create_skill(
     Raises:
         ValueError: content_yaml 解析/校验失败。
     """
+    if get_rule_set(db, tenant_id, rule_set_id) is None:
+        raise ValueError("规则集不存在")
     content = payload.resolved_content()
     skill = RuleParseSkill(
+        tenant_id=tenant_id,
         rule_set_id=rule_set_id,
         name=payload.name,
         description=payload.description,
@@ -88,16 +122,17 @@ def create_skill(
 
 def update_skill(
     db: Session,
+    tenant_id: uuid.UUID,
+    rule_set_id: uuid.UUID,
     skill_id: uuid.UUID,
     payload: RuleParseSkillUpdate,
-    rule_set_id: uuid.UUID | None = None,
 ) -> Optional[RuleParseSkillOut]:
     """更新 Skill。
 
     Raises:
         ValueError: content_yaml 解析/校验失败。
     """
-    skill = db.get(RuleParseSkill, skill_id)
+    skill = get_skill(db, tenant_id, rule_set_id, skill_id)
     if skill is None:
         return None
 
@@ -117,13 +152,11 @@ def update_skill(
             db.refresh(skill)
             return RuleParseSkillOut.model_validate(skill)
 
-        if rule_set_id is None:
-            raise ValueError("修改内置 Skill 内容必须在规则集上下文中进行")
-
-        # 内容级修改 → 创建/更新该规则集下的副本
+        # 所有内置 Skill 修改都落到当前租户副本，避免跨租户共享可变状态。
         existing_copy = db.execute(
             select(RuleParseSkill).where(
                 RuleParseSkill.parent_id == skill_id,
+                RuleParseSkill.tenant_id == tenant_id,
                 RuleParseSkill.rule_set_id == rule_set_id,
             )
         ).scalars().first()
@@ -137,6 +170,7 @@ def update_skill(
                 copy.version += 1
         else:
             copy = RuleParseSkill(
+                tenant_id=tenant_id,
                 rule_set_id=rule_set_id,
                 parent_id=skill.id,
                 name=data.get("name", f"{skill.name}（自定义副本）"),
@@ -168,9 +202,14 @@ def update_skill(
     return RuleParseSkillOut.model_validate(skill)
 
 
-def delete_skill(db: Session, skill_id: uuid.UUID) -> bool:
+def delete_skill(
+    db: Session,
+    tenant_id: uuid.UUID,
+    rule_set_id: uuid.UUID,
+    skill_id: uuid.UUID,
+) -> bool:
     """删除 Skill。内置不可删除。"""
-    skill = db.get(RuleParseSkill, skill_id)
+    skill = get_skill(db, tenant_id, rule_set_id, skill_id)
     if skill is None:
         return False
     if skill.is_builtin:
@@ -225,6 +264,7 @@ def build_experience_instructions(req: SkillLearnRequest) -> list[str]:
 
 def learn_from_correction(
     db: Session,
+    tenant_id: uuid.UUID,
     rule_set_id: uuid.UUID,
     req: SkillLearnRequest,
 ) -> tuple[RuleParseSkillOut, list[str]]:
@@ -245,7 +285,13 @@ def learn_from_correction(
 
     target: RuleParseSkill | None = None
     if req.skill_id is not None:
-        target = db.get(RuleParseSkill, req.skill_id)
+        target = get_skill(
+            db,
+            tenant_id,
+            rule_set_id,
+            req.skill_id,
+            include_builtin=False,
+        )
         if target is None:
             raise ValueError("目标 Skill 不存在")
         if target.is_builtin:
@@ -253,6 +299,7 @@ def learn_from_correction(
     else:
         target = db.execute(
             select(RuleParseSkill).where(
+                RuleParseSkill.tenant_id == tenant_id,
                 RuleParseSkill.rule_set_id == rule_set_id,
                 RuleParseSkill.name == LEARN_SKILL_NAME,
             )
@@ -260,6 +307,7 @@ def learn_from_correction(
 
     if target is None:
         target = RuleParseSkill(
+            tenant_id=tenant_id,
             rule_set_id=rule_set_id,
             name=LEARN_SKILL_NAME,
             description="由人工修正解析错误自动累积的经验指令，导入规则时自动注入解析提示词",

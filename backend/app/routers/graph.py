@@ -9,6 +9,7 @@ from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
+from ..auth.dependencies import AuthContext, require_permission
 from ..database import get_db
 from ..schemas.graph import (
     GraphConfirmRequest,
@@ -108,6 +109,7 @@ async def import_rules_from_document(
     file: UploadFile = File(...),
     skill_ids: str | None = Query(None, description="逗号分隔的 Skill ID 列表"),
     db: Session = Depends(get_db),
+    ctx: AuthContext = Depends(require_permission("rules.manage")),
 ) -> dict:
     """从上传的规则描述文档（PDF/EXCEL/WORD/MD）导入规则，归到指定规则集下。
 
@@ -135,7 +137,14 @@ async def import_rules_from_document(
         tmp.write(content)
         tmp_path = tmp.name
 
-    task = rule_import_task.create_task(str(rule_set_id), file.filename)
+    if rule_service.get_rule_set(db, ctx.tenant.id, rule_set_id) is None:
+        raise HTTPException(status_code=404, detail="规则集不存在")
+    task = rule_import_task.create_task(
+        str(rule_set_id),
+        ctx.tenant.id,
+        ctx.user.id,
+        file.filename,
+    )
 
     import threading
 
@@ -177,9 +186,12 @@ class ImportTaskOut(BaseModel):
 
 
 @router.get("/import-tasks/{task_id}", response_model=ImportTaskOut)
-def get_import_task(task_id: str) -> ImportTaskOut:
+def get_import_task(
+    task_id: str,
+    ctx: AuthContext = Depends(require_permission("rules.view")),
+) -> ImportTaskOut:
     """查询导入任务的进度与结果。前端轮询此接口。"""
-    task = rule_import_task.get_task(task_id)
+    task = rule_import_task.get_task(task_id, ctx.tenant.id)
     if task is None:
         raise HTTPException(status_code=404, detail="任务不存在或已过期")
     return ImportTaskOut(**task.to_dict())
@@ -192,9 +204,13 @@ def get_import_task(task_id: str) -> ImportTaskOut:
 def get_latest_graph(
     rule_set_id: uuid.UUID = Query(..., description="规则集 ID"),
     db: Session = Depends(get_db),
+    ctx: AuthContext = Depends(require_permission("graph.view")),
 ) -> GraphData:
     """查看指定规则集的最新规则图谱。"""
-    snap = rule_service.get_latest_snapshot(db, rule_set_id)
+    try:
+        snap = rule_service.get_latest_snapshot(db, ctx.tenant.id, rule_set_id)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e)) from e
     if snap is None or not snap.graph_id:
         raise HTTPException(status_code=404, detail="暂无图谱，请先构建")
     return graph_builder_service.get_graph(None, snap.graph_id)

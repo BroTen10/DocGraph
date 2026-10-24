@@ -384,6 +384,7 @@ def extract_text_from_file(file_path: str, filename: str) -> str:
 
 def import_rules_from_document(
     db: Session,
+    tenant_id: uuid.UUID,
     rule_set_id: uuid.UUID,
     file_content: bytes,
     filename: str,
@@ -422,6 +423,7 @@ def import_rules_from_document(
         # 复用带 Skill 的导入逻辑
         result = import_rules_with_skills(
             db,
+            tenant_id,
             rule_set_id,
             text,
             skill_ids=skill_ids,

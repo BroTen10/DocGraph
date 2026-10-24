@@ -261,7 +261,7 @@ class _FakeLLM:
         return self.response
 
 
-def _fake_create_rule(_db, _rule_set_id, payload):
+def _fake_create_rule(_db, _tenant_id, _rule_set_id, payload):
     data = payload.model_dump(mode="json")
     return SimpleNamespace(model_dump=lambda mode="json": data)
 
@@ -319,6 +319,7 @@ class ImportPipelineSourceRefTests(unittest.TestCase):
         ):
             result = import_rules_from_text(
                 _FakeDB(),
+                uuid.uuid4(),
                 uuid.uuid4(),
                 "[SOURCE_ROW=规则!2] {\"规则描述\":\"规则A\"}\n"
                 "[SOURCE_ROW=规则!3] {\"规则描述\":\"规则B\"}",

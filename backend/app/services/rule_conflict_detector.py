@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import uuid
 from typing import Any
 
 from sqlalchemy import select
@@ -19,10 +20,11 @@ from sqlalchemy.orm import Session
 
 from ..llm_client import LLMError, get_llm_client
 from ..models import Rule
+from ..tenant_scope import tenant_get
 from . import rule_defects
 from .settings_service import get_prompt
 from .rule_import_task import ImportProgress, update_task
-from .rule_service import format_rule_code
+from .rule_service import format_rule_code, get_rule_set
 
 logger = logging.getLogger(__name__)
 
@@ -128,8 +130,8 @@ def _canonicalize_conflict_description(
 
 def detect_conflicts_in_rules(
     rules: list[Rule],
+    tenant_id: uuid.UUID,
     db=None,
-    tenant_id=None,
 ) -> list[dict]:
     """对一组规则进行语义冲突检测。
 
@@ -261,9 +263,9 @@ def detect_conflicts_in_rules(
 
 def detect_all_conflicts(
     db: Session,
+    tenant_id: uuid.UUID,
     rule_set_id: str,
     progress: ImportProgress | None = None,
-    tenant_id=None,
 ) -> list[dict]:
     """检测指定规则集内所有规则的语义冲突。
 
@@ -273,11 +275,13 @@ def detect_all_conflicts(
     Returns:
         合并的冲突列表
     """
+    if get_rule_set(db, tenant_id, uuid.UUID(str(rule_set_id))) is None:
+        raise ValueError("规则集不存在")
     rules = db.execute(
         select(Rule)
         .where(
+            Rule.tenant_id == tenant_id,
             Rule.rule_set_id == rule_set_id,
-            *([Rule.tenant_id == tenant_id] if tenant_id is not None else []),
         )
         .order_by(Rule.doc_type, Rule.check_category, Rule.priority, Rule.rule_no)
     ).scalars().all()
@@ -294,7 +298,7 @@ def detect_all_conflicts(
 
     all_conflicts: list[dict] = []
     for _i, ((_doc_type, _check_category), group) in enumerate(groups.items(), start=1):
-        conflicts = detect_conflicts_in_rules(group, db, tenant_id=tenant_id)
+        conflicts = detect_conflicts_in_rules(group, tenant_id, db)
         all_conflicts.extend(conflicts)
         if conflicts:
             logger.info(
@@ -308,7 +312,12 @@ def detect_all_conflicts(
     return all_conflicts
 
 
-def apply_conflicts_as_defects(db: Session, rule_set_id: str, conflicts: list[dict]) -> int:
+def apply_conflicts_as_defects(
+    db: Session,
+    tenant_id: uuid.UUID,
+    rule_set_id: str,
+    conflicts: list[dict],
+) -> int:
     """将检测到的冲突写入关联规则的 defects 字段。
 
     每条冲突记录会附加到涉及的所有规则的 defects 中。
@@ -326,13 +335,15 @@ def apply_conflicts_as_defects(db: Session, rule_set_id: str, conflicts: list[di
             conflict_codes = [
                 rule.rule_code
                 for rid in rule_ids
-                for rule in (db.get(Rule, rid),)
+                for rule in (tenant_get(db, Rule, uuid.UUID(str(rid)), tenant_id),)
                 if rule is not None
             ]
         for rid in rule_ids:
             affected.add(rid)
-            rule = db.get(Rule, rid)
+            rule = tenant_get(db, Rule, uuid.UUID(str(rid)), tenant_id)
             if rule is None:
+                continue
+            if str(rule.rule_set_id) != str(rule_set_id):
                 continue
             related_ids = [r for r in rule_ids if r != rid]
             related_codes = [
@@ -387,10 +398,16 @@ def apply_conflicts_as_defects(db: Session, rule_set_id: str, conflicts: list[di
     return len(affected)
 
 
-def clear_old_conflicts(db: Session, rule_set_id: str, current_conflict_ids: set[str]) -> int:
+def clear_old_conflicts(
+    db: Session,
+    tenant_id: uuid.UUID,
+    rule_set_id: str,
+    current_conflict_ids: set[str],
+) -> int:
     """清除不再有效的冲突缺陷（从规则的 defects 中移除）。"""
     rules = db.execute(
         select(Rule).where(
+            Rule.tenant_id == tenant_id,
             Rule.rule_set_id == rule_set_id,
         )
     ).scalars().all()
@@ -425,35 +442,34 @@ def clear_old_conflicts(db: Session, rule_set_id: str, current_conflict_ids: set
     return cleared
 
 
-def run_conflict_detection(db: Session, rule_set_id: str, progress: ImportProgress | None = None) -> dict[str, Any]:
+def run_conflict_detection(
+    db: Session,
+    tenant_id: uuid.UUID,
+    rule_set_id: str,
+    progress: ImportProgress | None = None,
+) -> dict[str, Any]:
     """运行完整的冲突检测流程：检测 → 写入 → 清理。
 
     Returns:
         {"total_conflicts": N, "affected_rules": N, "conflicts": [...]}
     """
-    from ..models import RuleSet
-
-    rule_set = db.execute(
-        select(RuleSet).where(RuleSet.id == rule_set_id)
-    ).scalar_one_or_none()
-    if rule_set is None:
+    if get_rule_set(db, tenant_id, uuid.UUID(str(rule_set_id))) is None:
         raise ValueError("规则集不存在")
-    tenant_id = rule_set.tenant_id
     conflicts = detect_all_conflicts(
         db,
+        tenant_id,
         rule_set_id,
         progress=progress,
-        tenant_id=tenant_id,
     )
 
     # 当前冲突的描述作为去重标识
     current_descriptions = {c.get("description", "") for c in conflicts if c.get("description")}
 
     # 清除旧冲突
-    clear_old_conflicts(db, rule_set_id, current_descriptions)
+    clear_old_conflicts(db, tenant_id, rule_set_id, current_descriptions)
 
     # 写入新冲突
-    affected = apply_conflicts_as_defects(db, rule_set_id, conflicts)
+    affected = apply_conflicts_as_defects(db, tenant_id, rule_set_id, conflicts)
 
     return {
         "total_conflicts": len(conflicts),

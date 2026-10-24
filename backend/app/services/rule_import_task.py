@@ -14,6 +14,7 @@ from __future__ import annotations
 import logging
 import os
 import threading
+import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Optional
@@ -27,6 +28,8 @@ class ImportProgress:
 
     task_id: str
     rule_set_id: str
+    tenant_id: str
+    user_id: str
     status: str = "pending"  # pending|extracting|parsing|importing|conflict|done|error
     message: str = ""
     file_name: str = ""
@@ -73,16 +76,29 @@ _TASKS: dict[str, ImportProgress] = {}
 _TASKS_LOCK = threading.Lock()
 
 
-def get_task(task_id: str) -> Optional[ImportProgress]:
+def get_task(
+    task_id: str,
+    tenant_id: uuid.UUID | str,
+) -> Optional[ImportProgress]:
     with _TASKS_LOCK:
-        return _TASKS.get(task_id)
+        task = _TASKS.get(task_id)
+        if task is None or task.tenant_id != str(tenant_id):
+            return None
+        return task
 
 
-def create_task(rule_set_id: str, file_name: str) -> ImportProgress:
+def create_task(
+    rule_set_id: str,
+    tenant_id: uuid.UUID | str,
+    user_id: uuid.UUID | str,
+    file_name: str,
+) -> ImportProgress:
     now = datetime.now(timezone.utc).isoformat()
     task = ImportProgress(
         task_id=__import__("uuid").uuid4().hex,
         rule_set_id=str(rule_set_id),
+        tenant_id=str(tenant_id),
+        user_id=str(user_id),
         file_name=file_name,
         created_at=now,
         updated_at=now,
@@ -111,11 +127,13 @@ def run_import_task(
     异常会被捕获并写入 task.error，不会导致进程崩溃。
     """
     from ..database import SessionLocal
+    from ..tenant_scope import bind_tenant
     from .rule_document_import_service import extract_document_from_file
     from .rule_import_service import import_rules_with_skills
 
     db = SessionLocal()
     try:
+        bind_tenant(db, uuid.UUID(task.tenant_id))
         # 阶段 1：提取文本
         update_task(task, status="extracting", message="正在提取文档文本…")
         document = extract_document_from_file(file_path, filename)
@@ -127,7 +145,8 @@ def run_import_task(
         update_task(task, status="parsing", message="正在调用大模型解析规则…")
         result = import_rules_with_skills(
             db,
-            task.rule_set_id,
+            uuid.UUID(task.tenant_id),
+            uuid.UUID(task.rule_set_id),
             document.text,
             skill_ids=skill_ids,
             progress=task,

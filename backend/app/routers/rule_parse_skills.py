@@ -7,6 +7,7 @@ import uuid
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
+from ..auth.dependencies import AuthContext, require_permission
 from ..database import get_db
 from ..schemas.rule_parse_skill import (
     RuleParseSkillCreate,
@@ -14,18 +15,29 @@ from ..schemas.rule_parse_skill import (
     RuleParseSkillUpdate,
     SkillLearnRequest,
 )
-from ..services import rule_parse_skill_service
+from ..services import rule_parse_skill_service, rule_service
 
 router = APIRouter(prefix="/api/rule-sets/{rule_set_id}/skills", tags=["rule-parse-skills"])
+
+
+def _require_rule_set(db: Session, tenant_id, rule_set_id):
+    if rule_service.get_rule_set(db, tenant_id, rule_set_id) is None:
+        raise HTTPException(status_code=404, detail="规则集不存在")
 
 
 @router.get("", response_model=list[RuleParseSkillOut])
 def list_skills(
     rule_set_id: uuid.UUID,
     db: Session = Depends(get_db),
+    ctx: AuthContext = Depends(require_permission("rules.view")),
 ) -> list[RuleParseSkillOut]:
     """获取规则集的所有可用 Skill（含内置默认）。"""
-    return rule_parse_skill_service.list_skills(db, rule_set_id=rule_set_id)
+    _require_rule_set(db, ctx.tenant.id, rule_set_id)
+    return rule_parse_skill_service.list_skills(
+        db,
+        ctx.tenant.id,
+        rule_set_id,
+    )
 
 
 @router.post("", response_model=RuleParseSkillOut, status_code=201)
@@ -33,10 +45,17 @@ def create_skill(
     rule_set_id: uuid.UUID,
     payload: RuleParseSkillCreate,
     db: Session = Depends(get_db),
+    ctx: AuthContext = Depends(require_permission("rules.manage")),
 ) -> RuleParseSkillOut:
     """为规则集创建自定义 Skill（内容用 YAML 文本 content_yaml 提交）。"""
+    _require_rule_set(db, ctx.tenant.id, rule_set_id)
     try:
-        return rule_parse_skill_service.create_skill(db, rule_set_id, payload)
+        return rule_parse_skill_service.create_skill(
+            db,
+            ctx.tenant.id,
+            rule_set_id,
+            payload,
+        )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
@@ -46,14 +65,19 @@ def learn_from_correction(
     rule_set_id: uuid.UUID,
     payload: SkillLearnRequest,
     db: Session = Depends(get_db),
+    ctx: AuthContext = Depends(require_permission("rules.manage")),
 ) -> dict:
     """将人工修正规则的经验写回 Skill（默认写入『经验修正（自动累积）』）。
 
     注意：必须注册在 /{skill_id} 之前，否则会被路径参数路由截获。
     """
+    _require_rule_set(db, ctx.tenant.id, rule_set_id)
     try:
         skill, added = rule_parse_skill_service.learn_from_correction(
-            db, rule_set_id, payload
+            db,
+            ctx.tenant.id,
+            rule_set_id,
+            payload,
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -69,8 +93,14 @@ def get_skill(
     rule_set_id: uuid.UUID,
     skill_id: uuid.UUID,
     db: Session = Depends(get_db),
+    ctx: AuthContext = Depends(require_permission("rules.view")),
 ) -> RuleParseSkillOut:
-    skill = rule_parse_skill_service.get_skill(db, skill_id)
+    skill = rule_parse_skill_service.get_skill(
+        db,
+        ctx.tenant.id,
+        rule_set_id,
+        skill_id,
+    )
     if skill is None:
         raise HTTPException(status_code=404, detail="Skill 不存在")
     return RuleParseSkillOut.model_validate(skill)
@@ -82,6 +112,7 @@ def update_skill(
     skill_id: uuid.UUID,
     payload: RuleParseSkillUpdate,
     db: Session = Depends(get_db),
+    ctx: AuthContext = Depends(require_permission("rules.manage")),
 ) -> RuleParseSkillOut:
     """更新 Skill。
 
@@ -90,7 +121,11 @@ def update_skill(
     """
     try:
         result = rule_parse_skill_service.update_skill(
-            db, skill_id, payload, rule_set_id=rule_set_id
+            db,
+            ctx.tenant.id,
+            rule_set_id,
+            skill_id,
+            payload,
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -104,10 +139,16 @@ def delete_skill(
     rule_set_id: uuid.UUID,
     skill_id: uuid.UUID,
     db: Session = Depends(get_db),
+    ctx: AuthContext = Depends(require_permission("rules.manage")),
 ) -> dict:
     """删除自定义 Skill（内置不可删除）。"""
     try:
-        ok = rule_parse_skill_service.delete_skill(db, skill_id)
+        ok = rule_parse_skill_service.delete_skill(
+            db,
+            ctx.tenant.id,
+            rule_set_id,
+            skill_id,
+        )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     if not ok:

@@ -624,7 +624,12 @@ def _known_doc_types(
     names: list[str] = []
     seen: set[str] = set()
 
-    rs = db.get(RuleSet, rule_set_id)
+    rs = db.execute(
+        select(RuleSet).where(
+            RuleSet.id == rule_set_id,
+            RuleSet.tenant_id == tenant_id,
+        )
+    ).scalar_one_or_none()
     if rs is not None:
         for name in rs.doc_types or []:
             name = str(name).strip()
@@ -651,7 +656,11 @@ def _known_doc_types(
     return names
 
 
-def _known_check_categories(db: Session, rule_set_id: uuid.UUID) -> list[str]:
+def _known_check_categories(
+    db: Session,
+    tenant_id: uuid.UUID,
+    rule_set_id: uuid.UUID,
+) -> list[str]:
     """构造规则导入提示词中的"已知检查项"清单。
 
     与 _known_doc_types 对称：当前规则集已累积的检查项/意图
@@ -661,7 +670,12 @@ def _known_check_categories(db: Session, rule_set_id: uuid.UUID) -> list[str]:
     names: list[str] = []
     seen: set[str] = set()
 
-    rs = db.get(RuleSet, rule_set_id)
+    rs = db.execute(
+        select(RuleSet).where(
+            RuleSet.id == rule_set_id,
+            RuleSet.tenant_id == tenant_id,
+        )
+    ).scalar_one_or_none()
     if rs is not None:
         for name in rs.check_categories or []:
             name = str(name).strip()
@@ -749,7 +763,10 @@ def _compute_source_coverage(
 
 
 def import_rules_from_text(
-    db: Session, rule_set_id: uuid.UUID, raw_text: str,
+    db: Session,
+    tenant_id: uuid.UUID,
+    rule_set_id: uuid.UUID,
+    raw_text: str,
     directive: RuleParseDirective | None = None,
     progress: ImportProgress | None = None,
     source_rows: list[dict[str, Any]] | None = None,
@@ -773,11 +790,13 @@ def import_rules_from_text(
     if not raw_text:
         raise ValueError("规则清单文本为空")
     rule_set = db.execute(
-        select(RuleSet).where(RuleSet.id == rule_set_id)
+        select(RuleSet).where(
+            RuleSet.id == rule_set_id,
+            RuleSet.tenant_id == tenant_id,
+        )
     ).scalar_one_or_none()
     if rule_set is None:
         raise ValueError("规则集不存在")
-    tenant_id = rule_set.tenant_id
 
     source_rows = source_rows or []
     source_row_map = {
@@ -796,7 +815,9 @@ def import_rules_from_text(
     doc_types_str = "、".join(
         _known_doc_types(db, rule_set_id, tenant_id)
     )
-    check_categories_str = "、".join(_known_check_categories(db, rule_set_id))
+    check_categories_str = "、".join(
+        _known_check_categories(db, tenant_id, rule_set_id)
+    )
 
     # 长文本分段解析：避免单次输出超 max_tokens 被截断（JSON 不完整）
     chunks = _split_text(raw_text)
@@ -1050,7 +1071,10 @@ def import_rules_from_text(
         # ----- 2. 规则集内语义去重+智能合并（批次 10：不再按 (doc_type, check_category) 格子分组）-----
         normed = _normalize_text(rule_text)
         existing_rules = db.execute(
-            select(Rule).where(Rule.rule_set_id == rule_set_id)
+            select(Rule).where(
+                Rule.tenant_id == tenant_id,
+                Rule.rule_set_id == rule_set_id,
+            )
         ).scalars().all()
         dup_rule = _find_similar_rule(
             rule_text,
@@ -1111,7 +1135,7 @@ def import_rules_from_text(
                 status=status,
                 defects=clean_defects,
             )
-            rule_out = create_rule(db, rule_set_id, payload)
+            rule_out = create_rule(db, tenant_id, rule_set_id, payload)
             rule_dict = rule_out.model_dump(mode="json")
             rule_dict["source_ref"] = source_ref or None
             rule_dict["source_row"] = (source_row or {}).get("row")
@@ -1148,7 +1172,12 @@ def import_rules_from_text(
     # 更新 rule_set.doc_types / check_categories，合并新发现的类型
     if imported:
         try:
-            rs = db.execute(select(RuleSet).where(RuleSet.id == rule_set_id)).scalars().first()
+            rs = db.execute(
+                select(RuleSet).where(
+                    RuleSet.id == rule_set_id,
+                    RuleSet.tenant_id == tenant_id,
+                )
+            ).scalars().first()
             if rs:
                 cur_docs = set(rs.doc_types or [])
                 cur_cats = set(rs.check_categories or [])
@@ -1289,6 +1318,7 @@ def import_rules_from_text(
 
 def import_rules_with_skills(
     db: Session,
+    tenant_id: uuid.UUID,
     rule_set_id: uuid.UUID,
     raw_text: str,
     skill_ids: list[uuid.UUID] | None = None,
@@ -1311,13 +1341,34 @@ def import_rules_with_skills(
     Returns:
         同 import_rules_from_text 的返回
     """
+    rule_set = db.execute(
+        select(RuleSet).where(
+            RuleSet.id == rule_set_id,
+            RuleSet.tenant_id == tenant_id,
+        )
+    ).scalar_one_or_none()
+    if rule_set is None:
+        raise ValueError("规则集不存在")
+
     if skill_ids:
         # 指定了具体的 Skill 列表，只加载这些（批次 3-6：停用/不存在的 Skill 显式报错，杜绝静默丢弃）
         from ..models import RuleParseSkill
         from sqlalchemy import select
         requested = list(dict.fromkeys(skill_ids))
         skills = db.execute(
-            select(RuleParseSkill).where(RuleParseSkill.id.in_(requested))
+            select(RuleParseSkill).where(
+                RuleParseSkill.id.in_(requested),
+                (
+                    (
+                        (RuleParseSkill.tenant_id == tenant_id)
+                        & (RuleParseSkill.rule_set_id == rule_set_id)
+                    )
+                    | (
+                        RuleParseSkill.is_builtin.is_(True)
+                        & RuleParseSkill.tenant_id.is_(None)
+                    )
+                ),
+            )
         ).scalars().all()
         by_id = {s.id: s for s in skills}
         missing = [sid for sid in requested if sid not in by_id]
@@ -1334,10 +1385,11 @@ def import_rules_with_skills(
     else:
         # 未指定，从数据库编译（内置默认 + 自定义）
         from .rule_parse_engine import compile_directive
-        directive = compile_directive(db, rule_set_id)
+        directive = compile_directive(db, tenant_id, rule_set_id)
 
     result = import_rules_from_text(
         db,
+        tenant_id,
         rule_set_id,
         raw_text,
         directive=directive,
@@ -1352,7 +1404,12 @@ def import_rules_with_skills(
             from .rule_conflict_detector import run_conflict_detection
             if progress is not None:
                 update_task(progress, status="conflict", message="正在检测规则冲突…", conflict_found=0)
-            conflict_result = run_conflict_detection(db, str(rule_set_id), progress=progress)
+            conflict_result = run_conflict_detection(
+                db,
+                tenant_id,
+                str(rule_set_id),
+                progress=progress,
+            )
             if progress is not None:
                 update_task(progress, conflict_found=conflict_result.get("total_conflicts", 0))
             if conflict_result.get("total_conflicts", 0) > 0:

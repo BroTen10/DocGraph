@@ -14,6 +14,7 @@ from sqlalchemy.orm import Session
 
 from ..models import Rule, RuleSet, RuleSnapshot
 from ..schemas.rule import RuleCreate, RuleOut, RuleUpdate
+from ..tenant_scope import tenant_get
 from . import rule_defects
 from .doc_normalizer import (
     normalize_doc_type,
@@ -27,13 +28,35 @@ def format_rule_code(rule_no: int) -> str:
     return f"R{int(rule_no):04d}"
 
 
-def allocate_rule_no(db: Session, rule_set_id: uuid.UUID) -> int:
+def get_rule_set(
+    db: Session,
+    tenant_id: uuid.UUID,
+    rule_set_id: uuid.UUID,
+    *,
+    for_update: bool = False,
+) -> RuleSet | None:
+    """Return a rule set only when it belongs to the current tenant."""
+    stmt = select(RuleSet).where(
+        RuleSet.id == rule_set_id,
+        RuleSet.tenant_id == tenant_id,
+    )
+    if for_update:
+        stmt = stmt.with_for_update()
+    return db.execute(stmt).scalar_one_or_none()
+
+
+def allocate_rule_no(
+    db: Session,
+    tenant_id: uuid.UUID,
+    rule_set_id: uuid.UUID,
+) -> int:
     """为规则集分配下一个流水号（行锁串行化，删除后不复用）。"""
-    rule_set = db.execute(
-        select(RuleSet)
-        .where(RuleSet.id == rule_set_id)
-        .with_for_update()
-    ).scalars().first()
+    rule_set = get_rule_set(
+        db,
+        tenant_id,
+        rule_set_id,
+        for_update=True,
+    )
     if rule_set is None:
         raise ValueError(f"规则集不存在: {rule_set_id}")
     rule_no = int(rule_set.next_rule_no or 1)
@@ -56,6 +79,7 @@ def _stamp_defect_rule_code(defects: list[dict] | None, rule_code: str) -> list[
 
 def list_rules(
     db: Session,
+    tenant_id: uuid.UUID,
     rule_set_id: uuid.UUID,
     doc_type: Optional[str] = None,
     check_category: Optional[str] = None,
@@ -68,9 +92,14 @@ def list_rules(
     defect_severity 采用「归桶」语义（每个规则只属于一个桶，见 rule_defects.classify）：
     none(正常规则) / conflict / error / warning / info，只统计**未处理**缺陷。
     """
+    if get_rule_set(db, tenant_id, rule_set_id) is None:
+        raise ValueError("规则集不存在")
     stmt = (
         select(Rule)
-        .where(Rule.rule_set_id == rule_set_id)
+        .where(
+            Rule.tenant_id == tenant_id,
+            Rule.rule_set_id == rule_set_id,
+        )
         .order_by(Rule.doc_type, Rule.check_category, Rule.priority, Rule.rule_no)
     )
     if doc_type:
@@ -91,8 +120,12 @@ def list_rules(
     return result
 
 
-def get_rule(db: Session, rule_id: uuid.UUID) -> Optional[Rule]:
-    return db.get(Rule, rule_id)
+def get_rule(
+    db: Session,
+    tenant_id: uuid.UUID,
+    rule_id: uuid.UUID,
+) -> Optional[Rule]:
+    return tenant_get(db, Rule, rule_id, tenant_id)
 
 
 def _accept_defects(
@@ -105,17 +138,19 @@ def _accept_defects(
     return count
 
 
-def create_rule(db: Session, rule_set_id: uuid.UUID, payload: RuleCreate) -> RuleOut:
+def create_rule(
+    db: Session,
+    tenant_id: uuid.UUID,
+    rule_set_id: uuid.UUID,
+    payload: RuleCreate,
+) -> RuleOut:
     """创建规则（必须挂在指定规则集下）。"""
     try:
-        rule_set = db.execute(
-            select(RuleSet).where(RuleSet.id == rule_set_id)
-        ).scalar_one_or_none()
+        rule_set = get_rule_set(db, tenant_id, rule_set_id)
         if rule_set is None:
             raise ValueError("规则集不存在")
-        tenant_id = rule_set.tenant_id
         data = payload.model_dump()
-        rule_no = allocate_rule_no(db, rule_set_id)
+        rule_no = allocate_rule_no(db, tenant_id, rule_set_id)
         rule_code = format_rule_code(rule_no)
         data["rule_no"] = rule_no
         data["defects"] = _stamp_defect_rule_code(data.get("defects"), rule_code)
@@ -148,14 +183,16 @@ def create_rule(db: Session, rule_set_id: uuid.UUID, payload: RuleCreate) -> Rul
 
 
 def update_rule(
-    db: Session, rule_id: uuid.UUID, payload: RuleUpdate
+    db: Session,
+    tenant_id: uuid.UUID,
+    rule_id: uuid.UUID,
+    payload: RuleUpdate,
 ) -> Optional[RuleOut]:
     from datetime import datetime
 
-    rule = db.get(Rule, rule_id)
+    rule = get_rule(db, tenant_id, rule_id)
     if rule is None:
         return None
-    tenant_id = rule.tenant_id
     data = payload.model_dump(exclude_unset=True)
     # 批次 11：写时归一——手工编辑规则同样归一文档类型与字段名
     if data.get("doc_type"):
@@ -188,8 +225,12 @@ def update_rule(
     return RuleOut.model_validate(rule)
 
 
-def delete_rule(db: Session, rule_id: uuid.UUID) -> bool:
-    rule = db.get(Rule, rule_id)
+def delete_rule(
+    db: Session,
+    tenant_id: uuid.UUID,
+    rule_id: uuid.UUID,
+) -> bool:
+    rule = get_rule(db, tenant_id, rule_id)
     if rule is None:
         return False
     db.delete(rule)
@@ -199,6 +240,7 @@ def delete_rule(db: Session, rule_id: uuid.UUID) -> bool:
 
 def delete_rules_batch(
     db: Session,
+    tenant_id: uuid.UUID,
     rule_set_id: uuid.UUID,
     ids: Optional[list[uuid.UUID]] = None,
 ) -> int:
@@ -207,7 +249,12 @@ def delete_rules_batch(
     Returns:
         实际删除的规则条数
     """
-    stmt = select(Rule).where(Rule.rule_set_id == rule_set_id)
+    if get_rule_set(db, tenant_id, rule_set_id) is None:
+        raise ValueError("规则集不存在")
+    stmt = select(Rule).where(
+        Rule.tenant_id == tenant_id,
+        Rule.rule_set_id == rule_set_id,
+    )
     if ids:
         stmt = stmt.where(Rule.id.in_(ids))
     rows = db.execute(stmt).scalars().all()
@@ -218,27 +265,47 @@ def delete_rules_batch(
     return n
 
 
-def list_snapshots(db: Session, rule_set_id: uuid.UUID) -> list[RuleSnapshot]:
+def list_snapshots(
+    db: Session,
+    tenant_id: uuid.UUID,
+    rule_set_id: uuid.UUID,
+) -> list[RuleSnapshot]:
     """规则快照列表（按规则集过滤、按时间倒序）。"""
+    if get_rule_set(db, tenant_id, rule_set_id) is None:
+        raise ValueError("规则集不存在")
     stmt = (
         select(RuleSnapshot)
-        .where(RuleSnapshot.rule_set_id == rule_set_id)
+        .where(
+            RuleSnapshot.tenant_id == tenant_id,
+            RuleSnapshot.rule_set_id == rule_set_id,
+        )
         .order_by(RuleSnapshot.snapshot_time.desc())
     )
     return list(db.execute(stmt).scalars().all())
 
 
-def get_snapshot(db: Session, snapshot_id: uuid.UUID) -> Optional[RuleSnapshot]:
-    return db.get(RuleSnapshot, snapshot_id)
+def get_snapshot(
+    db: Session,
+    tenant_id: uuid.UUID,
+    snapshot_id: uuid.UUID,
+) -> Optional[RuleSnapshot]:
+    return tenant_get(db, RuleSnapshot, snapshot_id, tenant_id)
 
 
 def get_latest_snapshot(
-    db: Session, rule_set_id: uuid.UUID
+    db: Session,
+    tenant_id: uuid.UUID,
+    rule_set_id: uuid.UUID,
 ) -> Optional[RuleSnapshot]:
     """获取指定规则集下的最新快照（必须按 rule_set_id 过滤）。"""
+    if get_rule_set(db, tenant_id, rule_set_id) is None:
+        raise ValueError("规则集不存在")
     stmt = (
         select(RuleSnapshot)
-        .where(RuleSnapshot.rule_set_id == rule_set_id)
+        .where(
+            RuleSnapshot.tenant_id == tenant_id,
+            RuleSnapshot.rule_set_id == rule_set_id,
+        )
         .order_by(RuleSnapshot.snapshot_time.desc())
         .limit(1)
     )
@@ -246,8 +313,11 @@ def get_latest_snapshot(
 
 
 def confirm_rules_batch(
-    db: Session, rule_set_id: uuid.UUID, ids: Optional[list[uuid.UUID]] = None,
-    confirmed_by: str = "user",
+    db: Session,
+    tenant_id: uuid.UUID,
+    rule_set_id: uuid.UUID,
+    confirmed_by: str,
+    ids: Optional[list[uuid.UUID]] = None,
 ) -> int:
     """批量确认规则：状态改为 confirmed 并启用，同时把未处理缺陷标记为已处理。
 
@@ -259,7 +329,12 @@ def confirm_rules_batch(
     """
     from datetime import datetime
 
-    stmt = select(Rule).where(Rule.rule_set_id == rule_set_id)
+    if get_rule_set(db, tenant_id, rule_set_id) is None:
+        raise ValueError("规则集不存在")
+    stmt = select(Rule).where(
+        Rule.tenant_id == tenant_id,
+        Rule.rule_set_id == rule_set_id,
+    )
     if ids:
         stmt = stmt.where(Rule.id.in_(ids))
     else:
@@ -278,12 +353,17 @@ def confirm_rules_batch(
 
 
 def get_enabled_rules_for_snapshot(
-    db: Session, rule_set_id: uuid.UUID
+    db: Session,
+    tenant_id: uuid.UUID,
+    rule_set_id: uuid.UUID,
 ) -> list[Rule]:
     """获取指定规则集下所有已启用且已确认的规则（用于生成快照/图谱构建）。"""
     stmt = (
         select(Rule)
-        .where(Rule.rule_set_id == rule_set_id)
+        .where(
+            Rule.tenant_id == tenant_id,
+            Rule.rule_set_id == rule_set_id,
+        )
         .where(Rule.enabled.is_(True))
         .where(Rule.status == "confirmed")
         .order_by(Rule.doc_type, Rule.check_category, Rule.priority, Rule.rule_no)
@@ -291,7 +371,11 @@ def get_enabled_rules_for_snapshot(
     return list(db.execute(stmt).scalars().all())
 
 
-def get_defect_summary(db: Session, rule_set_id: uuid.UUID) -> dict:
+def get_defect_summary(
+    db: Session,
+    tenant_id: uuid.UUID,
+    rule_set_id: uuid.UUID,
+) -> dict:
     """获取规则集缺陷概览统计（**各页签均为规则条数**，互斥且穷尽）。
 
     每个规则按最严重的未处理缺陷归入唯一桶（冲突 > 错误 > 警告 > 提示 > 正常规则），
@@ -300,8 +384,13 @@ def get_defect_summary(db: Session, rule_set_id: uuid.UUID) -> dict:
     Returns:
         {"total_rules": N, "healthy": N, "conflict": N, "error": N, "warning": N, "info": N}
     """
+    if get_rule_set(db, tenant_id, rule_set_id) is None:
+        raise ValueError("规则集不存在")
     rules = db.execute(
-        select(Rule).where(Rule.rule_set_id == rule_set_id)
+        select(Rule).where(
+            Rule.tenant_id == tenant_id,
+            Rule.rule_set_id == rule_set_id,
+        )
     ).scalars().all()
 
     summary = {

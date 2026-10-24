@@ -11,6 +11,7 @@ from __future__ import annotations
 import copy
 import logging
 import re
+import uuid
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -51,28 +52,43 @@ class RuleParseDirective:
     domain_context: dict[str, Any] = field(default_factory=dict)
 
 
-def compile_directive(db: Session, rule_set_id: Any) -> RuleParseDirective:
+def compile_directive(
+    db: Session,
+    tenant_id: uuid.UUID,
+    rule_set_id: Any,
+) -> RuleParseDirective:
     """从数据库加载并编译指定规则集的所有已启用 Skill。
 
     1. 加载内置默认 Skill（始终生效）
     2. 加载该规则集的自定义 Skill（可覆盖内置）
     3. 按能力逐 key 合并
     """
-    from ..models import RuleSet
+    from .rule_service import get_rule_set
 
-    rs = db.get(RuleSet, rule_set_id)
-    use_default_skill = rs is None or rs.use_default_skill
+    rs = get_rule_set(db, tenant_id, rule_set_id)
+    if rs is None:
+        raise ValueError("规则集不存在")
+    use_default_skill = rs.use_default_skill
 
     conditions = [RuleParseSkill.enabled.is_(True)]
     if use_default_skill:
         # 内置默认 Skill（全局常驻）+ 该规则集自定义 Skill
         conditions.append(
-            (RuleParseSkill.is_builtin.is_(True))
-            | (RuleParseSkill.rule_set_id == rule_set_id)
+            (
+                RuleParseSkill.is_builtin.is_(True)
+                & RuleParseSkill.tenant_id.is_(None)
+            )
+            | (
+                (RuleParseSkill.tenant_id == tenant_id)
+                & (RuleParseSkill.rule_set_id == rule_set_id)
+            )
         )
     else:
         # 规则集关闭了内置默认 Skill 领域知识：仅使用该规则集自定义 Skill
-        conditions.append(RuleParseSkill.rule_set_id == rule_set_id)
+        conditions.append(
+            (RuleParseSkill.tenant_id == tenant_id)
+            & (RuleParseSkill.rule_set_id == rule_set_id)
+        )
 
     # 合并顺序：内置默认先合并，自定义后合并（后写覆盖先写）→ 自定义纠偏生效
     skills = db.execute(
