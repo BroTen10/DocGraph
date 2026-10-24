@@ -38,6 +38,7 @@ from .routers import (
     rule_sets,
     rules,
     settings as settings_router,
+    tenant_members,
 )
 from .version import app_version, collect_build_info
 
@@ -140,6 +141,7 @@ async def csrf_protection(request: Request, call_next):
 
 # 注册路由
 app.include_router(auth.router)
+app.include_router(tenant_members.router)
 app.include_router(rule_sets.router)
 app.include_router(contracts.router)
 app.include_router(rules.router)

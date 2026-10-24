@@ -16,6 +16,7 @@ PUBLIC_AUTH_PATHS = frozenset({
     "/api/auth/login",
     "/api/auth/register",
     "/api/auth/verify-email",
+    "/api/auth/accept-invite",
     "/api/auth/password/forgot",
     "/api/auth/password/reset",
 })

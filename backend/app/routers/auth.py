@@ -39,8 +39,10 @@ from ..schemas.auth import (
     VerifyEmailRequest,
     VerifyEmailResponse,
 )
+from ..schemas.tenant import AcceptInviteRequest, AcceptInviteResponse
 from ..services import auth_service
 from ..services.email_service import EmailDeliveryError
+from ..services.tenant_member_service import MemberOperationError, accept_invitation
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
 
@@ -117,6 +119,22 @@ def verify_email(
         message="邮箱已验证，请等待平台管理员审核",
         status=status,
     )
+
+
+@router.post("/accept-invite", response_model=AcceptInviteResponse)
+def accept_member_invite(
+    payload: AcceptInviteRequest,
+    db: Session = Depends(get_db),
+) -> AcceptInviteResponse:
+    """Accept a tenant invitation and create the account plus membership."""
+    try:
+        accept_invitation(db, payload.token, payload.password)
+    except MemberOperationError as exc:
+        raise HTTPException(
+            status_code=409 if exc.code in {"ACCOUNT_EXISTS", "INVITE_USED"} else 400,
+            detail={"code": exc.code, "message": exc.message},
+        )
+    return AcceptInviteResponse(message="邀请已接受，请使用邮箱登录")
 
 
 @router.post("/login", response_model=LoginResponse)
