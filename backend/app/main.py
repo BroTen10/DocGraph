@@ -20,6 +20,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from .config import settings
 from .database import get_db, init_db
 from .routers import (
+    auth,
     contracts,
     doc_types,
     graph,
@@ -96,6 +97,7 @@ app.add_middleware(
 )
 
 # 注册路由
+app.include_router(auth.router)
 app.include_router(rule_sets.router)
 app.include_router(contracts.router)
 app.include_router(rules.router)

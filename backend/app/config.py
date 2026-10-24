@@ -73,6 +73,12 @@ class Settings(BaseSettings):
     # 邮件与对外链接
     email_backend: str = "smtp"
     public_base_url: str = "http://localhost:5173"
+    mail_from: str = "no-reply@localhost"
+    smtp_host: str = ""
+    smtp_port: int = 587
+    smtp_username: str = ""
+    smtp_password: str = ""
+    smtp_use_tls: bool = True
     trust_proxy_headers: bool = False
 
     @field_validator("upload_root")
