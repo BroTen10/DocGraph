@@ -2,7 +2,9 @@
 
 import axios, { AxiosError, InternalAxiosRequestConfig } from 'axios'
 import type {
+  AcceptInviteResponse,
   AnalyzeSampleResult,
+  AuthSessionResponse,
   BuildInfo,
   ConflictDetectionResponse,
   ConstantsResponse,
@@ -15,14 +17,25 @@ import type {
   DocTypeListResponse,
   DocTypeUpdate,
   DocumentBrief,
+  ForgotPasswordResponse,
   GraphBuildTaskStatus,
   GraphData,
   GraphOntology,
   ImportTask,
+  Invitation,
+  InviteMemberRequest,
+  Member,
+  MemberListResponse,
+  MemberUpdateRequest,
   OcrProfileItem,
   OcrTask,
   OcrTaskBrief,
   PromptOptimizeResult,
+  RegisterTenantRequest,
+  RegisterTenantResponse,
+  RegistrationListResponse,
+  ResetPasswordResponse,
+  ReviewActionResponse,
   ReviewResultByDoc,
   ReviewResultByRule,
   RuleParseSkill,
@@ -39,12 +52,36 @@ import type {
   SettingsResponse,
   SkillLearnRequest,
   SkillLearnResponse,
+  TenantListResponse,
+  TenantStatusResponse,
+  VerifyEmailResponse,
 } from '../types'
 
 const http = axios.create({
   baseURL: '/api',
+  withCredentials: true,
   // 批次 5-15：默认超时收紧到 2 分钟；上传/解析类长链路按调用覆盖（见各上传函数）
   timeout: 120000,
+})
+
+export const apiHttp = http
+
+let csrfToken = ''
+
+export function setCsrfToken(token: string): void {
+  csrfToken = token
+}
+
+export function clearCsrfToken(): void {
+  csrfToken = ''
+}
+
+http.interceptors.request.use((config) => {
+  const method = (config.method ?? 'get').toLowerCase()
+  if (csrfToken && ['post', 'put', 'patch', 'delete'].includes(method)) {
+    config.headers.set('X-CSRF-Token', csrfToken)
+  }
+  return config
 })
 
 /** 批次 5-15：GET 请求超时/网络错误自动重试一次（幂等安全；POST 不重试防重复提交） */
@@ -65,6 +102,10 @@ http.interceptors.response.use(
       await new Promise((r) => setTimeout(r, 600))
       return http.request(cfg)
     }
+    if (error.response?.status === 401 && typeof window !== 'undefined') {
+      clearCsrfToken()
+      window.dispatchEvent(new CustomEvent('docgraph:session-expired'))
+    }
     return Promise.reject(error)
   },
 )
@@ -76,11 +117,18 @@ const LONG_TIMEOUT = 600000
 export function getErrorMessage(e: unknown, fallback = '操作失败'): string {
   if (e && typeof e === 'object') {
     const maybe = e as {
-      response?: { data?: { detail?: unknown } }
+      response?: { data?: { detail?: unknown; code?: unknown; message?: unknown } }
       message?: unknown
       error?: unknown
     }
-    if (maybe.response?.data?.detail) return String(maybe.response.data.detail)
+    const detail = maybe.response?.data?.detail
+    if (typeof detail === 'string' && detail) return detail
+    if (detail && typeof detail === 'object' && 'message' in detail) {
+      return String((detail as { message?: unknown }).message ?? fallback)
+    }
+    if (typeof maybe.response?.data?.message === 'string') {
+      return maybe.response.data.message
+    }
     if (typeof maybe.message === 'string') return maybe.message
     if (typeof maybe.error === 'string') return maybe.error
   }
@@ -96,9 +144,126 @@ export function getErrorDetail(e: unknown): unknown {
   return undefined
 }
 
+export function getApiErrorCode(e: unknown): string | undefined {
+  if (!e || typeof e !== 'object') return undefined
+  const data = (e as {
+    response?: { data?: { code?: unknown; detail?: unknown } }
+  }).response?.data
+  if (typeof data?.code === 'string') return data.code
+  if (data?.detail && typeof data.detail === 'object' && 'code' in data.detail) {
+    const code = (data.detail as { code?: unknown }).code
+    return typeof code === 'string' ? code : undefined
+  }
+  return undefined
+}
+
 /** 判断是否为 antd Form 校验错误（含 errorFields）。 */
 export function isFormValidationError(e: unknown): boolean {
   return !!e && typeof e === 'object' && Array.isArray((e as { errorFields?: unknown }).errorFields)
+}
+
+// ============ 认证 ============
+export const authApi = {
+  register: (data: RegisterTenantRequest) =>
+    http.post<RegisterTenantResponse>('/auth/register', data).then((r) => r.data),
+  verifyEmail: (token: string) =>
+    http.post<VerifyEmailResponse>('/auth/verify-email', { token }).then((r) => r.data),
+  acceptInvite: (token: string, password: string) =>
+    http
+      .post<AcceptInviteResponse>('/auth/accept-invite', { token, password })
+      .then((r) => r.data),
+  login: async (email: string, password: string) => {
+    const response = await http.post<AuthSessionResponse>('/auth/login', { email, password })
+    setCsrfToken(response.data.csrf_token)
+    return response.data
+  },
+  me: async () => {
+    const response = await http.get<AuthSessionResponse>('/auth/me')
+    setCsrfToken(response.data.csrf_token)
+    return response.data
+  },
+  logout: async () => {
+    try {
+      await http.post('/auth/logout')
+    } finally {
+      clearCsrfToken()
+    }
+  },
+  logoutAll: async () => {
+    try {
+      await http.post('/auth/logout-all')
+    } finally {
+      clearCsrfToken()
+    }
+  },
+  forgotPassword: (email: string) =>
+    http.post<ForgotPasswordResponse>('/auth/password/forgot', { email }).then((r) => r.data),
+  resetPassword: async (token: string, newPassword: string) => {
+    try {
+      const response = await http.post<ResetPasswordResponse>('/auth/password/reset', {
+        token,
+        new_password: newPassword,
+      })
+      return response.data
+    } finally {
+      clearCsrfToken()
+    }
+  },
+  changePassword: async (currentPassword: string, newPassword: string) => {
+    try {
+      await http.put('/auth/password', {
+        current_password: currentPassword,
+        new_password: newPassword,
+      })
+    } finally {
+      clearCsrfToken()
+    }
+  },
+}
+
+// ============ 租户成员 ============
+export const tenantMembersApi = {
+  list: () => http.get<MemberListResponse>('/tenant/members').then((r) => r.data),
+  invite: (data: InviteMemberRequest) =>
+    http.post<Invitation>('/tenant/members/invite', data).then((r) => r.data),
+  update: (membershipId: string, data: MemberUpdateRequest) =>
+    http.patch<Member>(`/tenant/members/${membershipId}`, data).then((r) => r.data),
+  resend: (invitationId: string) =>
+    http
+      .post<Invitation>(`/tenant/members/invitations/${invitationId}/resend`)
+      .then((r) => r.data),
+  revoke: (invitationId: string) =>
+    http
+      .delete<{ success: boolean }>(`/tenant/members/invitations/${invitationId}`)
+      .then((r) => r.data),
+}
+
+// ============ 平台管理 ============
+export const platformApi = {
+  listRegistrations: (status?: string) =>
+    http
+      .get<RegistrationListResponse>('/platform/registrations', { params: { status } })
+      .then((r) => r.data),
+  approveRegistration: (registrationId: string, note?: string) =>
+    http
+      .post<ReviewActionResponse>(
+        `/platform/registrations/${registrationId}/approve`,
+        { note: note || null },
+      )
+      .then((r) => r.data),
+  rejectRegistration: (registrationId: string, reason: string) =>
+    http
+      .post<ReviewActionResponse>(
+        `/platform/registrations/${registrationId}/reject`,
+        { reason },
+      )
+      .then((r) => r.data),
+  listTenants: () =>
+    http.get<TenantListResponse>('/platform/tenants').then((r) => r.data),
+  setTenantStatus: (tenantId: string, status: 'active' | 'suspended' | 'archived') =>
+    http
+      .patch<TenantStatusResponse>(`/platform/tenants/${tenantId}/status`, { status })
+      .then((r) => r.data),
 }
 
 // ============ 规则集 ============

@@ -1,5 +1,169 @@
 /** 共享 TypeScript 类型定义。 */
 
+export type TenantRole = 'tenant_admin' | 'reviewer' | 'viewer'
+export type UserRole = TenantRole | 'platform_admin'
+
+export type Permission =
+  | 'profile.read'
+  | 'profile.update'
+  | 'review.view'
+  | 'review.execute'
+  | 'rules.view'
+  | 'rules.manage'
+  | 'doc_types.view'
+  | 'doc_types.manage'
+  | 'graph.view'
+  | 'graph.manage'
+  | 'settings.read'
+  | 'settings.update'
+  | 'members.read'
+  | 'members.manage'
+  | 'audit.read'
+  | 'platform.registrations.read'
+  | 'platform.registrations.manage'
+  | 'platform.tenants.read'
+  | 'platform.tenants.manage'
+
+export interface AuthUser {
+  id: string
+  name: string
+  email: string
+  phone_masked: string
+  role: TenantRole | null
+}
+
+export interface TenantInfo {
+  id: string
+  name: string
+}
+
+export interface AuthSessionResponse {
+  message: string
+  csrf_token: string
+  user: AuthUser
+  tenant: TenantInfo | null
+  role: UserRole | null
+  permissions: Permission[]
+}
+
+export interface RegisterTenantRequest {
+  organization_name: string
+  admin_name: string
+  email: string
+  phone: string
+  password: string
+  accept_terms: boolean
+}
+
+export interface RegisterTenantResponse {
+  message: string
+  status: string
+}
+
+export interface VerifyEmailResponse {
+  message: string
+  status: string
+}
+
+export interface ForgotPasswordResponse {
+  message: string
+}
+
+export interface ResetPasswordResponse {
+  message: string
+}
+
+export interface AcceptInviteResponse {
+  message: string
+}
+
+export interface Member {
+  id: string
+  name: string
+  email: string
+  phone: string
+  phone_masked: string
+  role: TenantRole
+  status: 'active' | 'disabled'
+  joined_at: string | null
+  created_at: string
+  updated_at: string
+}
+
+export interface Invitation {
+  id: string
+  name: string
+  email: string
+  phone_masked: string
+  role: TenantRole
+  status: 'invited' | 'resent' | 'accepted' | 'revoked'
+  expires_at: string | null
+  created_at: string
+}
+
+export interface MemberListResponse {
+  members: Member[]
+  invitations: Invitation[]
+}
+
+export interface InviteMemberRequest {
+  name: string
+  email: string
+  phone: string
+  role: TenantRole
+}
+
+export interface MemberUpdateRequest {
+  role?: TenantRole
+  status?: 'active' | 'disabled'
+}
+
+export interface RegistrationReview {
+  id: string
+  organization_name: string
+  admin_name: string
+  email: string
+  phone_masked: string
+  status: string
+  email_verified_at: string | null
+  terms_accepted_at: string | null
+  review_note: string | null
+  rejection_reason: string | null
+  created_at: string
+}
+
+export interface RegistrationListResponse {
+  registrations: RegistrationReview[]
+  total: number
+}
+
+export interface ReviewActionResponse {
+  message: string
+  tenant_id: string | null
+  tenant_status: string | null
+  admin_role: TenantRole | null
+  status: string
+}
+
+export interface PlatformTenant {
+  id: string
+  name: string
+  status: string
+  approved_at: string | null
+  created_at: string
+  member_count: number
+}
+
+export interface TenantListResponse {
+  tenants: PlatformTenant[]
+  total: number
+}
+
+export interface TenantStatusResponse {
+  id: string
+  status: string
+}
+
 /** 规则集：多套规则、合同、图谱的命名空间 */
 export interface RuleSet {
   id: string
