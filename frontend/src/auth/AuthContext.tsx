@@ -9,7 +9,7 @@ import {
 } from 'react'
 import type { ReactNode } from 'react'
 import { useLocation, useNavigate } from 'react-router-dom'
-import { authApi } from '../api/client'
+import { authApi, getApiErrorStatus, getErrorMessage } from '../api/client'
 import type {
   AuthSessionResponse,
   AuthUser,
@@ -17,9 +17,9 @@ import type {
   TenantInfo,
   UserRole,
 } from '../types'
-
 export interface AuthContextValue {
   loading: boolean
+  initializationError: string | null
   user: AuthUser | null
   tenant: TenantInfo | null
   role: UserRole | null
@@ -54,6 +54,7 @@ const PUBLIC_AUTH_PATHS = new Set([
 function stateFromSession(session: AuthSessionResponse): Omit<AuthContextValue, 'login' | 'logout' | 'refresh' | 'hasPermission'> {
   return {
     loading: false,
+    initializationError: null,
     user: session.user,
     tenant: session.tenant,
     role: session.role,
@@ -63,6 +64,7 @@ function stateFromSession(session: AuthSessionResponse): Omit<AuthContextValue, 
 
 const ANONYMOUS_AUTH = {
   loading: false,
+  initializationError: null,
   user: null,
   tenant: null,
   role: null,
@@ -75,6 +77,9 @@ export function AuthProvider({ children, initialAuth }: AuthProviderProps) {
   const hasExplicitInitialAuth = initialAuth !== undefined
   const [loading, setLoading] = useState(
     initialAuth === null ? false : initialAuth?.loading ?? !hasExplicitInitialAuth,
+  )
+  const [initializationError, setInitializationError] = useState<string | null>(
+    initialAuth?.initializationError ?? null,
   )
   const [user, setUser] = useState<AuthUser | null>(initialAuth?.user ?? null)
   const [tenant, setTenant] = useState<TenantInfo | null>(initialAuth?.tenant ?? null)
@@ -94,10 +99,12 @@ export function AuthProvider({ children, initialAuth }: AuthProviderProps) {
     setTenant(next.tenant)
     setRole(next.role)
     setPermissions(next.permissions)
+    setInitializationError(null)
     setLoading(false)
   }, [])
 
   const clearSession = useCallback(() => {
+    setInitializationError(null)
     setUser(ANONYMOUS_AUTH.user)
     setTenant(ANONYMOUS_AUTH.tenant)
     setRole(ANONYMOUS_AUTH.role)
@@ -107,10 +114,18 @@ export function AuthProvider({ children, initialAuth }: AuthProviderProps) {
 
   const refresh = useCallback(async () => {
     setLoading(true)
+    setInitializationError(null)
     try {
       applySession(await authApi.me())
-    } catch {
-      clearSession()
+    } catch (error) {
+      if (getApiErrorStatus(error) === 401) {
+        clearSession()
+        return
+      }
+      setLoading(false)
+      setInitializationError(
+        getErrorMessage(error, '暂时无法加载登录状态，请稍后重试'),
+      )
     }
   }, [applySession, clearSession])
 
@@ -156,6 +171,7 @@ export function AuthProvider({ children, initialAuth }: AuthProviderProps) {
   const value = useMemo<AuthContextValue>(
     () => ({
       loading,
+      initializationError,
       user,
       tenant,
       role,
@@ -165,7 +181,18 @@ export function AuthProvider({ children, initialAuth }: AuthProviderProps) {
       refresh,
       hasPermission,
     }),
-    [loading, user, tenant, role, permissions, login, logout, refresh, hasPermission],
+    [
+      loading,
+      initializationError,
+      user,
+      tenant,
+      role,
+      permissions,
+      login,
+      logout,
+      refresh,
+      hasPermission,
+    ],
   )
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>

@@ -29,7 +29,7 @@ const COPY: Record<PendingStatus, { title: string; subTitle: string }> = {
 }
 
 export default function PendingPage() {
-  const [searchParams] = useSearchParams()
+  const [searchParams, setSearchParams] = useSearchParams()
   const location = useLocation()
   const token = searchParams.get('token')
   const initialStatus = token
@@ -58,15 +58,25 @@ export default function PendingPage() {
         setMessage(getErrorMessage(error, '邮箱验证失败'))
       })
       .finally(() => {
-        if (active) setVerifying(false)
+        if (active) {
+          setVerifying(false)
+          const next = new URLSearchParams(searchParams)
+          next.delete('token')
+          setSearchParams(next, { replace: true })
+        }
       })
     return () => {
       active = false
     }
-  }, [token])
+  }, [searchParams, setSearchParams, token])
 
   if (verifying) {
-    return <div className="auth-loading"><Spin size="large" tip="正在验证邮箱..." /></div>
+    return (
+      <div className="auth-loading" aria-label="正在验证邮箱">
+        <Spin size="large" />
+        <div>正在验证邮箱...</div>
+      </div>
+    )
   }
 
   const copy = COPY[status]

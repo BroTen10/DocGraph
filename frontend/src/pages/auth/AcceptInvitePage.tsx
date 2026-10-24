@@ -11,11 +11,26 @@ interface InviteValues {
 }
 
 export default function AcceptInvitePage() {
-  const [searchParams] = useSearchParams()
+  const [searchParams, setSearchParams] = useSearchParams()
   const token = searchParams.get('token')
   const [submitting, setSubmitting] = useState(false)
   const [complete, setComplete] = useState(false)
   const [error, setError] = useState('')
+
+  if (complete) {
+    return (
+      <main className="auth-page">
+        <div className="auth-panel">
+          <Result
+            status="success"
+            title="邀请已接受"
+            subTitle="账号已创建，请使用工作邮箱和刚设置的密码登录。"
+            extra={<Link to="/login">返回登录</Link>}
+          />
+        </div>
+      </main>
+    )
+  }
 
   if (!token) {
     return (
@@ -32,27 +47,15 @@ export default function AcceptInvitePage() {
     )
   }
 
-  if (complete) {
-    return (
-      <main className="auth-page">
-        <div className="auth-panel">
-          <Result
-            status="success"
-            title="邀请已接受"
-            subTitle="账号已创建，请使用工作邮箱和刚设置的密码登录。"
-            extra={<Link to="/login">前往登录</Link>}
-          />
-        </div>
-      </main>
-    )
-  }
-
   const handleSubmit = async (values: InviteValues) => {
     setSubmitting(true)
     setError('')
     try {
       await authApi.acceptInvite(token, values.password)
       setComplete(true)
+      const next = new URLSearchParams(searchParams)
+      next.delete('token')
+      setSearchParams(next, { replace: true })
     } catch (e) {
       setError(getErrorMessage(e, '接受邀请失败'))
     } finally {

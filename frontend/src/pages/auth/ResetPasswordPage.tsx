@@ -11,26 +11,11 @@ interface ResetValues {
 }
 
 export default function ResetPasswordPage() {
-  const [searchParams] = useSearchParams()
+  const [searchParams, setSearchParams] = useSearchParams()
   const token = searchParams.get('token')
   const [submitting, setSubmitting] = useState(false)
   const [complete, setComplete] = useState(false)
   const [error, setError] = useState('')
-
-  if (!token) {
-    return (
-      <main className="auth-page">
-        <div className="auth-panel">
-          <Result
-            status="error"
-            title="重置链接无效"
-            subTitle="链接缺少必要令牌，请重新申请密码重置。"
-            extra={<Link to="/forgot-password">重新申请</Link>}
-          />
-        </div>
-      </main>
-    )
-  }
 
   if (complete) {
     return (
@@ -47,12 +32,30 @@ export default function ResetPasswordPage() {
     )
   }
 
+  if (!token) {
+    return (
+      <main className="auth-page">
+        <div className="auth-panel">
+          <Result
+            status="error"
+            title="重置链接无效"
+            subTitle="链接缺少必要令牌，请重新申请密码重置。"
+            extra={<Link to="/forgot-password">重新申请</Link>}
+          />
+        </div>
+      </main>
+    )
+  }
+
   const handleSubmit = async (values: ResetValues) => {
     setSubmitting(true)
     setError('')
     try {
       await authApi.resetPassword(token, values.password)
       setComplete(true)
+      const next = new URLSearchParams(searchParams)
+      next.delete('token')
+      setSearchParams(next, { replace: true })
     } catch (e) {
       setError(getErrorMessage(e, '密码重置失败'))
     } finally {

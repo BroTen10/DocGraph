@@ -28,7 +28,7 @@ export default function AuthShell({
             <div className="auth-brand-caption">Knowledge Graph Reviewer</div>
           </div>
         </div>
-        <Card bordered={false} className="auth-card">
+        <Card variant="borderless" className="auth-card">
           <div className="auth-heading">
             <Title level={2}>{title}</Title>
             <Text type="secondary">{subtitle}</Text>

@@ -173,6 +173,12 @@ export function getApiErrorCode(e: unknown): string | undefined {
   return undefined
 }
 
+export function getApiErrorStatus(e: unknown): number | undefined {
+  if (!e || typeof e !== 'object') return undefined
+  const status = (e as { response?: { status?: unknown } }).response?.status
+  return typeof status === 'number' ? status : undefined
+}
+
 /** 判断是否为 antd Form 校验错误（含 errorFields）。 */
 export function isFormValidationError(e: unknown): boolean {
   return !!e && typeof e === 'object' && Array.isArray((e as { errorFields?: unknown }).errorFields)

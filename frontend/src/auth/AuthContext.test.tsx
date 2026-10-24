@@ -11,13 +11,15 @@ import {
 } from './AuthContext'
 
 function Probe() {
-  const { loading, user, role, permissions, logout } = useAuth()
+  const { loading, initializationError, user, role, permissions, logout, refresh } = useAuth()
   return (
     <div>
       <div>{loading ? 'loading' : user?.name ?? 'anonymous'}</div>
       <div>{role ?? 'no-role'}</div>
       <div>{permissions.size}</div>
+      <div>{initializationError ?? 'no-init-error'}</div>
       <button onClick={() => void logout()}>logout</button>
+      <button onClick={() => void refresh()}>refresh</button>
     </div>
   )
 }
@@ -40,6 +42,7 @@ const SESSION: AuthSessionResponse = {
 function seededAuth(overrides: Partial<AuthContextValue> = {}): AuthContextValue {
   return {
     loading: false,
+    initializationError: null,
     user: SESSION.user,
     tenant: SESSION.tenant,
     role: SESSION.role,
@@ -91,5 +94,31 @@ describe('AuthProvider', () => {
     await userEvent.click(screen.getByRole('button', { name: 'logout' }))
     expect(await screen.findByText('anonymous')).toBeInTheDocument()
     expect(authApi.logout).toHaveBeenCalledOnce()
+  })
+
+  it('preserves the current user when refresh hits a temporary server error', async () => {
+    const me = vi.spyOn(authApi, 'me').mockResolvedValue(SESSION)
+    renderProvider()
+    expect(await screen.findByText('张三')).toBeInTheDocument()
+
+    me.mockRejectedValue({
+      message: '服务暂时不可用',
+      response: { status: 500, data: { detail: '服务暂时不可用' } },
+    })
+    await userEvent.click(screen.getByRole('button', { name: 'refresh' }))
+
+    expect(await screen.findByText('服务暂时不可用')).toBeInTheDocument()
+    expect(screen.getByText('张三')).toBeInTheDocument()
+    expect(screen.getByText('tenant_admin')).toBeInTheDocument()
+  })
+
+  it('only treats an unauthorized initialization response as anonymous', async () => {
+    vi.spyOn(authApi, 'me').mockRejectedValue({
+      message: '登录已失效',
+      response: { status: 401, data: { detail: '登录已失效' } },
+    })
+    renderProvider()
+    expect(await screen.findByText('anonymous')).toBeInTheDocument()
+    expect(screen.getByText('no-init-error')).toBeInTheDocument()
   })
 })
