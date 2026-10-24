@@ -10,6 +10,7 @@ import type { ContractBrief, ContractDetail, ReviewTaskSummary } from '../types'
 import PageHeader from '../components/PageHeader'
 import EmptyState from '../components/EmptyState'
 import { useRuleSet } from '../context/RuleSetContext'
+import { useAuth } from '../auth/AuthContext'
 import dayjs from 'dayjs'
 
 const { Text } = Typography
@@ -17,6 +18,8 @@ const { Text } = Typography
 export default function ReviewPage() {
   const navigate = useNavigate()
   const { currentId } = useRuleSet()
+  const { hasPermission } = useAuth()
+  const canRunReview = hasPermission('review.execute')
   const [contracts, setContracts] = useState<ContractBrief[]>([])
   const [selectedContract, setSelectedContract] = useState<string | undefined>()
   const [running, setRunning] = useState(false)
@@ -115,6 +118,7 @@ export default function ReviewPage() {
   }
 
   const startReview = async () => {
+    if (!canRunReview) return
     if (!selectedContract) {
       message.warning('请选择合同')
       return
@@ -153,15 +157,17 @@ export default function ReviewPage() {
         extra={
           <Space>
             <Button icon={<ReloadOutlined />} onClick={load}>刷新合同</Button>
-            <Button
-              type="primary"
-              icon={<PlayCircleOutlined />}
-              onClick={startReview}
-              loading={running}
-              disabled={!selectedContract}
-            >
-              开始审查
-            </Button>
+            {canRunReview && (
+              <Button
+                type="primary"
+                icon={<PlayCircleOutlined />}
+                onClick={startReview}
+                loading={running}
+                disabled={!selectedContract}
+              >
+                开始审查
+              </Button>
+            )}
           </Space>
         }
       />

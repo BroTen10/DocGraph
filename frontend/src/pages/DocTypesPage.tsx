@@ -11,6 +11,7 @@ import {
 import type { ColumnsType } from 'antd/es/table'
 import { docTypesApi, getErrorMessage } from '../api/client'
 import type { DocTypeItem, DocTypeCreate, DocTypeUpdate, AnalyzeSampleResult } from '../types'
+import { useAuth } from '../auth/AuthContext'
 
 const { Title, Text, Paragraph } = Typography
 const { TextArea } = Input
@@ -52,6 +53,8 @@ function fieldAliasesFromPairs(pairs?: FieldAliasRow[]): Record<string, unknown>
 }
 
 export default function DocTypesPage() {
+  const { hasPermission } = useAuth()
+  const canManageDocTypes = hasPermission('doc_types.manage')
   const [activeTab, setActiveTab] = useState('active')
   const [docTypes, setDocTypes] = useState<DocTypeItem[]>([])
   const [pendingCount, setPendingCount] = useState(0)
@@ -101,6 +104,7 @@ export default function DocTypesPage() {
 
   // ============ CRUD handlers ============
   const handleCreate = async (values: DocTypeCreate & { field_aliases_list?: FieldAliasRow[] }) => {
+    if (!canManageDocTypes) return
     try {
       const { field_aliases_list, ...rest } = values
       await docTypesApi.create({ ...rest, field_aliases: fieldAliasesFromPairs(field_aliases_list) })
@@ -114,6 +118,7 @@ export default function DocTypesPage() {
   }
 
   const handleEdit = async (values: DocTypeUpdate & { field_aliases_list?: FieldAliasRow[] }) => {
+    if (!canManageDocTypes) return
     if (!editingType) return
     try {
       const { field_aliases_list, ...rest } = values
@@ -129,6 +134,7 @@ export default function DocTypesPage() {
   }
 
   const handleDelete = (item: DocTypeItem) => {
+    if (!canManageDocTypes) return
     Modal.confirm({
       title: `确定删除「${item.name}」？`,
       content: '此操作不可恢复。如果该类型已被规则引用，删除可能导致数据不一致。',
@@ -145,6 +151,7 @@ export default function DocTypesPage() {
   }
 
   const handleConfirm = async (item: DocTypeItem) => {
+    if (!canManageDocTypes) return
     try {
       await docTypesApi.confirm(item.id)
       message.success(`「${item.name}」已确认并激活`)
@@ -155,6 +162,7 @@ export default function DocTypesPage() {
   }
 
   const handleReject = (item: DocTypeItem) => {
+    if (!canManageDocTypes) return
     Modal.confirm({
       title: `丢弃「${item.name}」？`,
       content: '该文档类型将被删除。如果后续规则再提到它，会重新检测到。',
@@ -172,6 +180,7 @@ export default function DocTypesPage() {
 
   // ============ Analyze sample ============
   const openAnalyze = (name?: string, id?: string, status?: string) => {
+    if (!canManageDocTypes) return
     setAnalyzeTargetName(name || null)
     setAnalyzeTargetId(id || null)
     setAnalyzeTargetStatus(status || null)
@@ -181,6 +190,7 @@ export default function DocTypesPage() {
   }
 
   const handleAnalyzeFile = async () => {
+    if (!canManageDocTypes) return
     if (!analyzeFile) {
       message.warning('请先上传一个样例文档')
       return
@@ -203,6 +213,7 @@ export default function DocTypesPage() {
   }
 
   const handleSaveAnalyzeResult = async () => {
+    if (!canManageDocTypes) return
     if (!analyzeResult) return
     if (!analyzeResult.detected_name.trim()) {
       message.warning('类型名称不能为空')
@@ -346,20 +357,22 @@ export default function DocTypesPage() {
       key: 'actions',
       width: 200,
       render: (_: unknown, record: DocTypeItem) => (
-        <Space size="small">
-          <Button size="small" onClick={() => {
-            setEditingType(record)
-            const { field_aliases, ...rest } = record
-            editForm.setFieldsValue({ ...rest, field_aliases_list: fieldAliasesToPairs(field_aliases) })
-            setEditOpen(true)
-          }}>
-            编辑
-          </Button>
-          <Button size="small" icon={<AimOutlined />} onClick={() => openAnalyze(record.name, record.id, record.status)}>
-            分析样例
-          </Button>
-          <Button size="small" danger icon={<DeleteOutlined />} onClick={() => handleDelete(record)} />
-        </Space>
+        canManageDocTypes ? (
+          <Space size="small">
+            <Button size="small" onClick={() => {
+              setEditingType(record)
+              const { field_aliases, ...rest } = record
+              editForm.setFieldsValue({ ...rest, field_aliases_list: fieldAliasesToPairs(field_aliases) })
+              setEditOpen(true)
+            }}>
+              编辑
+            </Button>
+            <Button size="small" icon={<AimOutlined />} onClick={() => openAnalyze(record.name, record.id, record.status)}>
+              分析样例
+            </Button>
+            <Button size="small" danger icon={<DeleteOutlined />} onClick={() => handleDelete(record)} />
+          </Space>
+        ) : <Text type="secondary">只读</Text>
       ),
     },
   ]
@@ -390,19 +403,21 @@ export default function DocTypesPage() {
       title: '操作',
       key: 'actions',
       render: (_: unknown, record: DocTypeItem) => (
-        <Space size="small">
-          <Tooltip title="仅确认，不分析样例">
-            <Button size="small" type="primary" icon={<CheckCircleOutlined />} onClick={() => handleConfirm(record)}>
-              直接激活
+        canManageDocTypes ? (
+          <Space size="small">
+            <Tooltip title="仅确认，不分析样例">
+              <Button size="small" type="primary" icon={<CheckCircleOutlined />} onClick={() => handleConfirm(record)}>
+                直接激活
+              </Button>
+            </Tooltip>
+            <Button size="small" icon={<AimOutlined />} onClick={() => openAnalyze(record.name, record.id, record.status)}>
+              上传样例分析
             </Button>
-          </Tooltip>
-          <Button size="small" icon={<AimOutlined />} onClick={() => openAnalyze(record.name, record.id, record.status)}>
-            上传样例分析
-          </Button>
-          <Button size="small" danger icon={<CloseCircleOutlined />} onClick={() => handleReject(record)}>
-            忽略
-          </Button>
-        </Space>
+            <Button size="small" danger icon={<CloseCircleOutlined />} onClick={() => handleReject(record)}>
+              忽略
+            </Button>
+          </Space>
+        ) : <Text type="secondary">只读</Text>
       ),
     },
   ]
@@ -412,12 +427,16 @@ export default function DocTypesPage() {
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
         <Title level={4} style={{ margin: 0 }}>文档类型管理</Title>
         <Space>
-          <Button icon={<PlusOutlined />} type="primary" onClick={() => { form.resetFields(); setCreateOpen(true) }}>
-            新建文档类型
-          </Button>
-          <Button icon={<AimOutlined />} onClick={() => openAnalyze()}>
-            上传样例分析
-          </Button>
+          {canManageDocTypes && (
+            <>
+              <Button icon={<PlusOutlined />} type="primary" onClick={() => { form.resetFields(); setCreateOpen(true) }}>
+                新建文档类型
+              </Button>
+              <Button icon={<AimOutlined />} onClick={() => openAnalyze()}>
+                上传样例分析
+              </Button>
+            </>
+          )}
           <Button icon={<ReloadOutlined />} onClick={loadData}>刷新</Button>
         </Space>
       </div>

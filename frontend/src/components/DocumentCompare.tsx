@@ -34,6 +34,7 @@ interface DocumentCompareProps {
   doc: DocumentBrief
   fileUrl: string
   height?: number | string
+  editable?: boolean
   /** 字段修正保存成功后的回调（父级可刷新文档详情） */
   onSaved?: () => void
 }
@@ -473,7 +474,13 @@ function DocxViewer({
 }
 
 /** 主组件 */
-export default function DocumentCompare({ doc, fileUrl, height = 600, onSaved }: DocumentCompareProps) {
+export default function DocumentCompare({
+  doc,
+  fileUrl,
+  height = 600,
+  editable = true,
+  onSaved,
+}: DocumentCompareProps) {
   const [highlightTarget, setHighlightTarget] = useState<string | null>(null)
   const [editing, setEditing] = useState(false)
   const [draftFields, setDraftFields] = useState<Array<{ key: string; value: string }>>([])
@@ -494,6 +501,10 @@ export default function DocumentCompare({ doc, fileUrl, height = 600, onSaved }:
     setEditing(false)
     setFreshDoc(null)
   }, [doc, fileUrl])
+
+  useEffect(() => {
+    if (!editable) setEditing(false)
+  }, [editable])
 
   const displayDoc = freshDoc ?? doc
 
@@ -638,6 +649,7 @@ export default function DocumentCompare({ doc, fileUrl, height = 600, onSaved }:
 
   // ============ 字段人工修正（OCR 对照界面） ============
   const startEditFields = () => {
+    if (!editable) return
     setDraftFields(
       Object.entries(displayDoc.extracted_fields || {})
         .filter(([k]) => k !== '__inferred_doc_type__')
@@ -882,18 +894,21 @@ export default function DocumentCompare({ doc, fileUrl, height = 600, onSaved }:
               onChange={(val) => setDraftDocType(val)}
               options={docTypeSelectOptions}
               loading={docTypesLoading}
+              disabled={!editable}
             />
             {displayDoc.is_required ? <Tag color="red">必备</Tag> : <Tag>非必备</Tag>}
-            <Button
-              size="small"
-              type="primary"
-              icon={<SaveOutlined />}
-              loading={savingDocType}
-              disabled={!draftDocType || draftDocType === displayDoc.doc_type}
-              onClick={saveDocType}
-            >
-              保存类型
-            </Button>
+            {editable && (
+              <Button
+                size="small"
+                type="primary"
+                icon={<SaveOutlined />}
+                loading={savingDocType}
+                disabled={!draftDocType || draftDocType === displayDoc.doc_type}
+                onClick={saveDocType}
+              >
+                保存类型
+              </Button>
+            )}
             <Text type="secondary" style={{ fontSize: 11 }}>
               修正后作为审查依据，参与齐套性 / 印章 / 字段比对等规则核对
             </Text>
@@ -924,11 +939,11 @@ export default function DocumentCompare({ doc, fileUrl, height = 600, onSaved }:
                 children: (
                   <div>
                     <Space style={{ marginBottom: 8 }}>
-                      {!editing ? (
+                      {editable && !editing ? (
                         <Button size="small" icon={<EditOutlined />} onClick={startEditFields}>
                           修正字段
                         </Button>
-                      ) : (
+                      ) : editable ? (
                         <>
                           <Button
                             size="small"
@@ -943,7 +958,7 @@ export default function DocumentCompare({ doc, fileUrl, height = 600, onSaved }:
                             取消
                           </Button>
                         </>
-                      )}
+                      ) : null}
                       {editing && (
                         <Button size="small" icon={<PlusOutlined />} onClick={addDraft}>
                           新增字段

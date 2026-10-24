@@ -30,6 +30,7 @@ import GraphView from '../components/GraphView'
 import PageHeader from '../components/PageHeader'
 import EmptyState from '../components/EmptyState'
 import { useRuleSet } from '../context/RuleSetContext'
+import { useAuth } from '../auth/AuthContext'
 import dayjs from 'dayjs'
 
 const { Text, Paragraph } = Typography
@@ -75,6 +76,8 @@ const MSG_LEVEL_COLOR: Record<string, string> = {
 
 export default function GraphPage() {
   const { currentId } = useRuleSet()
+  const { hasPermission } = useAuth()
+  const canManageGraph = hasPermission('graph.manage')
   // 图谱数据
   const [graph, setGraph] = useState<GraphData | null>(null)
   const [ontology, setOntology] = useState<GraphOntology | null>(null)
@@ -236,6 +239,7 @@ export default function GraphPage() {
 
   // ============ 异步构建图谱 ============
   const handleBuildAsync = async (autoConfirmAll = false) => {
+    if (!canManageGraph) return
     if (building) {
       message.warning('已有构建任务正在运行')
       return
@@ -257,6 +261,7 @@ export default function GraphPage() {
 
   // ============ 图谱编辑（保留原有功能） ============
   const openEditNode = (nodeName: string) => {
+    if (!canManageGraph) return
     const node = graph?.nodes.find((n) => n.name === nodeName)
     if (!node) return
     setEditTarget({ kind: 'node', name: nodeName })
@@ -271,6 +276,7 @@ export default function GraphPage() {
   }
 
   const openEditEdge = (source: string, target: string) => {
+    if (!canManageGraph) return
     const edge = graph?.edges.find((e) => e.source === source && e.target === target)
     if (!edge) return
     setSelectedEdge(edge)
@@ -286,6 +292,7 @@ export default function GraphPage() {
   }
 
   const saveEdit = async () => {
+    if (!canManageGraph) return
     if (!graph || !editTarget) return
     try {
       const values = await editForm.validateFields()
@@ -315,6 +322,7 @@ export default function GraphPage() {
   }
 
   const deleteSelected = async () => {
+    if (!canManageGraph) return
     if (!graph) return
     try {
       const edits: any[] = []
@@ -332,6 +340,7 @@ export default function GraphPage() {
   }
 
   const confirmGraph = async () => {
+    if (!canManageGraph) return
     if (!graph) return
     try {
       await graphApi.confirm(graph.graph_id, [])
@@ -350,27 +359,33 @@ export default function GraphPage() {
         icon={<ApartmentOutlined />}
         extra={
           <Space>
-            <Button
-              type="primary"
-              icon={<ThunderboltOutlined />}
-              loading={building}
-              onClick={() => handleBuildAsync(false)}
-            >
-              构建图谱
-            </Button>
-            <Popconfirm
-              title="一键自动确认全部（忽略置信度）？"
-              onConfirm={() => handleBuildAsync(true)}
-              disabled={building}
-            >
-              <Button disabled={building}>自动确认构建</Button>
-            </Popconfirm>
+            {canManageGraph && (
+              <>
+                <Button
+                  type="primary"
+                  icon={<ThunderboltOutlined />}
+                  loading={building}
+                  onClick={() => handleBuildAsync(false)}
+                >
+                  构建图谱
+                </Button>
+                <Popconfirm
+                  title="一键自动确认全部（忽略置信度）？"
+                  onConfirm={() => handleBuildAsync(true)}
+                  disabled={building}
+                >
+                  <Button disabled={building}>自动确认构建</Button>
+                </Popconfirm>
+              </>
+            )}
             <Button icon={<ReloadOutlined />} onClick={loadGraph} loading={loading}>
               刷新图谱
             </Button>
-            <Popconfirm title="确认将当前图谱写入 Neo4j 生效？" onConfirm={confirmGraph}>
-              <Button icon={<CheckCircleOutlined />}>确认生效</Button>
-            </Popconfirm>
+            {canManageGraph && (
+              <Popconfirm title="确认将当前图谱写入 Neo4j 生效？" onConfirm={confirmGraph}>
+                <Button icon={<CheckCircleOutlined />}>确认生效</Button>
+              </Popconfirm>
+            )}
           </Space>
         }
       />
@@ -408,7 +423,7 @@ export default function GraphPage() {
                   </>
                 }
                 padding={80}
-                action={
+                action={canManageGraph ? (
                   <Button
                     icon={<ThunderboltOutlined />}
                     loading={building}
@@ -416,7 +431,7 @@ export default function GraphPage() {
                   >
                     构建图谱
                   </Button>
-                }
+                ) : undefined}
               />
             ) : (
               <>
@@ -552,6 +567,7 @@ export default function GraphPage() {
                       onEditNode={() => selectedNodeName && openEditNode(selectedNodeName)}
                       onEditEdge={() => selectedEdge && openEditEdge(selectedEdge.source, selectedEdge.target)}
                       onDelete={deleteSelected}
+                      canEdit={canManageGraph}
                     />
                   ),
                 },
@@ -923,12 +939,14 @@ function DetailPanel({
   onEditNode,
   onEditEdge,
   onDelete,
+  canEdit,
 }: {
   selectedNode: GraphData['nodes'][0] | null
   selectedEdge: GraphEdge | null
   onEditNode: () => void
   onEditEdge: () => void
   onDelete: () => void
+  canEdit: boolean
 }) {
   if (!selectedNode && !selectedEdge) {
     return (
@@ -951,16 +969,18 @@ function DetailPanel({
               </Descriptions.Item>
             ))}
           </Descriptions>
-          <Space style={{ marginTop: 12 }}>
-            <Button size="small" icon={<EditOutlined />} onClick={onEditNode}>
-              编辑
-            </Button>
-            <Popconfirm title="删除该节点及其所有边？" onConfirm={onDelete}>
-              <Button size="small" danger icon={<DeleteOutlined />}>
-                删除
+          {canEdit ? (
+            <Space style={{ marginTop: 12 }}>
+              <Button size="small" icon={<EditOutlined />} onClick={onEditNode}>
+                编辑
               </Button>
-            </Popconfirm>
-          </Space>
+              <Popconfirm title="删除该节点及其所有边？" onConfirm={onDelete}>
+                <Button size="small" danger icon={<DeleteOutlined />}>
+                  删除
+                </Button>
+              </Popconfirm>
+            </Space>
+          ) : <Text type="secondary">当前账号仅可查看图谱</Text>}
         </div>
       )}
 
@@ -976,16 +996,18 @@ function DetailPanel({
               </Descriptions.Item>
             ))}
           </Descriptions>
-          <Space style={{ marginTop: 12 }}>
-            <Button size="small" icon={<EditOutlined />} onClick={onEditEdge}>
-              编辑
-            </Button>
-            <Popconfirm title="删除该关系？" onConfirm={onDelete}>
-              <Button size="small" danger icon={<DeleteOutlined />}>
-                删除
+          {canEdit ? (
+            <Space style={{ marginTop: 12 }}>
+              <Button size="small" icon={<EditOutlined />} onClick={onEditEdge}>
+                编辑
               </Button>
-            </Popconfirm>
-          </Space>
+              <Popconfirm title="删除该关系？" onConfirm={onDelete}>
+                <Button size="small" danger icon={<DeleteOutlined />}>
+                  删除
+                </Button>
+              </Popconfirm>
+            </Space>
+          ) : <Text type="secondary">当前账号仅可查看图谱</Text>}
         </div>
       )}
     </div>

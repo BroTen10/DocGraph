@@ -14,6 +14,7 @@ import {
 } from '../utils/defects'
 import PageHeader from '../components/PageHeader'
 import { useRuleSet } from '../context/RuleSetContext'
+import { useAuth } from '../auth/AuthContext'
 import SkillTab from './SkillTab'
 import dayjs from 'dayjs'
 import { useNavigate } from 'react-router-dom'
@@ -149,6 +150,8 @@ function describeImportProgress(task: ImportTask): string {
 
 export default function RulesPage() {
   const { currentId } = useRuleSet()
+  const { hasPermission } = useAuth()
+  const canManageRules = hasPermission('rules.manage')
   const [rules, setRules] = useState<Rule[]>([])
   const [snapshots, setSnapshots] = useState<RuleSnapshot[]>([])
   const [docTypes, setDocTypes] = useState<DocTypeMeta[]>([])
@@ -319,6 +322,7 @@ export default function RulesPage() {
   const actionableRules = useMemo(() => rules.filter(needsUserAction), [rules])
 
   const openCreate = () => {
+    if (!canManageRules) return
     setEditing(null)
     form.resetFields()
     form.setFieldsValue({ enabled: true, priority: 100, tolerance: {} })
@@ -326,6 +330,7 @@ export default function RulesPage() {
   }
 
   const openEdit = (rule: Rule) => {
+    if (!canManageRules) return
     setEditing(rule)
     form.setFieldsValue({
       ...rule,
@@ -340,6 +345,7 @@ export default function RulesPage() {
   /** 在二维表格空格点击，预填���件类型 + 检查项 */
   /** 在二维表格空格点击，预填文件类型 + 检查项 */
   const openCreateWithDefaults = (doc_type: string, check_category: string) => {
+    if (!canManageRules) return
     setEditing(null)
     form.resetFields()
     form.setFieldsValue({ doc_type, check_category, enabled: true, priority: 100, tolerance: {} })
@@ -446,6 +452,7 @@ export default function RulesPage() {
   }
 
   const handleDelete = async (id: string) => {
+    if (!canManageRules) return
     try {
       await rulesApi.delete(id)
       message.success('已删除')
@@ -458,6 +465,7 @@ export default function RulesPage() {
 
   /** 批量删除规则：传 ids 仅删指定；不传则清空当前规则集全部规则 */
   const handleBatchDelete = async (ids?: string[]) => {
+    if (!canManageRules) return
     if (!currentId) return
     setDeleting(true)
     try {
@@ -474,6 +482,7 @@ export default function RulesPage() {
 
   /** 批量确认：传 ids 仅确认指定；不传则确认所有 pending 规则。同时启用这些规则 */
   const handleBatchConfirm = async (ids?: string[]) => {
+    if (!canManageRules) return
     if (!currentId) return
     setConfirming(true)
     try {
@@ -489,6 +498,7 @@ export default function RulesPage() {
   }
 
   const handleDetectConflicts = async (openInDrawer = false) => {
+    if (!canManageRules) return
     if (!currentId || conflictDetecting) return
     setConflictDetecting(true)
     try {
@@ -526,6 +536,7 @@ export default function RulesPage() {
   }
 
   const openImport = async () => {
+    if (!canManageRules) return
     setImportText('')
     setImportResult(null)
     setImportFile(null)
@@ -761,17 +772,17 @@ export default function RulesPage() {
                   <td
                     key={cc}
                     style={checkTdStyle}
-                    onClick={totalCount === 0 ? () => openCreateWithDefaults(dt, cc) : undefined}
+                    onClick={canManageRules && totalCount === 0 ? () => openCreateWithDefaults(dt, cc) : undefined}
                   >
                     {totalCount === 0 ? (
                       <a
-                        style={{ fontSize: 11, color: '#1890ff' }}
+                        style={{ fontSize: 11, color: canManageRules ? '#1890ff' : '#94a3b8' }}
                       >
-                        + 添加
+                        {canManageRules ? '+ 添加' : '未配置'}
                       </a>
                     ) : totalCount === 1 && confirmedCount === 1 ? (
                       <Tooltip title={cellRules[0].rule_text}>
-                        <Tag color="blue" style={{ cursor: 'pointer' }} onClick={() => openEdit(cellRules[0])}>
+                        <Tag color="blue" style={{ cursor: canManageRules ? 'pointer' : 'default' }} onClick={canManageRules ? () => openEdit(cellRules[0]) : undefined}>
                           1 条
                         </Tag>
                       </Tooltip>
@@ -789,11 +800,11 @@ export default function RulesPage() {
                                   key={r.id}
                                   style={{
                                     padding: '6px 8px',
-                                    cursor: 'pointer',
+                                    cursor: canManageRules ? 'pointer' : 'default',
                                     borderBottom: i < totalCount - 1 ? '1px solid #f1f5f9' : 'none',
                                     fontSize: 12,
                                   }}
-                                  onClick={() => openEdit(r)}
+                                  onClick={canManageRules ? () => openEdit(r) : undefined}
                                 >
                                   <Tag
                                     color={isActive ? 'blue' : r.status === 'confirmed' ? 'default' : 'orange'}
@@ -816,7 +827,7 @@ export default function RulesPage() {
                             : confirmedCount > 0 ? 'orange'
                             : 'default'
                           }
-                          style={{ cursor: 'pointer' }}
+                          style={{ cursor: canManageRules ? 'pointer' : 'default' }}
                         >
                           {confirmedCount} / {totalCount} 条
                         </Tag>
@@ -965,37 +976,40 @@ export default function RulesPage() {
     {
       title: '启用', dataIndex: 'enabled', key: 'enabled', width: 80,
       render: (v: boolean, row: Rule) => (
-        <Switch
-          size="small"
-          checked={v}
-          onChange={async (checked) => {
-            try {
-              const payload: Partial<Rule> = { enabled: checked }
-              // 启用即视为用户认可：未确认的规则同时置为已确认，
-              // 后端会把未处理缺陷标记为"已处理"，规则随后进入「正常规则」。
-              if (checked && row.status !== 'confirmed') {
-                payload.status = 'confirmed'
+        canManageRules ? (
+          <Switch
+            size="small"
+            checked={v}
+            onChange={async (checked) => {
+              try {
+                const payload: Partial<Rule> = { enabled: checked }
+                // 启用即视为用户认可：未确认的规则同时置为已确认，
+                // 后端会把未处理缺陷标记为"已处理"，规则随后进入「正常规则」。
+                if (checked && row.status !== 'confirmed') {
+                  payload.status = 'confirmed'
+                }
+                await rulesApi.update(row.id, payload)
+                const accepted = checked && row.status !== 'confirmed'
+                message.success(
+                  accepted
+                    ? '规则已确认并启用，缺陷已标记为已处理，将参与图谱构建'
+                    : checked
+                      ? (hasOpenDefect(row) ? '规则已启用，缺陷已标记为已处理' : '规则已启用')
+                      : '规则已禁用，已从图谱中移除'
+                )
+                await load()
+              } catch (e) {
+                message.error('更新失败: ' + getErrorMessage(e))
               }
-              await rulesApi.update(row.id, payload)
-              const accepted = checked && row.status !== 'confirmed'
-              message.success(
-                accepted
-                  ? '规则已确认并启用，缺陷已标记为已处理，将参与图谱构建'
-                  : checked
-                    ? (hasOpenDefect(row) ? '规则已启用，缺陷已标记为已处理' : '规则已启用')
-                    : '规则已禁用，已从图谱中移除'
-              )
-              await load()
-    } catch (e) {
-      message.error('更新失败: ' + getErrorMessage(e))
-            }
-          }}
-        />
+            }}
+          />
+        ) : <Tag color={v ? 'green' : 'default'}>{v ? '已启用' : '已停用'}</Tag>
       ),
     },
     {
       title: '操作', key: 'action', width: 180,
       render: (_: unknown, row: Rule) => {
+        if (!canManageRules) return <Text type="secondary">只读</Text>
         const openCount = openDefects(row.defects).length
         const needConfirm = row.status !== 'confirmed'
         // 已确认但仍有未处理缺陷（例如历史数据/后续新检出）时，仍提供"标记已处理"入口
@@ -1043,21 +1057,29 @@ export default function RulesPage() {
         icon={<SettingOutlined />}
         extra={
           <Space>
-            <Button icon={<PlusOutlined />} onClick={openCreate}>新增规则</Button>
-            <Button icon={<ImportOutlined />} onClick={openImport}>批量导入</Button>
+            {canManageRules && (
+              <>
+                <Button icon={<PlusOutlined />} onClick={openCreate}>新增规则</Button>
+                <Button icon={<ImportOutlined />} onClick={openImport}>批量导入</Button>
+              </>
+            )}
             <Button icon={<ArrowRightOutlined />} onClick={() => navigate('/graph')}>
               前往构建图谱
             </Button>
-            <Button icon={<WarningOutlined />} loading={conflictDetecting} onClick={() => handleDetectConflicts()}>检测冲突</Button>
+            {canManageRules && (
+              <Button icon={<WarningOutlined />} loading={conflictDetecting} onClick={() => handleDetectConflicts()}>检测冲突</Button>
+            )}
             <Button icon={<HistoryOutlined />} onClick={() => load()}>刷新</Button>
-            <Popconfirm
-              title={`确定清空当前规则集的全部 ${rules.length} 条规则？此操作不可恢复`}
-              onConfirm={() => handleBatchDelete()}
-              okText="清空"
-              okButtonProps={{ danger: true }}
-            >
-              <Button danger icon={<DeleteOutlined />} loading={deleting}>清空规则</Button>
-            </Popconfirm>
+            {canManageRules && (
+              <Popconfirm
+                title={`确定清空当前规则集的全部 ${rules.length} 条规则？此操作不可恢复`}
+                onConfirm={() => handleBatchDelete()}
+                okText="清空"
+                okButtonProps={{ danger: true }}
+              >
+                <Button danger icon={<DeleteOutlined />} loading={deleting}>清空规则</Button>
+              </Popconfirm>
+            )}
           </Space>
         }
       />
@@ -1149,7 +1171,7 @@ export default function RulesPage() {
                 />
 
                 {/* 操作用工具栏：只要当前视图还有"未确认 / 有未处理缺陷"的规则就提供一键处理 */}
-                <Space style={{ marginBottom: 12 }}>
+                {canManageRules && <Space style={{ marginBottom: 12 }}>
                   {actionableRules.length > 0 && (
                     <Popconfirm
                       title={`确认并启用当前视图中的 ${actionableRules.length} 条规则？确认即视为认可其全部缺陷，缺陷将标记为已处理，规则进入「正常规则」并参与图谱构建`}
@@ -1180,7 +1202,7 @@ export default function RulesPage() {
                   <Button icon={<WarningOutlined />} loading={conflictDetecting} onClick={() => handleDetectConflicts()}>
                     检测冲突
                   </Button>
-                </Space>
+                </Space>}
 
                 {/* 正常规则提示：已确认的规则可直接参与构建；未确认的需显式确认 */}
                 {activeRuleFilter === 'healthy' && (
@@ -1225,10 +1247,10 @@ export default function RulesPage() {
                   rowKey="id"
                   size="small"
                   pagination={{ pageSize: 20 }}
-                  rowSelection={{
+                  rowSelection={canManageRules ? {
                     selectedRowKeys,
                     onChange: (keys) => setSelectedRowKeys(keys as string[]),
-                  }}
+                  } : undefined}
                 />
               </Card>
             ),
@@ -1263,7 +1285,7 @@ export default function RulesPage() {
           {
             key: 'skills',
             label: '解析 Skill',
-            children: <SkillTab ruleSetId={currentId!} />,
+            children: <SkillTab ruleSetId={currentId!} readOnly={!canManageRules} />,
           },
         ]}
       />
@@ -1686,7 +1708,7 @@ export default function RulesPage() {
           onChange={(k) => {
             if (k === 'conflict') {
               // 切换到冲突 tab 时如有数据直接显示，无数据触发检测
-              if (conflictData.length === 0 && !conflictDetecting) {
+              if (canManageRules && conflictData.length === 0 && !conflictDetecting) {
                 handleDetectConflicts(true)
               }
               return
@@ -1705,7 +1727,7 @@ export default function RulesPage() {
                           <Spin tip="正在检测语义冲突..."><div style={{ padding: 20 }} /></Spin>
                         </div>
                       ) : conflictData.length === 0 ? (
-                        <Alert type="info" showIcon message="点击「检测冲突」按钮查看详细报告" />
+                        <Alert type="info" showIcon message={canManageRules ? '点击「检测冲突」按钮查看详细报告' : '当前账号无冲突检测权限'} />
                       ) : (
                         <div>
                           <Alert
@@ -1718,9 +1740,11 @@ export default function RulesPage() {
                             <Button size="small" onClick={() => { setDefectDrawerOpen(false); setConflictModalOpen(true) }}>
                               查看详细报告
                             </Button>
-                            <Button size="small" loading={conflictDetecting} onClick={() => handleDetectConflicts(true)}>
-                              重新检测
-                            </Button>
+                            {canManageRules && (
+                              <Button size="small" loading={conflictDetecting} onClick={() => handleDetectConflicts(true)}>
+                                重新检测
+                              </Button>
+                            )}
                           </Space>
                           <Table
                             dataSource={conflictData}

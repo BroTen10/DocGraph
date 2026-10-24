@@ -16,6 +16,7 @@ import { RESULT_COLOR, RESULT_LABEL, SEVERITY_COLOR, SEVERITY_LABEL } from '../t
 import PageHeader from '../components/PageHeader'
 import DocumentCompare from '../components/DocumentCompare'
 import { useRuleSet } from '../context/RuleSetContext'
+import { useAuth } from '../auth/AuthContext'
 import dayjs from 'dayjs'
 
 const { Text, Paragraph } = Typography
@@ -54,6 +55,8 @@ const detailLabelMap: Record<string, string> = {
 
 export default function ResultsPage() {
   const { currentId } = useRuleSet()
+  const { hasPermission } = useAuth()
+  const canEditResults = hasPermission('review.execute')
   const [searchParams, setSearchParams] = useSearchParams()
   const [tasks, setTasks] = useState<ReviewTaskListItem[]>([])
   const [tasksLoading, setTasksLoading] = useState(false)
@@ -608,6 +611,7 @@ export default function ResultsPage() {
           doc={ocrDoc}
           fileUrl={contractsApi.fileUrl(ocrDoc.id)}
           height="calc(100vh - 160px)"
+          editable={canEditResults}
           onSaved={async () => {
             try {
               const fresh = await contractsApi.getOcr(ocrDoc.id)

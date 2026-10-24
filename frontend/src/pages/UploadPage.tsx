@@ -11,6 +11,7 @@ import DocumentCompare from '../components/DocumentCompare'
 import PageHeader from '../components/PageHeader'
 import EmptyState from '../components/EmptyState'
 import { useRuleSet } from '../context/RuleSetContext'
+import { useAuth } from '../auth/AuthContext'
 import dayjs from 'dayjs'
 
 const { Dragger } = Upload
@@ -18,6 +19,8 @@ const { Text } = Typography
 
 export default function UploadPage() {
   const { currentId } = useRuleSet()
+  const { hasPermission } = useAuth()
+  const canExecute = hasPermission('review.execute')
   const [contracts, setContracts] = useState<ContractBrief[]>([])
   const [loading, setLoading] = useState(false)
   const [uploading, setUploading] = useState(false)
@@ -91,6 +94,10 @@ export default function UploadPage() {
   }
 
   const doUpload = async () => {
+    if (!canExecute) {
+      message.warning('当前账号仅有查看权限')
+      return
+    }
     const files = pendingFilesRef.current
     if (files.length === 0) {
       message.warning('请先选择要上传的文件')
@@ -181,7 +188,7 @@ export default function UploadPage() {
   }
 
   const triggerContractOcr = async () => {
-    if (!currentId || !detail) return
+    if (!canExecute || !currentId || !detail) return
     setOcrTriggering(true)
     try {
       const t = await ocrApi.triggerContract(currentId, detail.id, false, ocrProfile)
@@ -197,7 +204,7 @@ export default function UploadPage() {
 
   /** 重置式重新识别:对该合同下全部文档(含已识别)重新跑 OCR,覆盖旧结果 */
   const resetContractOcr = async () => {
-    if (!currentId || !detail) return
+    if (!canExecute || !currentId || !detail) return
     setOcrResetting(true)
     try {
       const t = await ocrApi.triggerContract(currentId, detail.id, true, ocrProfile)
@@ -212,7 +219,7 @@ export default function UploadPage() {
   }
 
   const triggerDocOcr = async (docId: string, fileName: string) => {
-    if (!currentId) return
+    if (!canExecute || !currentId) return
     setDocOcrLoading((m) => ({ ...m, [docId]: true }))
     try {
       const t = await ocrApi.triggerDoc(currentId, docId, ocrProfile)
@@ -232,6 +239,7 @@ export default function UploadPage() {
   }, [])
 
   const handleDelete = async (id: string) => {
+    if (!canExecute) return
     try {
       await contractsApi.delete(id)
       message.success('删除成功')
@@ -296,10 +304,14 @@ export default function UploadPage() {
       render: (_: unknown, row: ContractBrief) => (
         <Space>
           <Button size="small" onClick={() => viewDetail(row.id)}>查看</Button>
-          <Button size="small" icon={<EditOutlined />} onClick={() => setAliasModal({ open: true, contract: row, contractNo: row.contract_no, aliases: (row.alias_list || []).join(', ') })}>归一化</Button>
-          <Popconfirm title="确定删除该合同及其所有文件？" onConfirm={() => handleDelete(row.id)}>
-            <Button size="small" danger icon={<DeleteOutlined />}>删除</Button>
-          </Popconfirm>
+          {canExecute && (
+            <>
+              <Button size="small" icon={<EditOutlined />} onClick={() => setAliasModal({ open: true, contract: row, contractNo: row.contract_no, aliases: (row.alias_list || []).join(', ') })}>归一化</Button>
+              <Popconfirm title="确定删除该合同及其所有文件？" onConfirm={() => handleDelete(row.id)}>
+                <Button size="small" danger icon={<DeleteOutlined />}>删除</Button>
+              </Popconfirm>
+            </>
+          )}
         </Space>
       ),
     },
@@ -342,7 +354,7 @@ export default function UploadPage() {
       title: '操作', key: 'action', width: 240, align: 'center' as const,
       render: (_: unknown, row: DocumentBrief) => (
         <Space size={4}>
-          {row.ocr_status !== 'done' && (
+          {canExecute && row.ocr_status !== 'done' && (
             <Tooltip title={row.ocr_status === 'failed' ? '重新识别' : '触发 OCR 识别'}>
               <Button
                 size="small"
@@ -365,21 +377,23 @@ export default function UploadPage() {
               >
                 OCR对照
               </Button>
-              <Popconfirm
-                title="重新 OCR？"
-                description="将清空并重新识别该文档，覆盖现有识别结果与人工修正。"
-                okText="重新识别"
-                onConfirm={() => triggerDocOcr(row.id, row.file_name)}
-              >
-                <Button
-                  size="small"
-                  type="link"
-                  icon={<ReRunIcon />}
-                  disabled={docOcrLoading[row.id]}
+              {canExecute && (
+                <Popconfirm
+                  title="重新 OCR？"
+                  description="将清空并重新识别该文档，覆盖现有识别结果与人工修正。"
+                  okText="重新识别"
+                  onConfirm={() => triggerDocOcr(row.id, row.file_name)}
                 >
-                  重新 OCR
-                </Button>
-              </Popconfirm>
+                  <Button
+                    size="small"
+                    type="link"
+                    icon={<ReRunIcon />}
+                    disabled={docOcrLoading[row.id]}
+                  >
+                    重新 OCR
+                  </Button>
+                </Popconfirm>
+              )}
             </>
           )}
         </Space>
@@ -399,22 +413,24 @@ export default function UploadPage() {
         {/* 第一段:上传区(全宽,左 Dragger + 右已选文件与操作) */}
         <Col span={24}>
           <Card
-            title="上传合同文件夹"
+            title={canExecute ? '上传合同文件夹' : '合同文档浏览'}
             extra={
               <Space>
                 <Button icon={<ReloadOutlined />} onClick={load} loading={loading}>刷新列表</Button>
-                <Button
-                  type="primary"
-                  onClick={doUpload}
-                  loading={uploading}
-                  disabled={pendingFileNames.length === 0}
-                >
-                  开始上传
-                </Button>
+                {canExecute && (
+                  <Button
+                    type="primary"
+                    onClick={doUpload}
+                    loading={uploading}
+                    disabled={pendingFileNames.length === 0}
+                  >
+                    开始上传
+                  </Button>
+                )}
               </Space>
             }
           >
-            <Row gutter={24} align="stretch">
+            {canExecute ? <Row gutter={24} align="stretch">
               <Col flex="1 1 0%">
                 <Dragger {...uploadProps} disabled={uploading} style={{ minHeight: 200 }}>
                   <p className="ant-upload-drag-icon"><InboxOutlined /></p>
@@ -470,7 +486,11 @@ export default function UploadPage() {
                   </div>
                 )}
               </Col>
-            </Row>
+            </Row> : (
+              <div style={{ padding: '20px 4px', color: '#64748b' }}>
+                当前账号为只读权限，可查看合同与原件，但不能上传、修改或重新识别。
+              </div>
+            )}
           </Card>
         </Col>
 
@@ -509,43 +529,49 @@ export default function UploadPage() {
             extra={
               detail && (
                 <Space>
-                  <Tooltip title="识别范围：使用类型增强点=按「文档类型」页配置的备注类补充字段与专属指令；仅基础字段=忽略增强点，用于对比排查">
-                    <Select
-                      size="small"
-                      value={ocrProfile}
-                      onChange={(v) => setOcrProfile(v)}
-                      style={{ width: 150 }}
-                      options={[
-                        { value: 'type', label: '使用类型增强点' },
-                        { value: 'base', label: '仅基础字段' },
-                      ]}
-                    />
-                  </Tooltip>
-                  <Tooltip title="对该合同下所有未识别文档批量触发 OCR">
-                    <Button
-                      type="primary"
-                      icon={<ThunderboltOutlined />}
-                      onClick={triggerContractOcr}
-                      loading={ocrTriggering}
-                      disabled={ocrTask?.status === 'running' || detail.documents.every((d) => d.ocr_status === 'done')}
-                    >
-                      全部 OCR
-                    </Button>
-                  </Tooltip>
-                  <Popconfirm
-                    title="重置 OCR？"
-                    description="将对该合同下全部文档（含已识别）重新识别，覆盖现有识别结果与人工修正。"
-                    okText="重新识别全部"
-                    onConfirm={resetContractOcr}
-                  >
-                    <Button
-                      icon={<ReRunIcon />}
-                      loading={ocrResetting}
-                      disabled={ocrTask?.status === 'running' || detail.documents.length === 0}
-                    >
-                      重置 OCR
-                    </Button>
-                  </Popconfirm>
+                  {canExecute ? (
+                    <>
+                      <Tooltip title="识别范围：使用类型增强点=按「文档类型」页配置的备注类补充字段与专属指令；仅基础字段=忽略增强点，用于对比排查">
+                        <Select
+                          size="small"
+                          value={ocrProfile}
+                          onChange={(v) => setOcrProfile(v)}
+                          style={{ width: 150 }}
+                          options={[
+                            { value: 'type', label: '使用类型增强点' },
+                            { value: 'base', label: '仅基础字段' },
+                          ]}
+                        />
+                      </Tooltip>
+                      <Tooltip title="对该合同下所有未识别文档批量触发 OCR">
+                        <Button
+                          type="primary"
+                          icon={<ThunderboltOutlined />}
+                          onClick={triggerContractOcr}
+                          loading={ocrTriggering}
+                          disabled={ocrTask?.status === 'running' || detail.documents.every((d) => d.ocr_status === 'done')}
+                        >
+                          全部 OCR
+                        </Button>
+                      </Tooltip>
+                      <Popconfirm
+                        title="重置 OCR？"
+                        description="将对该合同下全部文档（含已识别）重新识别，覆盖现有识别结果与人工修正。"
+                        okText="重新识别全部"
+                        onConfirm={resetContractOcr}
+                      >
+                        <Button
+                          icon={<ReRunIcon />}
+                          loading={ocrResetting}
+                          disabled={ocrTask?.status === 'running' || detail.documents.length === 0}
+                        >
+                          重置 OCR
+                        </Button>
+                      </Popconfirm>
+                    </>
+                  ) : (
+                    <Tag>只读模式</Tag>
+                  )}
                 </Space>
               )
             }
@@ -712,6 +738,7 @@ export default function UploadPage() {
             doc={compareDoc}
             fileUrl={contractsApi.fileUrl(compareDoc.id)}
             height="calc(100vh - 120px)"
+            editable={canExecute}
             onSaved={async () => {
               try {
                 const fresh = await contractsApi.getOcr(compareDoc.id)

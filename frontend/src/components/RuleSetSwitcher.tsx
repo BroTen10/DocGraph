@@ -7,11 +7,14 @@ import { PlusOutlined, DownOutlined, AppstoreOutlined, MinusOutlined } from '@an
 import { useRuleSet } from '../context/RuleSetContext'
 import { constantsApi, getErrorMessage } from '../api/client'
 import type { DocTypeMeta } from '../types'
+import { useAuth } from '../auth/AuthContext'
 
 const { Text } = Typography
 
 export function RuleSetSwitcher() {
   const { ruleSets, current, currentId, loading, switchTo, create, remove } = useRuleSet()
+  const { hasPermission } = useAuth()
+  const canManageRules = hasPermission('rules.manage')
   const [modalOpen, setModalOpen] = useState(false)
   const [deleteOpen, setDeleteOpen] = useState(false)
   const [deleteConfirmText, setDeleteConfirmText] = useState('')
@@ -79,20 +82,22 @@ export function RuleSetSwitcher() {
       ),
       onClick: () => switchTo(r.id),
     }))
-    if (ruleSets.length > 0) {
+    if (canManageRules && ruleSets.length > 0) {
       items.push({ type: 'divider' })
     }
-    items.push({
-      key: '__create__',
-      label: (
-        <div style={{ display: 'flex', alignItems: 'center', gap: 8, color: '#6366f1', fontWeight: 500 }}>
-          <PlusOutlined /> 新建规则集
-        </div>
-      ),
-      onClick: () => setModalOpen(true),
-    })
+    if (canManageRules) {
+      items.push({
+        key: '__create__',
+        label: (
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, color: '#6366f1', fontWeight: 500 }}>
+            <PlusOutlined /> 新建规则集
+          </div>
+        ),
+        onClick: () => setModalOpen(true),
+      })
+    }
     return items
-  }, [ruleSets, currentId, switchTo])
+  }, [ruleSets, currentId, switchTo, canManageRules])
 
   return (
     <>
@@ -125,48 +130,54 @@ export function RuleSetSwitcher() {
           </Button>
         </Dropdown>
 
-        {/* 独立的"新建规则集"按钮:品牌紫主色,无需展开下拉即可点击 */}
-        <Tooltip title="新建规则集" placement="bottom">
-          <Button
-            type="primary"
-            icon={<PlusOutlined />}
-            onClick={() => setModalOpen(true)}
-            style={{
-              borderRadius: 8,
-              height: 36,
-              width: 36,
-              padding: 0,
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-              background: 'linear-gradient(135deg, #6366f1 0%, #8b5cf6 100%)',
-              border: 'none',
-              boxShadow: '0 2px 8px rgba(99, 102, 241, 0.35)',
-            }}
-          />
-        </Tooltip>
+        {canManageRules && (
+          <>
+            {/* 独立的"新建规则集"按钮:品牌紫主色,无需展开下拉即可点击 */}
+            <Tooltip title="新建规则集" placement="bottom">
+              <Button
+                aria-label="新建规则集"
+                type="primary"
+                icon={<PlusOutlined />}
+                onClick={() => setModalOpen(true)}
+                style={{
+                  borderRadius: 8,
+                  height: 36,
+                  width: 36,
+                  padding: 0,
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  background: 'linear-gradient(135deg, #6366f1 0%, #8b5cf6 100%)',
+                  border: 'none',
+                  boxShadow: '0 2px 8px rgba(99, 102, 241, 0.35)',
+                }}
+              />
+            </Tooltip>
 
-        {/* 独立的"删除当前规则集"按钮:红色危险样式,点击后需二次确认 */}
-        <Tooltip title={current ? '删除当前规则集' : '暂无规则集可删除'} placement="bottom">
-          <Button
-            danger
-            icon={<MinusOutlined />}
-            disabled={!current}
-            onClick={() => {
-              setDeleteConfirmText('')
-              setDeleteOpen(true)
-            }}
-            style={{
-              borderRadius: 8,
-              height: 36,
-              width: 36,
-              padding: 0,
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-            }}
-          />
-        </Tooltip>
+            {/* 独立的"删除当前规则集"按钮:红色危险样式,点击后需二次确认 */}
+            <Tooltip title={current ? '删除当前规则集' : '暂无规则集可删除'} placement="bottom">
+              <Button
+                aria-label="删除当前规则集"
+                danger
+                icon={<MinusOutlined />}
+                disabled={!current}
+                onClick={() => {
+                  setDeleteConfirmText('')
+                  setDeleteOpen(true)
+                }}
+                style={{
+                  borderRadius: 8,
+                  height: 36,
+                  width: 36,
+                  padding: 0,
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                }}
+              />
+            </Tooltip>
+          </>
+        )}
       </Space>
 
       <Modal

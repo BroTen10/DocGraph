@@ -13,6 +13,7 @@ const { TextArea } = Input
 
 interface Props {
   ruleSetId: string
+  readOnly?: boolean
 }
 
 /** 新建 Skill 的 YAML 模板（YAML 支持注释，直接在模板里教用户写法） */
@@ -143,7 +144,7 @@ domain_context:
     - 大合同与分批单：分批金额之和不可超过大合同总额
 `
 
-export default function SkillTab({ ruleSetId }: Props) {
+export default function SkillTab({ ruleSetId, readOnly = false }: Props) {
   const [skills, setSkills] = useState<RuleParseSkill[]>([])
   const [loading, setLoading] = useState(false)
   const [modalOpen, setModalOpen] = useState(false)
@@ -341,9 +342,13 @@ export default function SkillTab({ ruleSetId }: Props) {
     {
       title: '启用', key: 'enabled', width: 70,
       render: (_: unknown, row: RuleParseSkill) => (
-        <Tooltip title={row.is_builtin ? '内置 Skill 为全局，停用将影响所有规则集' : undefined}>
-          <Switch size="small" checked={row.enabled} onChange={(v) => handleToggleEnabled(row, v)} />
-        </Tooltip>
+        readOnly ? (
+          <Tag color={row.enabled ? 'green' : 'default'}>{row.enabled ? '已启用' : '已停用'}</Tag>
+        ) : (
+          <Tooltip title={row.is_builtin ? '修改内置 Skill 将在当前规则集创建副本' : undefined}>
+            <Switch size="small" checked={row.enabled} onChange={(v) => handleToggleEnabled(row, v)} />
+          </Tooltip>
+        )
       ),
     },
     {
@@ -372,16 +377,18 @@ export default function SkillTab({ ruleSetId }: Props) {
     {
       title: '操作', key: 'action', width: 110,
       render: (_: unknown, row: RuleParseSkill) => (
-        <Space>
-          <Tooltip title={row.is_builtin ? '编辑（保存为自定义副本）' : '编辑'}>
-            <Button size="small" icon={<EditOutlined />} onClick={() => openEdit(row)} />
-          </Tooltip>
-          {!row.is_builtin && (
-            <Popconfirm title="确定删除此 Skill？" onConfirm={() => handleDelete(row)}>
-              <Button size="small" danger icon={<DeleteOutlined />} />
-            </Popconfirm>
-          )}
-        </Space>
+        readOnly ? <Text type="secondary">只读</Text> : (
+          <Space>
+            <Tooltip title={row.is_builtin ? '编辑（保存为自定义副本）' : '编辑'}>
+              <Button size="small" icon={<EditOutlined />} onClick={() => openEdit(row)} />
+            </Tooltip>
+            {!row.is_builtin && (
+              <Popconfirm title="确定删除此 Skill？" onConfirm={() => handleDelete(row)}>
+                <Button size="small" danger icon={<DeleteOutlined />} />
+              </Popconfirm>
+            )}
+          </Space>
+        )
       ),
     },
   ]
@@ -390,8 +397,12 @@ export default function SkillTab({ ruleSetId }: Props) {
     <div>
       <div style={{ marginBottom: 12 }}>
         <Space>
-          <Button type="primary" icon={<PlusOutlined />} onClick={openCreate}>新建 Skill</Button>
-          <Button icon={<BulbOutlined />} onClick={openWizard}>纠偏引导</Button>
+          {!readOnly && (
+            <>
+              <Button type="primary" icon={<PlusOutlined />} onClick={openCreate}>新建 Skill</Button>
+              <Button icon={<BulbOutlined />} onClick={openWizard}>纠偏引导</Button>
+            </>
+          )}
           <Button icon={<ReloadOutlined />} onClick={load}>刷新</Button>
         </Space>
         <Alert
