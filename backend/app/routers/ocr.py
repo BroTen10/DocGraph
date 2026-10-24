@@ -14,6 +14,7 @@ import uuid
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
+from ..auth.dependencies import AuthContext, require_permission
 from ..database import get_db
 from ..schemas.ocr_task import OcrTaskBrief, OcrTaskOut
 from ..services import ocr_task_service
@@ -31,14 +32,22 @@ def trigger_doc_ocr(
         description="OCR 增强点范围：type=该文档类型的增强点（默认），base=仅基础字段模板",
     ),
     db: Session = Depends(get_db),
+    ctx: AuthContext = Depends(require_permission("review.execute")),
 ) -> OcrTaskOut:
     """触发单个文档 OCR（异步，立即返回 task）。
 
     profile 用于对比重跑：配置了增强点的类型可用 base 复现"未增强"的识别结果。
     """
+    assert ctx.tenant is not None
     try:
         return OcrTaskOut.model_validate(
-            ocr_task_service.start_ocr_for_doc(db, rule_set_id, doc_id, profile=profile)
+            ocr_task_service.start_ocr_for_doc(
+                db,
+                ctx.tenant.id,
+                rule_set_id,
+                doc_id,
+                profile=profile,
+            )
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -58,15 +67,22 @@ def trigger_contract_ocr(
         description="OCR 增强点范围：type=各文档类型的增强点（默认），base=仅基础字段模板",
     ),
     db: Session = Depends(get_db),
+    ctx: AuthContext = Depends(require_permission("review.execute")),
 ) -> OcrTaskOut:
     """触发合同下文档批量 OCR（异步）。
 
     默认只处理 pending 文档；force=true 时重置式重新识别全部文档。
     """
+    assert ctx.tenant is not None
     try:
         return OcrTaskOut.model_validate(
             ocr_task_service.start_ocr_for_contract(
-                db, rule_set_id, contract_id, force=force, profile=profile
+                db,
+                ctx.tenant.id,
+                rule_set_id,
+                contract_id,
+                force=force,
+                profile=profile,
             )
         )
     except ValueError as e:

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import logging
+import uuid
 
 from ..llm_client import LLMError, get_llm_client
 from ..constants import (
@@ -28,11 +29,12 @@ def build_suggestion_llm(
     detail: dict,
     rule_text: str = "",
     db=None,
+    tenant_id: uuid.UUID | None = None,
 ) -> str:
     """LLM 生成修正建议（以证据链为上下文）。调用失败/低质量时回退模板。"""
     try:
         llm = get_llm_client()
-        system_prompt = get_prompt(db, "suggestion.system")
+        system_prompt = get_prompt(db, tenant_id, "suggestion.system")
         evidence = json.dumps(detail or {}, ensure_ascii=False)[:1500]
         user_prompt = f"""规则：{rule_text or '-'}
 检查项：{check_category or '-'}

@@ -32,7 +32,7 @@ from sqlalchemy.orm import Session
 from ..config import settings
 from ..constants import CHECK_COMPLETENESS, CHECK_STAMP
 from ..llm_client import LLMError, get_llm_client
-from ..models import Rule, RuleSnapshot
+from ..models import Rule, RuleSet, RuleSnapshot
 from ..neo4j_client import Neo4jClient, get_neo4j_client
 from ..schemas.graph import (
     EdgeData,
@@ -87,11 +87,12 @@ def _convert_one_rule(
     rule: Rule,
     rule_index: int,
     db=None,
+    tenant_id: uuid.UUID | None = None,
 ) -> RuleGraphConvertResult:
     """调用 LLM 将单条规则转换为图谱结构。"""
     llm = get_llm_client()
     rule_id_str = rule.rule_code
-    user_prompt = get_prompt(db, "graph_builder.user").format(
+    user_prompt = get_prompt(db, tenant_id, "graph_builder.user").format(
         rule_id=rule_id_str,
         doc_type=rule.doc_type or "",
         check_category=rule.check_category or "",
@@ -101,7 +102,10 @@ def _convert_one_rule(
     try:
         resp = llm.chat_json(
             messages=[
-                {"role": "system", "content": get_prompt(db, "graph_builder.system")},
+                {
+                    "role": "system",
+                    "content": get_prompt(db, tenant_id, "graph_builder.system"),
+                },
                 {"role": "user", "content": user_prompt},
             ],
             temperature=0.1,
@@ -400,6 +404,12 @@ def build_graph(
         progress_callback: 可选的进度回调函数 (stage: str, progress: int, message: str) -> None
     """
     neo4j = neo4j or get_neo4j_client()
+    rule_set = db.execute(
+        select(RuleSet).where(RuleSet.id == rule_set_id)
+    ).scalar_one_or_none()
+    if rule_set is None:
+        raise ValueError("规则集不存在")
+    tenant_id = rule_set.tenant_id
 
     def _report(stage: str, progress: int, message: str) -> None:
         if progress_callback:
@@ -414,7 +424,10 @@ def build_graph(
     if not rules:
         raise ValueError("无已确认且已启用的规则，请先在规则管理中确认并启用规则")
 
-    threshold = get_setting(db, "llm.confidence_threshold") or settings.llm_confidence_threshold
+    threshold = (
+        get_setting(db, tenant_id, "llm.confidence_threshold")
+        or settings.llm_confidence_threshold
+    )
     _report("读取启用规则", 10, f"共 {len(rules)} 条启用规则")
 
     # 2. 逐条转换
@@ -434,7 +447,10 @@ def build_graph(
     doc_type_reg: dict[str, Any] = {}
     if all_doc_type_names:
         rows = db.execute(
-            sa_select(DocTypeModel).where(DocTypeModel.name.in_(sorted(all_doc_type_names)))
+            sa_select(DocTypeModel).where(
+                DocTypeModel.tenant_id == tenant_id,
+                DocTypeModel.name.in_(sorted(all_doc_type_names)),
+            )
         ).scalars().all()
         doc_type_reg = {dt.name: dt for dt in rows}
 
@@ -559,7 +575,7 @@ def build_graph(
                 10 + int((idx - 1) / total * 70),
                 f"正在转换规则 {idx}/{total}：[{rule.doc_type}] {rule.rule_text[:40]}...",
             )
-            result = _convert_one_rule(rule, idx, db)
+            result = _convert_one_rule(rule, idx, db, tenant_id=tenant_id)
         if auto_confirm_all or result.confidence >= threshold:
             result.auto_confirmed = True
             auto_confirmed_count += 1

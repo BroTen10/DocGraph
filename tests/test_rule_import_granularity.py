@@ -217,6 +217,9 @@ class TableChunkingTests(unittest.TestCase):
 
 
 class _FakeResult:
+    def __init__(self, scalar=None):
+        self._scalar = scalar
+
     def scalars(self):
         return self
 
@@ -226,9 +229,21 @@ class _FakeResult:
     def first(self):
         return None
 
+    def scalar_one_or_none(self):
+        return self._scalar
+
 
 class _FakeDB:
     def execute(self, _statement):
+        from app.models import RuleSet
+
+        if any(
+            description.get("entity") is RuleSet
+            for description in _statement.column_descriptions
+        ):
+            return _FakeResult(
+                scalar=SimpleNamespace(tenant_id=uuid.UUID(int=1))
+            )
         return _FakeResult()
 
     def commit(self):
@@ -283,7 +298,7 @@ class ImportPipelineSourceRefTests(unittest.TestCase):
             ),
             patch(
                 "app.services.rule_import_service.get_prompt",
-                side_effect=lambda _db, key: (
+                side_effect=lambda _db, _tenant_id, key: (
                     "{doc_types}{check_categories}{raw_text}"
                     if key == "rule_import.user"
                     else "system"

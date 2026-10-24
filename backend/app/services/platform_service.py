@@ -166,6 +166,9 @@ def approve_registration(
         joined_at=now,
     )
     db.add(membership)
+    from .settings_service import seed_tenant_defaults
+
+    seed_tenant_defaults(db, tenant.id)
 
     tenant.approved_by = actor_id
     tenant.approved_at = now

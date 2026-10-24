@@ -20,8 +20,9 @@ from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
 from ..constants import DOC_OTHER
-from ..database import SessionLocal
+from ..database import SessionLocal, bind_tenant
 from ..models import Contract, Document, DocumentType, OcrTask
+from ..tenant_scope import tenant_get
 from .doc_normalizer import normalize_doc_type, resolve_field_aliases
 from .field_extraction_service import normalize_fields
 from .ocr_service import (
@@ -87,7 +88,12 @@ def reconcile_stale_tasks(db: Session, *, force_all: bool = False) -> int:
     return len(rows)
 
 
-def _apply_inferred_doc_type(db: Session, doc: Document, fields: dict) -> None:
+def _apply_inferred_doc_type(
+    db: Session,
+    tenant_id: uuid.UUID,
+    doc: Document,
+    fields: dict,
+) -> None:
     """OCR 完成后自动关联模型推测的文档类型（仅当当前类型为「其他」时）。
 
     规则：把模型推测的类型名（含显式别名）与已定义且激活（status=active）的
@@ -103,11 +109,12 @@ def _apply_inferred_doc_type(db: Session, doc: Document, fields: dict) -> None:
     inferred_clean = str(inferred).strip().rstrip("。.，,、:：;； ")
     if not inferred_clean:
         return
-    canonical = normalize_doc_type(db, inferred_clean)
+    canonical = normalize_doc_type(db, inferred_clean, tenant_id=tenant_id)
     if not canonical:
         return
     active = db.execute(
         select(DocumentType.name, DocumentType.is_required).where(
+            DocumentType.tenant_id == tenant_id,
             DocumentType.status == "active"
         )
     ).all()
@@ -124,15 +131,26 @@ def _apply_inferred_doc_type(db: Session, doc: Document, fields: dict) -> None:
 
 
 # ============ 触发入口 ============
-def _prepare_profile(db: Session, doc_type: str, profile: str) -> dict:
+def _prepare_profile(
+    db: Session,
+    tenant_id: uuid.UUID,
+    doc_type: str,
+    profile: str,
+) -> dict:
     """解析某类型的生效增强点，并预渲染专属指令（任务启动时取快照）。"""
-    data = resolve_ocr_profile(db, doc_type, profile)
-    data["rendered_instructions"] = render_extra_instructions(db, doc_type, data)
+    data = resolve_ocr_profile(db, tenant_id, doc_type, profile)
+    data["rendered_instructions"] = render_extra_instructions(
+        db,
+        tenant_id,
+        doc_type,
+        data,
+    )
     return data
 
 
 def start_ocr_for_doc(
     db: Session,
+    tenant_id: uuid.UUID,
     rule_set_id: uuid.UUID,
     doc_id: uuid.UUID,
     profile: str = OCR_PROFILE_TYPE,
@@ -142,15 +160,16 @@ def start_ocr_for_doc(
     创建 OcrTask(scope=single_doc)，起后台线程处理，立即返回任务对象。
     profile="type" 使用该文档类型的 OCR 增强点（默认）；"base" 仅基础字段模板。
     """
-    doc = db.get(Document, doc_id)
+    doc = tenant_get(db, Document, doc_id, tenant_id)
     if doc is None:
         raise ValueError("文档不存在")
 
     # 先回收中断的旧任务，避免前端因陈旧 running 状态禁用触发按钮
     reconcile_stale_tasks(db)
 
-    profile_data = _prepare_profile(db, doc.doc_type, profile)
+    profile_data = _prepare_profile(db, tenant_id, doc.doc_type, profile)
     task = OcrTask(
+        tenant_id=tenant_id,
         rule_set_id=rule_set_id,
         scope="single_doc",
         doc_id=doc_id,
@@ -167,7 +186,7 @@ def start_ocr_for_doc(
     # 起后台线程：使用独立 Session，不复用请求 session
     t = threading.Thread(
         target=_run_single_doc,
-        args=(task_id, doc_id, profile_data),
+        args=(task_id, tenant_id, doc_id, profile_data),
         name=f"ocr-single-{task_id}",
         daemon=True,
     )
@@ -177,6 +196,7 @@ def start_ocr_for_doc(
 
 def start_ocr_for_contract(
     db: Session,
+    tenant_id: uuid.UUID,
     rule_set_id: uuid.UUID,
     contract_id: uuid.UUID,
     force: bool = False,
@@ -188,7 +208,7 @@ def start_ocr_for_contract(
     force=True：重置式重新识别，覆盖该合同下全部文档（含已 done/failed 的）。
     profile="type" 使用各文档类型的 OCR 增强点（默认）；"base" 仅基础字段模板。
     """
-    contract = db.get(Contract, contract_id)
+    contract = tenant_get(db, Contract, contract_id, tenant_id)
     if contract is None:
         raise ValueError("合同不存在")
 
@@ -206,10 +226,16 @@ def start_ocr_for_contract(
     profiles_by_doc: dict[str, dict] = {}
     for d in docs:
         if d.doc_type not in profiles_by_type:
-            profiles_by_type[d.doc_type] = _prepare_profile(db, d.doc_type, profile)
+            profiles_by_type[d.doc_type] = _prepare_profile(
+                db,
+                tenant_id,
+                d.doc_type,
+                profile,
+            )
         profiles_by_doc[str(d.id)] = profiles_by_type[d.doc_type]
 
     task = OcrTask(
+        tenant_id=tenant_id,
         rule_set_id=rule_set_id,
         scope="contract_batch",
         contract_id=contract_id,
@@ -225,7 +251,7 @@ def start_ocr_for_contract(
 
     t = threading.Thread(
         target=_run_batch,
-        args=(task_id, doc_ids, profiles_by_doc),
+        args=(task_id, tenant_id, doc_ids, profiles_by_doc),
         name=f"ocr-batch-{task_id}",
         daemon=True,
     )
@@ -235,13 +261,17 @@ def start_ocr_for_contract(
 
 # ============ 后台线程 ============
 def _run_single_doc(
-    task_id: uuid.UUID, doc_id: uuid.UUID, profile_data: dict | None = None
+    task_id: uuid.UUID,
+    tenant_id: uuid.UUID,
+    doc_id: uuid.UUID,
+    profile_data: dict | None = None,
 ) -> None:
     """后台线程：处理单个文档 OCR。独立 db session。"""
     db = SessionLocal()
     try:
-        task = db.get(OcrTask, task_id)
-        doc = db.get(Document, doc_id)
+        bind_tenant(db, tenant_id)
+        task = tenant_get(db, OcrTask, task_id, tenant_id)
+        doc = tenant_get(db, Document, doc_id, tenant_id)
         if task is None or doc is None:
             logger.error("OCR 任务 %s: 任务或文档不存在", task_id)
             return
@@ -252,13 +282,15 @@ def _run_single_doc(
 
         r = process_document(
             doc,
-            key_fields=(profile_data or {}).get("field_list") or resolve_field_template(db, doc.doc_type),
+            key_fields=(profile_data or {}).get("field_list")
+            or resolve_field_template(db, tenant_id, doc.doc_type),
             db=db,
             extra_instructions=(profile_data or {}).get("rendered_instructions"),
+            tenant_id=tenant_id,
         )
         if r.get("success"):
             # OCR 完成后自动将模型推测类型关联到已激活的文档类型（命中则更新 doc_type）
-            _apply_inferred_doc_type(db, doc, r.get("fields", {}))
+            _apply_inferred_doc_type(db, tenant_id, doc, r.get("fields", {}))
             doc.ocr_status = "done"
             doc.ocr_text = r.get("text", "")
             doc.has_stamp = r.get("has_stamp")
@@ -267,7 +299,7 @@ def _run_single_doc(
             doc.extracted_fields = normalize_fields(
                 doc.doc_type,
                 r.get("fields", {}),
-                aliases=resolve_field_aliases(db, doc.doc_type),
+                aliases=resolve_field_aliases(db, doc.doc_type, tenant_id=tenant_id),
             )
             doc.extracted_at = datetime.now()
             task.success_count = 1
@@ -293,7 +325,7 @@ def _run_single_doc(
         db.rollback()
         logger.error("OCR 任务 %s 失败: %s", task_id, e, exc_info=True)
         try:
-            task = db.get(OcrTask, task_id)
+            task = tenant_get(db, OcrTask, task_id, tenant_id)
             if task is not None:
                 task.status = "failed"
                 task.error = str(e)
@@ -307,13 +339,15 @@ def _run_single_doc(
 
 def _run_batch(
     task_id: uuid.UUID,
+    tenant_id: uuid.UUID,
     doc_ids: list[uuid.UUID],
     profiles_by_doc: dict[str, dict] | None = None,
 ) -> None:
     """后台线程：批量处理多个文档。独立 db session。"""
     db = SessionLocal()
     try:
-        task = db.get(OcrTask, task_id)
+        bind_tenant(db, tenant_id)
+        task = tenant_get(db, OcrTask, task_id, tenant_id)
         if task is None:
             logger.error("OCR 任务 %s: 任务不存在", task_id)
             return
@@ -327,7 +361,7 @@ def _run_batch(
         failed = 0
 
         for i, doc_id in enumerate(doc_ids):
-            doc = db.get(Document, doc_id)
+            doc = tenant_get(db, Document, doc_id, tenant_id)
             if doc is None:
                 failed += 1
                 failures.append(
@@ -346,13 +380,15 @@ def _run_batch(
                 pdata = (profiles_by_doc or {}).get(str(doc_id)) or {}
                 r = process_document(
                     doc,
-                    key_fields=pdata.get("field_list") or resolve_field_template(db, doc.doc_type),
+                    key_fields=pdata.get("field_list")
+                    or resolve_field_template(db, tenant_id, doc.doc_type),
                     db=db,
                     extra_instructions=pdata.get("rendered_instructions"),
+                    tenant_id=tenant_id,
                 )
                 if r.get("success"):
                     # OCR 完成后自动将模型推测类型关联到已激活的文档类型（命中则更新 doc_type）
-                    _apply_inferred_doc_type(db, doc, r.get("fields", {}))
+                    _apply_inferred_doc_type(db, tenant_id, doc, r.get("fields", {}))
                     doc.ocr_status = "done"
                     doc.ocr_text = r.get("text", "")
                     doc.has_stamp = r.get("has_stamp")
@@ -361,7 +397,7 @@ def _run_batch(
                     doc.extracted_fields = normalize_fields(
                         doc.doc_type,
                         r.get("fields", {}),
-                        aliases=resolve_field_aliases(db, doc.doc_type),
+                        aliases=resolve_field_aliases(db, doc.doc_type, tenant_id=tenant_id),
                     )
                     doc.extracted_at = datetime.now()
                     success += 1
@@ -402,7 +438,7 @@ def _run_batch(
         db.rollback()
         logger.error("OCR 任务 %s 失败: %s", task_id, e, exc_info=True)
         try:
-            task = db.get(OcrTask, task_id)
+            task = tenant_get(db, OcrTask, task_id, tenant_id)
             if task is not None:
                 task.status = "failed"
                 task.error = str(e)

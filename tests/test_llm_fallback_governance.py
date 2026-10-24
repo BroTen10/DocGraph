@@ -179,9 +179,9 @@ def main() -> None:
         print("6. 最低置信度阈值可由设置调整")
         r9 = _pass_result("规则H")
         svc.get_setting = (  # type: ignore[assignment]
-            lambda db, key, default=None: 0.95
+            lambda db, tenant_id, key, default=None: 0.95
             if key == "review.llm_challenge_min_confidence"
-            else original_get_setting(db, key, default)
+            else original_get_setting(db, tenant_id, key, default)
         )
         _patch_llm(_FakeLLM(payload={"results": [
             {"index": 0, "agree": False, "suggested_result": "fail", "confidence": 0.85, "reason": "口径不同"},

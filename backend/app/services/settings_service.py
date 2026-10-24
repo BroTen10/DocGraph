@@ -11,14 +11,27 @@
 from __future__ import annotations
 
 import logging
+import uuid
 from typing import Any, Optional
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ..config import settings as app_settings
+from ..constants import (
+    ALL_DOC_TYPES,
+    DOC_TYPE_ALIASES,
+    DOC_FX_CLAIM,
+    DOC_OTHER,
+    DOC_PAY_APPLICATION,
+    FIELD_ALIASES,
+    FIELD_TEMPLATES,
+    OPTIONAL_DOC_TYPES,
+    REQUIRED_DOC_TYPES,
+    STAMP_REQUIREMENTS,
+)
 from ..llm_client import LLMError, get_llm_client
-from ..models import SystemSetting
+from ..models import AuditLog, DocumentType, SystemSetting
 from ..prompt_templates import PROMPT_META, PROMPT_TEMPLATES, get_prompt_default
 
 logger = logging.getLogger(__name__)
@@ -89,30 +102,49 @@ def _meta(key: str) -> dict:
     return {"label": key, "group": "其他", "description": "", "kind": "text", "default": None}
 
 
-def get_setting(db: Optional[Session], key: str, default: Any = None) -> Any:
-    """读取单条设置；DB 无记录回退内置默认。"""
-    if db is not None:
+def get_setting(
+    db: Optional[Session],
+    tenant_id: uuid.UUID | None,
+    key: str,
+    default: Any = None,
+) -> Any:
+    """读取当前租户的单条设置；无覆盖值回退代码默认值。"""
+    if db is not None and tenant_id is not None:
         try:
-            row = db.get(SystemSetting, key)
+            row = db.execute(
+                select(SystemSetting).where(
+                    SystemSetting.tenant_id == tenant_id,
+                    SystemSetting.key == key,
+                )
+            ).scalar_one_or_none()
             if row is not None:
                 return row.value
         except Exception:
-            logger.warning("读取系统设置失败（回退默认）: %s", key, exc_info=True)
+            logger.warning("读取租户系统设置失败（回退默认）: %s", key, exc_info=True)
     meta = _meta(key)
     if default is not None:
         return default
     return meta.get("default")
 
 
-def get_prompt(db: Optional[Session], key: str) -> str:
-    """读取提示词模板（DB 覆盖或内置默认）。"""
-    val = get_setting(db, key)
+def get_prompt(
+    db: Optional[Session],
+    tenant_id: uuid.UUID | None,
+    key: str,
+) -> str:
+    """读取当前租户的提示词模板（租户覆盖或内置默认）。"""
+    val = get_setting(db, tenant_id, key)
     return str(val) if val is not None else get_prompt_default(key)
 
 
-def get_all_settings(db: Session) -> list[dict]:
-    """返回全部设置（内置默认 + DB 覆盖），供前端渲染。"""
-    rows = {r.key: r for r in db.execute(select(SystemSetting)).scalars()}
+def get_all_settings(db: Session, tenant_id: uuid.UUID) -> list[dict]:
+    """返回当前租户的全部生效设置（内置默认 + 租户覆盖）。"""
+    rows = {
+        r.key: r
+        for r in db.execute(
+            select(SystemSetting).where(SystemSetting.tenant_id == tenant_id)
+        ).scalars()
+    }
     keys = sorted(set(PROMPT_TEMPLATES) | set(KNOBS))
     out: list[dict] = []
     for key in keys:
@@ -132,18 +164,30 @@ def get_all_settings(db: Session) -> list[dict]:
     return out
 
 
-def update_settings(db: Session, items: list[dict]) -> list[dict]:
-    """批量更新设置；value 为 None 表示重置回默认（删除记录）。"""
+def update_settings(
+    db: Session,
+    tenant_id: uuid.UUID,
+    items: list[dict],
+    actor_user_id: uuid.UUID | None = None,
+) -> list[dict]:
+    """批量更新当前租户设置；value 为 None 表示删除覆盖值。"""
+    changed_keys: list[str] = []
     for item in items:
         key = str(item.get("key") or "").strip()
         if not key:
             continue
         value = item.get("value")
         meta = _meta(key)
+        row = db.execute(
+            select(SystemSetting).where(
+                SystemSetting.tenant_id == tenant_id,
+                SystemSetting.key == key,
+            )
+        ).scalar_one_or_none()
         if value is None:
-            row = db.get(SystemSetting, key)
             if row is not None:
                 db.delete(row)
+                changed_keys.append(key)
             continue
         # 数值/布尔类型做一次类型清洗
         if meta.get("kind") == "number":
@@ -153,10 +197,10 @@ def update_settings(db: Session, items: list[dict]) -> list[dict]:
                 continue
         elif meta.get("kind") == "boolean":
             value = bool(value) if not isinstance(value, str) else value.lower() in ("true", "1", "是", "yes")
-        row = db.get(SystemSetting, key)
         if row is None:
             db.add(
                 SystemSetting(
+                    tenant_id=tenant_id,
                     key=key,
                     value=value,
                     group=meta.get("group", "其他"),
@@ -167,8 +211,60 @@ def update_settings(db: Session, items: list[dict]) -> list[dict]:
             )
         else:
             row.value = value
+        changed_keys.append(key)
+    if changed_keys:
+        db.add(
+            AuditLog(
+                tenant_id=tenant_id,
+                actor_user_id=actor_user_id,
+                action="settings.update",
+                target_type="settings",
+                result="success",
+                metadata_json={"keys": sorted(set(changed_keys))},
+            )
+        )
     db.commit()
-    return get_all_settings(db)
+    return get_all_settings(db, tenant_id)
+
+
+def seed_tenant_defaults(db: Session, tenant_id: uuid.UUID) -> int:
+    """Idempotently create the built-in document-type registry for one tenant."""
+    existing = set(
+        db.execute(
+            select(DocumentType.name).where(DocumentType.tenant_id == tenant_id)
+        ).scalars()
+    )
+    added = 0
+    for name in ALL_DOC_TYPES:
+        if name in existing:
+            continue
+        if name in REQUIRED_DOC_TYPES:
+            category, is_required = "required", True
+        elif name in OPTIONAL_DOC_TYPES:
+            category, is_required = "optional", False
+        elif name in (DOC_FX_CLAIM, DOC_PAY_APPLICATION):
+            category, is_required = "supporting", False
+        elif name == DOC_OTHER:
+            category, is_required = "other", False
+        else:
+            category, is_required = "extra", False
+        db.add(
+            DocumentType(
+                tenant_id=tenant_id,
+                name=name,
+                category=category,
+                is_required=is_required,
+                key_fields=FIELD_TEMPLATES.get(name, []),
+                aliases=DOC_TYPE_ALIASES.get(name, []),
+                field_aliases=FIELD_ALIASES.get(name, {}),
+                stamp_required=STAMP_REQUIREMENTS.get(name),
+                source="seed",
+                status="active",
+            )
+        )
+        added += 1
+    db.flush()
+    return added
 
 
 def optimize_prompt(

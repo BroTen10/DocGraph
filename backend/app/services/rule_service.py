@@ -108,6 +108,12 @@ def _accept_defects(
 def create_rule(db: Session, rule_set_id: uuid.UUID, payload: RuleCreate) -> RuleOut:
     """创建规则（必须挂在指定规则集下）。"""
     try:
+        rule_set = db.execute(
+            select(RuleSet).where(RuleSet.id == rule_set_id)
+        ).scalar_one_or_none()
+        if rule_set is None:
+            raise ValueError("规则集不存在")
+        tenant_id = rule_set.tenant_id
         data = payload.model_dump()
         rule_no = allocate_rule_no(db, rule_set_id)
         rule_code = format_rule_code(rule_no)
@@ -115,12 +121,20 @@ def create_rule(db: Session, rule_set_id: uuid.UUID, payload: RuleCreate) -> Rul
         data["defects"] = _stamp_defect_rule_code(data.get("defects"), rule_code)
         # 批次 11：写时归一——手工创建/导入的规则同样归一文档类型与字段名
         if data.get("doc_type"):
-            data["doc_type"] = normalize_doc_type(db, data["doc_type"]) or data["doc_type"]
+            data["doc_type"] = (
+                normalize_doc_type(db, data["doc_type"], tenant_id=tenant_id)
+                or data["doc_type"]
+            )
         if data.get("scope"):
-            data["scope"] = normalize_scope(db, data["scope"])
+            data["scope"] = normalize_scope(db, data["scope"], tenant_id=tenant_id)
         if data.get("structure"):
-            data["structure"] = normalize_structure(db, data["structure"], data.get("doc_type"))
-        rule = Rule(rule_set_id=rule_set_id, **data)
+            data["structure"] = normalize_structure(
+                db,
+                data["structure"],
+                data.get("doc_type"),
+                tenant_id=tenant_id,
+            )
+        rule = Rule(rule_set_id=rule_set_id, tenant_id=tenant_id, **data)
         # 方案 A：创建时即为"已确认"的规则，缺陷一并视为已认可
         if rule.status == "confirmed":
             _accept_defects(rule, by=rule.confirmed_by or rule_defects.RESOLVED_BY_CONFIRM)
@@ -141,15 +155,22 @@ def update_rule(
     rule = db.get(Rule, rule_id)
     if rule is None:
         return None
+    tenant_id = rule.tenant_id
     data = payload.model_dump(exclude_unset=True)
     # 批次 11：写时归一——手工编辑规则同样归一文档类型与字段名
     if data.get("doc_type"):
-        data["doc_type"] = normalize_doc_type(db, data["doc_type"]) or data["doc_type"]
+        data["doc_type"] = (
+            normalize_doc_type(db, data["doc_type"], tenant_id=tenant_id)
+            or data["doc_type"]
+        )
     if data.get("scope"):
-        data["scope"] = normalize_scope(db, data["scope"])
+        data["scope"] = normalize_scope(db, data["scope"], tenant_id=tenant_id)
     if data.get("structure"):
         data["structure"] = normalize_structure(
-            db, data["structure"], data.get("doc_type") or rule.doc_type
+            db,
+            data["structure"],
+            data.get("doc_type") or rule.doc_type,
+            tenant_id=tenant_id,
         )
     for k, v in data.items():
         setattr(rule, k, v)

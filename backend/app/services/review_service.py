@@ -25,6 +25,7 @@ from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
 from ..config import settings
+from ..database import bind_tenant
 from ..constants import (
     CHECK_ACCURACY,
     CHECK_COMPLETENESS,
@@ -184,12 +185,14 @@ def start_review(
     contract = db.get(Contract, contract_id)
     if contract is None:
         raise ValueError(f"合同不存在: {contract_id}")
+    tenant_id = contract.tenant_id
 
     # 先回收中断的旧任务，避免任务列表被陈旧 running 行污染
     reconcile_stale_review_tasks(db)
 
     # 创建任务
     task = ReviewTask(
+        tenant_id=tenant_id,
         contract_id=contract_id,
         snapshot_id=snapshot_id,
         status="running",
@@ -209,13 +212,21 @@ def start_review(
     def _run_in_thread():
         thread_db = SessionFactory()
         try:
+            bind_tenant(thread_db, tenant_id)
             thread_task = thread_db.get(ReviewTask, task_id)
             thread_contract = thread_db.get(Contract, contract_id)
             if thread_task is None or thread_contract is None:
                 logger.error("后台审查任务 %s: 任务或合同不存在", task_id)
                 return
             docs = list(thread_contract.documents)
-            _run_review_pipeline(thread_db, thread_task, thread_contract, docs, snapshot_id)
+            _run_review_pipeline(
+                thread_db,
+                tenant_id,
+                thread_task,
+                thread_contract,
+                docs,
+                snapshot_id,
+            )
             thread_db.commit()
         except Exception as e:
             logger.error("审查任务 %s 失败: %s", task_id, e, exc_info=True)
@@ -239,6 +250,7 @@ def start_review(
 
 def _run_review_pipeline(
     db: Session,
+    tenant_id: uuid.UUID,
     task: ReviewTask,
     contract: Contract,
     docs: list[Document],
@@ -258,12 +270,19 @@ def _run_review_pipeline(
             # 已处理过，跳过
             continue
         # 一期：审查链路内的漏补 OCR 同样使用该文档类型的 OCR 增强点
-        pdata = resolve_ocr_profile(db, doc.doc_type, OCR_PROFILE_TYPE)
+        pdata = resolve_ocr_profile(db, tenant_id, doc.doc_type, OCR_PROFILE_TYPE)
         r = process_document(
             doc,
-            key_fields=pdata["field_list"] or resolve_field_template(db, doc.doc_type),
+            key_fields=pdata["field_list"]
+            or resolve_field_template(db, tenant_id, doc.doc_type),
             db=db,
-            extra_instructions=render_extra_instructions(db, doc.doc_type, pdata),
+            extra_instructions=render_extra_instructions(
+                db,
+                tenant_id,
+                doc.doc_type,
+                pdata,
+            ),
+            tenant_id=tenant_id,
         )
         if r.get("success"):
             doc.ocr_status = "done"
@@ -277,7 +296,11 @@ def _run_review_pipeline(
                 normalize_fields(
                     doc.doc_type,
                     r.get("fields", {}),
-                    aliases=resolve_field_aliases(db, doc.doc_type),
+                    aliases=resolve_field_aliases(
+                        db,
+                        doc.doc_type,
+                        tenant_id=tenant_id,
+                    ),
                 ),
             )
             doc.extracted_at = datetime.now()
@@ -326,10 +349,14 @@ def _run_review_pipeline(
         results.extend(_check_stamp(db, docs, rules_by_key))
 
         # 检查3：信息准确性
-        results.extend(_check_accuracy(db, docs, rules_by_key, contract))
+        results.extend(
+            _check_accuracy(db, tenant_id, docs, rules_by_key, contract)
+        )
 
         # 检查4：时间逻辑
-        results.extend(_check_time_logic(db, docs, rules_by_key, contract))
+        results.extend(
+            _check_time_logic(db, tenant_id, docs, rules_by_key, contract)
+        )
 
     # ============ 阶段2.5：LLM 语义审查（引擎 B，批次 10 Phase C） ============
     # 覆盖确定性引擎表达不了的定性规则，并对字符串相等失败做语义复核；
@@ -341,13 +368,36 @@ def _run_review_pipeline(
             semantic_adjudication_fallback,
         )
         enabled_rules = _load_enabled_rules(db, contract.rule_set_id)
-        llm_results = review_unstructured_rules(db, contract, docs, enabled_rules)
+        llm_results = review_unstructured_rules(
+            db,
+            contract,
+            docs,
+            enabled_rules,
+            tenant_id=tenant_id,
+        )
         for lr in llm_results:
             results.append(_make_result_from_llm(lr, docs))
-        semantic_changed = semantic_equivalence_fallback(db, contract, docs, results)
+        semantic_changed = semantic_equivalence_fallback(
+            db,
+            contract,
+            docs,
+            results,
+            tenant_id=tenant_id,
+        )
         adjudication_changed = 0
-        if get_setting(db, "review.semantic_adjudication_enabled", True):
-            adjudication_changed = semantic_adjudication_fallback(db, contract, docs, results)
+        if get_setting(
+            db,
+            tenant_id,
+            "review.semantic_adjudication_enabled",
+            True,
+        ):
+            adjudication_changed = semantic_adjudication_fallback(
+                db,
+                contract,
+                docs,
+                results,
+                tenant_id=tenant_id,
+            )
         if llm_results or semantic_changed or adjudication_changed:
             logger.info(
                 "审查任务 %s: LLM 语义审查新增 %d 条结果，语义复核调整 %d 条，语义裁决调整 %d 条",
@@ -359,11 +409,17 @@ def _run_review_pipeline(
     # ============ 阶段2.6：LLM 全量复核（可选开关，只提异议不改判） ============
     # 默认关闭。开启后确定性结论逐条交给 LLM 复核，但 LLM 只能把存疑项标成
     # 「需人工复核」，不会改写引擎结论（结论可复现、可拿原始单据复核）。
-    if get_setting(db, "review.llm_full_review_enabled", False):
+    if get_setting(db, tenant_id, "review.llm_full_review_enabled", False):
         try:
             from .llm_review_service import semantic_challenge_review
 
-            challenged = semantic_challenge_review(db, contract, docs, results)
+            challenged = semantic_challenge_review(
+                db,
+                contract,
+                docs,
+                results,
+                tenant_id=tenant_id,
+            )
             if challenged:
                 logger.info("审查任务 %s: LLM 全量复核标记 %d 条需人工复核", task.id, challenged)
         except Exception as e:
@@ -374,7 +430,13 @@ def _run_review_pipeline(
     try:
         from .llm_review_service import ensure_fallback_coverage
 
-        covered = ensure_fallback_coverage(db, contract, docs, results)
+        covered = ensure_fallback_coverage(
+            db,
+            contract,
+            docs,
+            results,
+            tenant_id=tenant_id,
+        )
         if covered:
             logger.warning("审查任务 %s: %d 条结果缺少兜底痕迹，已标记需人工确认", task.id, covered)
     except Exception as e:
@@ -395,6 +457,7 @@ def _run_review_pipeline(
                 detail=r.detail or {},
                 rule_text=r.rule_text or "",
                 db=db,
+                tenant_id=tenant_id,
             )
         db.add(r)
 
@@ -614,13 +677,17 @@ def _check_stamp(
 # ============ 检查3：信息准确性 ============
 def _check_accuracy(
     db: Session,
+    tenant_id: uuid.UUID,
     docs: list[Document],
     rules_by_key: dict[tuple[str, str], list[Rule]],
     contract: Contract,
 ) -> list[ReviewResult]:
     """信息准确性检查：跨文档字段比对 + 一对多总额比对。"""
     results: list[ReviewResult] = []
-    tolerance_pct = get_setting(db, "review.amount_tolerance_percent") or settings.amount_tolerance_percent
+    tolerance_pct = (
+        get_setting(db, tenant_id, "review.amount_tolerance_percent")
+        or settings.amount_tolerance_percent
+    )
 
     # 3.1 合同号归一化：所有文档的合同号应归一到 contract.contract_no
     for doc in docs:
@@ -783,6 +850,7 @@ def _check_accuracy(
 # ============ 检查4：时间逻辑 ============
 def _check_time_logic(
     db: Session,
+    tenant_id: uuid.UUID,
     docs: list[Document],
     rules_by_key: dict[tuple[str, str], list[Rule]],
     contract: Contract,
@@ -790,8 +858,8 @@ def _check_time_logic(
     """时间逻辑检查。"""
     results: list[ReviewResult] = []
     allow_same_day = (
-        get_setting(db, "review.allow_same_day_receive_pay")
-        if get_setting(db, "review.allow_same_day_receive_pay") is not None
+        get_setting(db, tenant_id, "review.allow_same_day_receive_pay")
+        if get_setting(db, tenant_id, "review.allow_same_day_receive_pay") is not None
         else settings.allow_same_day_receive_pay
     )
 

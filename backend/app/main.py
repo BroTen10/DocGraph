@@ -24,6 +24,7 @@ from .auth.csrf import (
     is_unsafe,
     origin_matches,
 )
+from .auth.dependencies import AuthContext, require_permission
 from .auth.session_tokens import get_active_session
 from .config import settings
 from .database import SessionLocal, get_db, init_db
@@ -181,7 +182,10 @@ def version_info() -> dict:
 
 
 @app.get("/api/constants/doc-types")
-def list_doc_types(db=Depends(get_db)) -> dict:
+def list_doc_types(
+    db=Depends(get_db),
+    ctx: AuthContext = Depends(require_permission("doc_types.view")),
+) -> dict:
     """返回支持的文件类型与检查项类别，供前端二维表格使用。
 
     必备/非必备不再由文档类型自身定义，而是由齐套性规则决定。
@@ -191,8 +195,14 @@ def list_doc_types(db=Depends(get_db)) -> dict:
     from .constants import CHECK_CATEGORIES, CHECK_COMPLETENESS
     from sqlalchemy import select
 
+    assert ctx.tenant is not None
     rows = db.execute(
-        select(DocumentType).where(DocumentType.status == "active").order_by(DocumentType.name)
+        select(DocumentType)
+        .where(
+            DocumentType.tenant_id == ctx.tenant.id,
+            DocumentType.status == "active",
+        )
+        .order_by(DocumentType.name)
     ).scalars().all()
 
     return {

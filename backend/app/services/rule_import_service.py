@@ -607,7 +607,11 @@ def _merge_into_existing(
     return changes
 
 
-def _known_doc_types(db: Session, rule_set_id: uuid.UUID) -> list[str]:
+def _known_doc_types(
+    db: Session,
+    rule_set_id: uuid.UUID,
+    tenant_id: uuid.UUID,
+) -> list[str]:
     """构造规则导入提示词中的"已知文件类型"清单。
 
     来源优先级：
@@ -630,7 +634,10 @@ def _known_doc_types(db: Session, rule_set_id: uuid.UUID) -> list[str]:
 
     rows = db.execute(
         select(DocumentType.name)
-        .where(DocumentType.status.in_(("active", "pending_review")))
+        .where(
+            DocumentType.tenant_id == tenant_id,
+            DocumentType.status.in_(("active", "pending_review")),
+        )
         .order_by(DocumentType.name)
     ).scalars().all()
     for name in rows:
@@ -765,6 +772,12 @@ def import_rules_from_text(
     raw_text = (raw_text or "").strip()
     if not raw_text:
         raise ValueError("规则清单文本为空")
+    rule_set = db.execute(
+        select(RuleSet).where(RuleSet.id == rule_set_id)
+    ).scalar_one_or_none()
+    if rule_set is None:
+        raise ValueError("规则集不存在")
+    tenant_id = rule_set.tenant_id
 
     source_rows = source_rows or []
     source_row_map = {
@@ -780,7 +793,9 @@ def import_rules_from_text(
         raw_text = apply_text_preprocessing(raw_text, directive.text_preprocessing)
 
     llm = get_llm_client()
-    doc_types_str = "、".join(_known_doc_types(db, rule_set_id))
+    doc_types_str = "、".join(
+        _known_doc_types(db, rule_set_id, tenant_id)
+    )
     check_categories_str = "、".join(_known_check_categories(db, rule_set_id))
 
     # 长文本分段解析：避免单次输出超 max_tokens 被截断（JSON 不完整）
@@ -797,13 +812,13 @@ def import_rules_from_text(
     ontology: dict[str, list] = {"doc_types": [], "fields": [], "check_intents": []}
     for idx, chunk in enumerate(chunks, start=1):
         chunk_source_refs = _source_refs_in_text(chunk)
-        user_prompt = get_prompt(db, "rule_import.user").format(
+        user_prompt = get_prompt(db, tenant_id, "rule_import.user").format(
             doc_types=doc_types_str,
             check_categories=check_categories_str,
             raw_text=chunk,
         )
         # 构建动态 System Prompt（附加 Skill 指令 + 领域上下文）
-        system_content = get_prompt(db, "rule_import.system")
+        system_content = get_prompt(db, tenant_id, "rule_import.system")
         if source_rows:
             system_content += "\n\n" + _TABLE_ROW_SYSTEM_ADDITION
         if directive:
@@ -947,11 +962,16 @@ def import_rules_from_text(
         # 批次 11：写时归一——文档类型/字段名映射到规范名（显式别名表，防双轨繁殖）。
         # 未命中规范名/别名的新名称原样保留，由下方"新类型检测"注册为 pending_review。
         if doc_type:
-            doc_type = _norm_doc_type(db, doc_type)
+            doc_type = _norm_doc_type(db, doc_type, tenant_id=tenant_id)
         if scope:
-            scope = _norm_scope(db, scope)
+            scope = _norm_scope(db, scope, tenant_id=tenant_id)
         if structure:
-            structure = _norm_structure(db, structure, doc_type or None)
+            structure = _norm_structure(
+                db,
+                structure,
+                doc_type or None,
+                tenant_id=tenant_id,
+            )
 
         # 收集新发现的类型/意图（含 scope 声明；ontology 声明在循环后并入）
         if doc_type:
@@ -1113,7 +1133,14 @@ def import_rules_from_text(
     # 将 LLM ontology 声明的新文件类型/检查意图并入发现集合（批次 10）
     for x in ontology.get("doc_types") or []:
         if isinstance(x, dict) and str(x.get("name") or "").strip():
-            new_doc_types.add(_norm_doc_type(db, str(x["name"]).strip()) or str(x["name"]).strip())
+            new_doc_types.add(
+                _norm_doc_type(
+                    db,
+                    str(x["name"]).strip(),
+                    tenant_id=tenant_id,
+                )
+                or str(x["name"]).strip()
+            )
     for x in ontology.get("check_intents") or []:
         if isinstance(x, dict) and str(x.get("name") or "").strip():
             new_check_categories.add(str(x["name"]).strip())
@@ -1143,8 +1170,20 @@ def import_rules_from_text(
     for f in ontology.get("fields") or []:
         if not isinstance(f, dict):
             continue
-        fdt = _norm_doc_type(db, str(f.get("doc_type") or "").strip()) or ""
-        fname, _ = _norm_field(db, fdt, str(f.get("name") or "").strip())
+        fdt = (
+            _norm_doc_type(
+                db,
+                str(f.get("doc_type") or "").strip(),
+                tenant_id=tenant_id,
+            )
+            or ""
+        )
+        fname, _ = _norm_field(
+            db,
+            fdt,
+            str(f.get("name") or "").strip(),
+            tenant_id=tenant_id,
+        )
         fname = str(fname or "").strip()
         if fdt and fname and fname not in field_map.setdefault(fdt, []):
             field_map[fdt].append(fname)
@@ -1156,7 +1195,10 @@ def import_rules_from_text(
             from ..models import DocumentType
             # 查询已有活跃类型名称
             existing = db.execute(
-                select(DocumentType.name).where(DocumentType.status == "active")
+                select(DocumentType.name).where(
+                    DocumentType.tenant_id == tenant_id,
+                    DocumentType.status == "active",
+                )
             ).scalars().all()
             existing_set = set(existing)
 
@@ -1166,6 +1208,7 @@ def import_rules_from_text(
                 # 检查是否已有 pending 记录
                 pending = db.execute(
                     select(DocumentType).where(
+                        DocumentType.tenant_id == tenant_id,
                         DocumentType.name == name,
                         DocumentType.status == "pending_review",
                     )
@@ -1183,11 +1226,16 @@ def import_rules_from_text(
                     continue
                 # 创建新类型
                 dt = DocumentType(
+                    tenant_id=tenant_id,
                     name=name,
                     source="rule_import",
                     status=(
                         "active"
-                        if get_setting(db, "rules.auto_confirm_new_types")
+                        if get_setting(
+                            db,
+                            tenant_id,
+                            "rules.auto_confirm_new_types",
+                        )
                         else "pending_review"
                     ),
                     key_fields=field_map.get(name, []),

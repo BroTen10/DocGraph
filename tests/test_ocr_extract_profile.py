@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import os
 import sys
+import uuid
 from types import SimpleNamespace
 
 _TEST_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -37,6 +38,7 @@ from app.services.ocr_service import (  # noqa: E402
 )
 
 _FAILED: list[str] = []
+TENANT_ID = uuid.UUID(int=1)
 
 
 def check(name: str, ok: bool, detail: str = "") -> None:
@@ -87,7 +89,12 @@ def main() -> None:
         str(merged),
     )
 
-    prof = resolve_ocr_profile(_StubDB(vat), "增值税发票", OCR_PROFILE_TYPE)
+    prof = resolve_ocr_profile(
+        _StubDB(vat),
+        TENANT_ID,
+        "增值税发票",
+        OCR_PROFILE_TYPE,
+    )
     check(
         "type 档：基础字段 + 备注类补充字段合并",
         prof["field_list"]
@@ -108,7 +115,12 @@ def main() -> None:
     )
     check("type 档：profile 标记为 type", prof["profile"] == OCR_PROFILE_TYPE)
 
-    base_prof = resolve_ocr_profile(_StubDB(vat), "增值税发票", OCR_PROFILE_BASE)
+    base_prof = resolve_ocr_profile(
+        _StubDB(vat),
+        TENANT_ID,
+        "增值税发票",
+        OCR_PROFILE_BASE,
+    )
     check(
         "base 档：忽略增强点，仅基础字段",
         base_prof["extra_fields"] == []
@@ -117,14 +129,18 @@ def main() -> None:
         str(base_prof["field_list"]),
     )
 
-    empty_prof = resolve_ocr_profile(_StubDB(None), "未配置类型")
+    empty_prof = resolve_ocr_profile(
+        _StubDB(None),
+        TENANT_ID,
+        "未配置类型",
+    )
     check(
         "未配置增强点的类型：与升级前一致（无补充字段/指令）",
         empty_prof["extra_fields"] == [] and empty_prof["instructions"] is None,
     )
 
     # ---- 指令包装模板 ----
-    text = render_extra_instructions(None, "增值税发票", prof)
+    text = render_extra_instructions(None, TENANT_ID, "增值税发票", prof)
     check(
         "指令被包进占位符模板（含类型名与指令正文）",
         bool(text) and "增值税发票" in text and "备注栏" in text,
@@ -132,13 +148,18 @@ def main() -> None:
     )
     check(
         "无指令时不注入",
-        render_extra_instructions(None, "增值税发票", {"instructions": None}) is None,
+        render_extra_instructions(
+            None,
+            TENANT_ID,
+            "增值税发票",
+            {"instructions": None},
+        ) is None,
     )
 
     original_get_prompt = ocr_service.get_prompt
     try:
-        ocr_service.get_prompt = lambda db, key: "{doc_type} {不存在的占位符}"  # type: ignore[assignment]
-        broken = render_extra_instructions(None, "增值税发票", prof)
+        ocr_service.get_prompt = lambda db, tenant_id, key: "{doc_type} {不存在的占位符}"  # type: ignore[assignment]
+        broken = render_extra_instructions(None, TENANT_ID, "增值税发票", prof)
         check(
             "包装模板占位符损坏时退回指令正文（不阻断识别）",
             broken == prof["instructions"],

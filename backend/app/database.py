@@ -407,57 +407,11 @@ def _seed_doc_types(tenant_id: uuid.UUID) -> None:
 
     仅在表为空时写入，不覆盖已有数据（用户自定义的类型不会被冲掉）。
     """
-    from .models import DocumentType
-    from sqlalchemy import select, func
-
+    from .services.settings_service import seed_tenant_defaults
     with SessionLocal() as db:
-        count = db.execute(
-            select(func.count(DocumentType.id)).where(
-                DocumentType.tenant_id == tenant_id
-            )
-        ).scalar()
-        if count and count > 0:
-            logger.info("租户 %s 的 document_types 已有 %d 条记录，跳过种子", tenant_id, count)
-            return
-
-    from .constants import (
-        ALL_DOC_TYPES,
-        FIELD_TEMPLATES, STAMP_REQUIREMENTS,
-        DOC_FX_CLAIM,
-        DOC_OTHER,
-        DOC_PAY_APPLICATION,
-        OPTIONAL_DOC_TYPES,
-        REQUIRED_DOC_TYPES,
-    )
-
-    def _seed_category(name: str) -> tuple[str, bool]:
-        """与文件分类器/齐套性语义对齐的类别推导（批次 10 Phase B）。"""
-        if name in REQUIRED_DOC_TYPES:
-            return "required", True
-        if name in OPTIONAL_DOC_TYPES:
-            return "optional", False
-        if name in (DOC_FX_CLAIM, DOC_PAY_APPLICATION):
-            return "supporting", False
-        if name == DOC_OTHER:
-            return "other", False
-        return "extra", False
-
-    with SessionLocal() as db:
-        for idx, name in enumerate(ALL_DOC_TYPES):
-            category, is_required = _seed_category(name)
-            dt = DocumentType(
-                tenant_id=tenant_id,
-                name=name,
-                category=category,
-                is_required=is_required,
-                key_fields=FIELD_TEMPLATES.get(name, []),
-                stamp_required=STAMP_REQUIREMENTS.get(name),
-                source="seed",
-                status="active",
-            )
-            db.add(dt)
+        added = seed_tenant_defaults(db, tenant_id)
         db.commit()
-        logger.info("已 seed %d 个内置文档类型", len(ALL_DOC_TYPES))
+        logger.info("已为租户 %s seed %d 个内置文档类型", tenant_id, added)
 
 
 def _migrate_canonical_types(tenant_id: uuid.UUID) -> None:
@@ -524,7 +478,7 @@ def _migrate_canonical_types(tenant_id: uuid.UUID) -> None:
             db.commit()
 
         # ---- 2) 别名条目置为 rejected（如 rule_import 的"报关单"）----
-        alias_index = build_doc_type_alias_index(db)
+        alias_index = build_doc_type_alias_index(db, tenant_id)
         for alias, canonical in alias_index.items():
             row = existing.get(alias)
             if row is not None and row.name != canonical and row.status == "active":
@@ -540,12 +494,17 @@ def _migrate_canonical_types(tenant_id: uuid.UUID) -> None:
             ).scalars()
         ):
             dirty = False
-            nt = normalize_doc_type(db, d.doc_type)
+            nt = normalize_doc_type(db, d.doc_type, tenant_id=tenant_id)
             if nt and nt != d.doc_type:
                 d.doc_type = nt
                 dirty = True
             if d.extracted_fields:
-                nf = normalize_extracted_keys(db, d.doc_type, d.extracted_fields)
+                nf = normalize_extracted_keys(
+                    db,
+                    d.doc_type,
+                    d.extracted_fields,
+                    tenant_id=tenant_id,
+                )
                 if nf != d.extracted_fields:
                     d.extracted_fields = nf
                     dirty = True
@@ -560,17 +519,22 @@ def _migrate_canonical_types(tenant_id: uuid.UUID) -> None:
         ):
             dirty = False
             if r.doc_type:
-                nt = normalize_doc_type(db, r.doc_type)
+                nt = normalize_doc_type(db, r.doc_type, tenant_id=tenant_id)
                 if nt and nt != r.doc_type:
                     r.doc_type = nt
                     dirty = True
             if r.structure:
-                ns = normalize_structure(db, r.structure, r.doc_type)
+                ns = normalize_structure(
+                    db,
+                    r.structure,
+                    r.doc_type,
+                    tenant_id=tenant_id,
+                )
                 if ns != r.structure:
                     r.structure = ns
                     dirty = True
             if r.scope:
-                ns = normalize_scope(db, r.scope)
+                ns = normalize_scope(db, r.scope, tenant_id=tenant_id)
                 if ns != r.scope:
                     r.scope = ns
                     dirty = True
@@ -585,7 +549,7 @@ def _migrate_canonical_types(tenant_id: uuid.UUID) -> None:
         ):
             nd = sorted(
                 {
-                    normalize_doc_type(db, x) or str(x)
+                    normalize_doc_type(db, x, tenant_id=tenant_id) or str(x)
                     for x in (rs.doc_types or [])
                     if x
                 }

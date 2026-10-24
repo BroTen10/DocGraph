@@ -126,7 +126,11 @@ def _canonicalize_conflict_description(
     return text
 
 
-def detect_conflicts_in_rules(rules: list[Rule], db=None) -> list[dict]:
+def detect_conflicts_in_rules(
+    rules: list[Rule],
+    db=None,
+    tenant_id=None,
+) -> list[dict]:
     """对一组规则进行语义冲突检测。
 
     Args:
@@ -186,7 +190,14 @@ def detect_conflicts_in_rules(rules: list[Rule], db=None) -> list[dict]:
     try:
         resp = llm.chat_json(
             messages=[
-                {"role": "system", "content": get_prompt(db, "conflict_detection.system")},
+                {
+                    "role": "system",
+                    "content": get_prompt(
+                        db,
+                        tenant_id,
+                        "conflict_detection.system",
+                    ),
+                },
                 {"role": "user", "content": user_prompt},
             ],
             temperature=0.1,
@@ -248,7 +259,12 @@ def detect_conflicts_in_rules(rules: list[Rule], db=None) -> list[dict]:
     return results
 
 
-def detect_all_conflicts(db: Session, rule_set_id: str, progress: ImportProgress | None = None) -> list[dict]:
+def detect_all_conflicts(
+    db: Session,
+    rule_set_id: str,
+    progress: ImportProgress | None = None,
+    tenant_id=None,
+) -> list[dict]:
     """检测指定规则集内所有规则的语义冲突。
 
     按 (doc_type, check_category) 分组后逐组检测。
@@ -258,9 +274,12 @@ def detect_all_conflicts(db: Session, rule_set_id: str, progress: ImportProgress
         合并的冲突列表
     """
     rules = db.execute(
-        select(Rule).where(
+        select(Rule)
+        .where(
             Rule.rule_set_id == rule_set_id,
-        ).order_by(Rule.doc_type, Rule.check_category, Rule.priority, Rule.rule_no)
+            *([Rule.tenant_id == tenant_id] if tenant_id is not None else []),
+        )
+        .order_by(Rule.doc_type, Rule.check_category, Rule.priority, Rule.rule_no)
     ).scalars().all()
 
     # 分组
@@ -275,7 +294,7 @@ def detect_all_conflicts(db: Session, rule_set_id: str, progress: ImportProgress
 
     all_conflicts: list[dict] = []
     for _i, ((_doc_type, _check_category), group) in enumerate(groups.items(), start=1):
-        conflicts = detect_conflicts_in_rules(group, db)
+        conflicts = detect_conflicts_in_rules(group, db, tenant_id=tenant_id)
         all_conflicts.extend(conflicts)
         if conflicts:
             logger.info(
@@ -412,7 +431,20 @@ def run_conflict_detection(db: Session, rule_set_id: str, progress: ImportProgre
     Returns:
         {"total_conflicts": N, "affected_rules": N, "conflicts": [...]}
     """
-    conflicts = detect_all_conflicts(db, rule_set_id, progress=progress)
+    from ..models import RuleSet
+
+    rule_set = db.execute(
+        select(RuleSet).where(RuleSet.id == rule_set_id)
+    ).scalar_one_or_none()
+    if rule_set is None:
+        raise ValueError("规则集不存在")
+    tenant_id = rule_set.tenant_id
+    conflicts = detect_all_conflicts(
+        db,
+        rule_set_id,
+        progress=progress,
+        tenant_id=tenant_id,
+    )
 
     # 当前冲突的描述作为去重标识
     current_descriptions = {c.get("description", "") for c in conflicts if c.get("description")}

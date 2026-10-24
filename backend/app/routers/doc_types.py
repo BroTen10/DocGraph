@@ -13,8 +13,10 @@ from pydantic import BaseModel
 from sqlalchemy import select, func
 from sqlalchemy.orm import Session
 
+from ..auth.dependencies import AuthContext, require_permission
 from ..database import get_db
 from ..models import DocumentType
+from ..tenant_scope import tenant_get
 
 logger = logging.getLogger(__name__)
 
@@ -118,6 +120,18 @@ def _to_out(dt: DocumentType) -> DocTypeOut:
     )
 
 
+def _tenant_document_type(
+    db: Session,
+    tenant_id: uuid.UUID,
+    type_id: str,
+) -> DocumentType | None:
+    try:
+        parsed_id = uuid.UUID(type_id)
+    except ValueError:
+        return None
+    return tenant_get(db, DocumentType, parsed_id, tenant_id)
+
+
 # ============ CRUD 端点 ============
 
 
@@ -126,9 +140,15 @@ def list_doc_types(
     status: str | None = Query(None, description="筛选状态：active / pending_review"),
     source: str | None = Query(None, description="筛选来源：seed / rule_import / manual"),
     db: Session = Depends(get_db),
+    ctx: AuthContext = Depends(require_permission("doc_types.view")),
 ):
     """获取文档类型列表，支持按 status / source 过滤。"""
-    query = select(DocumentType).order_by(DocumentType.name)
+    assert ctx.tenant is not None
+    query = (
+        select(DocumentType)
+        .where(DocumentType.tenant_id == ctx.tenant.id)
+        .order_by(DocumentType.name)
+    )
 
     if status:
         query = query.where(DocumentType.status == status)
@@ -139,7 +159,10 @@ def list_doc_types(
 
     # 同时查 pending 数量
     pending_count = db.execute(
-        select(func.count(DocumentType.id)).where(DocumentType.status == "pending_review")
+        select(func.count(DocumentType.id)).where(
+            DocumentType.tenant_id == ctx.tenant.id,
+            DocumentType.status == "pending_review",
+        )
     ).scalar() or 0
 
     return DocTypeListResponse(
@@ -150,30 +173,36 @@ def list_doc_types(
 
 
 @router.get("/{type_id}", response_model=DocTypeOut)
-def get_doc_type(type_id: str, db: Session = Depends(get_db)):
+def get_doc_type(
+    type_id: str,
+    db: Session = Depends(get_db),
+    ctx: AuthContext = Depends(require_permission("doc_types.view")),
+):
     """获取单个文档类型详情。"""
-    dt = db.execute(
-        select(DocumentType).where(DocumentType.id == uuid.UUID(type_id))
-    ).scalars().first()
+    assert ctx.tenant is not None
+    dt = _tenant_document_type(db, ctx.tenant.id, type_id)
     if not dt:
         raise HTTPException(status_code=404, detail="文档类型不存在")
     return _to_out(dt)
 
 
 @router.get("/{type_id}/ocr-profile", response_model=OcrProfileOut)
-def get_ocr_profile(type_id: str, db: Session = Depends(get_db)):
+def get_ocr_profile(
+    type_id: str,
+    db: Session = Depends(get_db),
+    ctx: AuthContext = Depends(require_permission("doc_types.view")),
+):
     """获取该文档类型当前的 OCR 增强点与最终字段清单（基础字段 + 备注类补充字段）。
 
     前端在「文档类型」页编辑增强点后可用它核对最终会送进提示词的字段清单。
     """
     from ..services.ocr_service import OCR_PROFILE_TYPE, resolve_ocr_profile
 
-    dt = db.execute(
-        select(DocumentType).where(DocumentType.id == uuid.UUID(type_id))
-    ).scalars().first()
+    assert ctx.tenant is not None
+    dt = _tenant_document_type(db, ctx.tenant.id, type_id)
     if not dt:
         raise HTTPException(status_code=404, detail="文档类型不存在")
-    data = resolve_ocr_profile(db, dt.name, OCR_PROFILE_TYPE)
+    data = resolve_ocr_profile(db, ctx.tenant.id, dt.name, OCR_PROFILE_TYPE)
     return OcrProfileOut(
         doc_type=dt.name,
         base_fields=data["base_fields"],
@@ -184,18 +213,26 @@ def get_ocr_profile(type_id: str, db: Session = Depends(get_db)):
 
 
 @router.post("", response_model=DocTypeOut, status_code=201)
-def create_doc_type(body: DocTypeCreate, db: Session = Depends(get_db)):
+def create_doc_type(
+    body: DocTypeCreate,
+    db: Session = Depends(get_db),
+    ctx: AuthContext = Depends(require_permission("doc_types.manage")),
+):
     """创建新的文档类型。"""
     from ..services.doc_normalizer import normalize_doc_type
 
+    assert ctx.tenant is not None
     # 检查重名
     existing = db.execute(
-        select(DocumentType).where(DocumentType.name == body.name)
+        select(DocumentType).where(
+            DocumentType.tenant_id == ctx.tenant.id,
+            DocumentType.name == body.name,
+        )
     ).scalars().first()
     if existing:
         raise HTTPException(status_code=409, detail=f"文档类型「{body.name}」已存在")
     # 批次 11：别名即类型 → 拒绝，避免双轨繁殖
-    canonical = normalize_doc_type(db, body.name)
+    canonical = normalize_doc_type(db, body.name, tenant_id=ctx.tenant.id)
     if canonical and canonical != body.name:
         raise HTTPException(
             status_code=409,
@@ -203,6 +240,7 @@ def create_doc_type(body: DocTypeCreate, db: Session = Depends(get_db)):
         )
 
     dt = DocumentType(
+        tenant_id=ctx.tenant.id,
         name=body.name,
         description=body.description,
         key_fields=body.key_fields,
@@ -223,20 +261,24 @@ def create_doc_type(body: DocTypeCreate, db: Session = Depends(get_db)):
 
 
 @router.put("/{type_id}", response_model=DocTypeOut)
-def update_doc_type(type_id: str, body: DocTypeUpdate, db: Session = Depends(get_db)):
+def update_doc_type(
+    type_id: str,
+    body: DocTypeUpdate,
+    db: Session = Depends(get_db),
+    ctx: AuthContext = Depends(require_permission("doc_types.manage")),
+):
     """更新文档类型信息，如补充关键字段、业务含义等。"""
     from sqlalchemy.exc import IntegrityError
     from ..services.doc_normalizer import normalize_doc_type
 
-    dt = db.execute(
-        select(DocumentType).where(DocumentType.id == uuid.UUID(type_id))
-    ).scalars().first()
+    assert ctx.tenant is not None
+    dt = _tenant_document_type(db, ctx.tenant.id, type_id)
     if not dt:
         raise HTTPException(status_code=404, detail="文档类型不存在")
 
     # 若要重命名，先检查重名
     if body.name and body.name != dt.name:
-        canonical = normalize_doc_type(db, body.name)
+        canonical = normalize_doc_type(db, body.name, tenant_id=ctx.tenant.id)
         if canonical and canonical != body.name:
             raise HTTPException(
                 status_code=409,
@@ -244,6 +286,7 @@ def update_doc_type(type_id: str, body: DocTypeUpdate, db: Session = Depends(get
             )
         existing = db.execute(
             select(DocumentType).where(
+                DocumentType.tenant_id == ctx.tenant.id,
                 DocumentType.name == body.name,
                 DocumentType.id != dt.id,
             )
@@ -271,11 +314,14 @@ def update_doc_type(type_id: str, body: DocTypeUpdate, db: Session = Depends(get
 
 
 @router.delete("/{type_id}")
-def delete_doc_type(type_id: str, db: Session = Depends(get_db)):
+def delete_doc_type(
+    type_id: str,
+    db: Session = Depends(get_db),
+    ctx: AuthContext = Depends(require_permission("doc_types.manage")),
+):
     """删除文档类型。"""
-    dt = db.execute(
-        select(DocumentType).where(DocumentType.id == uuid.UUID(type_id))
-    ).scalars().first()
+    assert ctx.tenant is not None
+    dt = _tenant_document_type(db, ctx.tenant.id, type_id)
     if not dt:
         raise HTTPException(status_code=404, detail="文档类型不存在")
     db.delete(dt)
@@ -288,18 +334,21 @@ def delete_doc_type(type_id: str, db: Session = Depends(get_db)):
 
 
 @router.post("/{type_id}/confirm", response_model=DocTypeOut)
-def confirm_doc_type(type_id: str, db: Session = Depends(get_db)):
+def confirm_doc_type(
+    type_id: str,
+    db: Session = Depends(get_db),
+    ctx: AuthContext = Depends(require_permission("doc_types.manage")),
+):
     """确认新检测到的文档类型（pending_review → active）。"""
     from ..services.doc_normalizer import normalize_doc_type
 
-    dt = db.execute(
-        select(DocumentType).where(DocumentType.id == uuid.UUID(type_id))
-    ).scalars().first()
+    assert ctx.tenant is not None
+    dt = _tenant_document_type(db, ctx.tenant.id, type_id)
     if not dt:
         raise HTTPException(status_code=404, detail="文档类型不存在")
     if dt.status != "pending_review":
         raise HTTPException(status_code=400, detail="只有待审核状态的类型可以确认")
-    canonical = normalize_doc_type(db, dt.name)
+    canonical = normalize_doc_type(db, dt.name, tenant_id=ctx.tenant.id)
     if canonical and canonical != dt.name:
         # 该名称已是某规范类型的别名：不应作为独立类型确认，直接置为 rejected
         dt.status = "rejected"
@@ -315,11 +364,14 @@ def confirm_doc_type(type_id: str, db: Session = Depends(get_db)):
 
 
 @router.post("/{type_id}/reject")
-def reject_doc_type(type_id: str, db: Session = Depends(get_db)):
+def reject_doc_type(
+    type_id: str,
+    db: Session = Depends(get_db),
+    ctx: AuthContext = Depends(require_permission("doc_types.manage")),
+):
     """拒绝/丢弃新检测到的文档类型。"""
-    dt = db.execute(
-        select(DocumentType).where(DocumentType.id == uuid.UUID(type_id))
-    ).scalars().first()
+    assert ctx.tenant is not None
+    dt = _tenant_document_type(db, ctx.tenant.id, type_id)
     if not dt:
         raise HTTPException(status_code=404, detail="文档类型不存在")
     if dt.status == "active":
@@ -339,6 +391,7 @@ async def analyze_sample_document(
     file: UploadFile = File(...),
     doc_type_hint: str | None = Query(None, description="可选的文档类型名称提示"),
     db: Session = Depends(get_db),
+    ctx: AuthContext = Depends(require_permission("doc_types.manage")),
 ):
     """上传一个样例文档，由 AI 分析其文档类型、关键字段和业务含义。
 
@@ -350,7 +403,12 @@ async def analyze_sample_document(
     from ..llm_client import get_llm_client, LLMError
 
     # 保存上传文件
-    upload_dir = os.path.join(settings.upload_root, "_sample_analysis")
+    assert ctx.tenant is not None
+    upload_dir = os.path.join(
+        settings.upload_root,
+        str(ctx.tenant.id),
+        "_sample_analysis",
+    )
     os.makedirs(upload_dir, exist_ok=True)
     file_path = os.path.join(upload_dir, f"{uuid.uuid4().hex}_{file.filename}")
 
@@ -394,8 +452,8 @@ async def analyze_sample_document(
     llm = get_llm_client()
     hint_text = f"（提示：该文档可能属于「{doc_type_hint}」类型）" if doc_type_hint else ""
 
-    system_prompt = get_prompt(db, "doc_analyze.system")
-    user_prompt = get_prompt(db, "doc_analyze.user").format(
+    system_prompt = get_prompt(db, ctx.tenant.id, "doc_analyze.system")
+    user_prompt = get_prompt(db, ctx.tenant.id, "doc_analyze.user").format(
         file_name=file.filename or "",
         hint=hint_text,
         text=text_content[:6000],
@@ -454,14 +512,19 @@ class DetectNewTypesResponse(BaseModel):
 def detect_new_types_from_rules(
     body: DetectNewTypesRequest,
     db: Session = Depends(get_db),
+    ctx: AuthContext = Depends(require_permission("doc_types.manage")),
 ):
     """给定规则中提到的一组文档类型名称，检测其中哪些是新的（不在活跃列表中）。"""
     if not body.rule_doc_types:
         return DetectNewTypesResponse(new_types=[], total=0)
 
     # 查询已有活跃的文档类型名称
+    assert ctx.tenant is not None
     existing = db.execute(
-        select(DocumentType.name).where(DocumentType.status == "active")
+        select(DocumentType.name).where(
+            DocumentType.tenant_id == ctx.tenant.id,
+            DocumentType.status == "active",
+        )
     ).scalars().all()
     existing_set = set(existing)
 
@@ -471,6 +534,7 @@ def detect_new_types_from_rules(
             # 检查是否已存在 pending_review 的记录
             pending = db.execute(
                 select(DocumentType).where(
+                    DocumentType.tenant_id == ctx.tenant.id,
                     DocumentType.name == name,
                     DocumentType.status == "pending_review",
                 )
@@ -481,6 +545,7 @@ def detect_new_types_from_rules(
             else:
                 # 创建 pending_review 记录
                 dt = DocumentType(
+                    tenant_id=ctx.tenant.id,
                     name=name,
                     source="rule_import",
                     status="pending_review",

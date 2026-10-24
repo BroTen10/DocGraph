@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import logging
+import uuid
 from pathlib import Path
 from typing import Optional
 
@@ -24,14 +25,21 @@ from .settings_service import get_prompt
 logger = logging.getLogger(__name__)
 
 
-def resolve_field_template(db, doc_type: str) -> list[str]:
+def resolve_field_template(
+    db,
+    tenant_id: uuid.UUID | None,
+    doc_type: str,
+) -> list[str]:
     """字段模板解析（批次 10 Phase B）：DocumentType.key_fields 优先（动态注册/规则导入预填），
     constants.FIELD_TEMPLATES 兜底。未注册类型返回空（走自由提取兜底）。"""
     try:
         from sqlalchemy import select
         from ..models import DocumentType
         dt = db.execute(
-            select(DocumentType).where(DocumentType.name == doc_type)
+            select(DocumentType).where(
+                DocumentType.tenant_id == tenant_id,
+                DocumentType.name == doc_type,
+            )
         ).scalars().first()
         if dt is not None and dt.key_fields:
             return list(dt.key_fields)
@@ -59,6 +67,7 @@ def compose_field_list(base_fields: list[str], extra_fields: list[str]) -> list[
 
 def resolve_ocr_profile(
     db,
+    tenant_id: uuid.UUID | None,
     doc_type: str,
     profile: str = OCR_PROFILE_TYPE,
 ) -> dict:
@@ -70,7 +79,7 @@ def resolve_ocr_profile(
     Returns:
         {"profile", "base_fields", "extra_fields", "instructions", "field_list"}
     """
-    base_fields = list(resolve_field_template(db, doc_type) or [])
+    base_fields = list(resolve_field_template(db, tenant_id, doc_type) or [])
     extra_fields: list[str] = []
     instructions: str | None = None
 
@@ -80,7 +89,10 @@ def resolve_ocr_profile(
             from ..models import DocumentType
 
             dt = db.execute(
-                select(DocumentType).where(DocumentType.name == doc_type)
+                select(DocumentType).where(
+                    DocumentType.tenant_id == tenant_id,
+                    DocumentType.name == doc_type,
+                )
             ).scalars().first()
             if dt is not None:
                 extra_fields = [
@@ -100,12 +112,17 @@ def resolve_ocr_profile(
     }
 
 
-def render_extra_instructions(db, doc_type: str, profile: dict) -> str | None:
+def render_extra_instructions(
+    db,
+    tenant_id: uuid.UUID | None,
+    doc_type: str,
+    profile: dict,
+) -> str | None:
     """把类型专属指令套进可配置的包装模板；无指令时返回 None（不注入）。"""
     raw = (profile or {}).get("instructions")
     if not raw:
         return None
-    tpl = get_prompt(db, "ocr.image.extra_instructions")
+    tpl = get_prompt(db, tenant_id, "ocr.image.extra_instructions")
     try:
         return tpl.format(doc_type=doc_type, extra_instructions=raw)
     except (KeyError, IndexError, ValueError):
@@ -204,6 +221,7 @@ def _ensure_fields(
     field_template: list[str],
     db=None,
     extra_instructions: str | None = None,
+    tenant_id: uuid.UUID | None = None,
 ) -> dict:
     """多模态返回文字但漏掉字段时，用已识别文本再走一次字段提取。"""
     if not result.get("success") or _has_extracted_fields(result.get("fields")):
@@ -213,7 +231,12 @@ def _ensure_fields(
         return result
 
     fallback = _llm_extract_fields_from_text(
-        text, doc_type, field_template, db=db, extra_instructions=extra_instructions
+        text,
+        doc_type,
+        field_template,
+        db=db,
+        extra_instructions=extra_instructions,
+        tenant_id=tenant_id,
     )
     if _has_extracted_fields(fallback.get("fields")):
         result["fields"] = fallback.get("fields") or {}
@@ -231,6 +254,7 @@ def _llm_extract_fields_from_text(
     field_template: list[str],
     db=None,
     extra_instructions: str | None = None,
+    tenant_id: uuid.UUID | None = None,
 ) -> dict:
     """对文本型 PDF/DOCX，调用 LLM 提取结构化字段。
 
@@ -246,13 +270,13 @@ def _llm_extract_fields_from_text(
 
     if not field_template:
         # 自由提取模式：无预定义字段模板
-        system_prompt = get_prompt(db, "ocr.text.system_free")
-        user_prompt = get_prompt(db, "ocr.text.user_free").format(
+        system_prompt = get_prompt(db, tenant_id, "ocr.text.system_free")
+        user_prompt = get_prompt(db, tenant_id, "ocr.text.user_free").format(
             text=text[:4000],
         )
     else:
-        system_prompt = get_prompt(db, "ocr.text.system_template")
-        user_prompt = get_prompt(db, "ocr.text.user_template").format(
+        system_prompt = get_prompt(db, tenant_id, "ocr.text.system_template")
+        user_prompt = get_prompt(db, tenant_id, "ocr.text.user_template").format(
             doc_type=doc_type,
             field_list=", ".join(field_template),
             text=text[:4000],
@@ -289,6 +313,7 @@ def process_document(
     key_fields: list[str] | None = None,
     db=None,
     extra_instructions: str | None = None,
+    tenant_id: uuid.UUID | None = None,
 ) -> dict:
     """处理单个文档：根据类型选择 OCR 或文本提取，回写 doc 记录。
 
@@ -315,6 +340,7 @@ def process_document(
                 return _ocr_scanned_pdf(
                     str(path), doc.doc_type, field_template, db=db,
                     extra_instructions=extra_instructions,
+                    tenant_id=tenant_id,
                 )
             else:
                 # 文本型 PDF：直接提取 + LLM 字段提取
@@ -322,6 +348,7 @@ def process_document(
                 ext = _llm_extract_fields_from_text(
                     text, doc.doc_type, field_template, db=db,
                     extra_instructions=extra_instructions,
+                    tenant_id=tenant_id,
                 )
                 return {
                     "success": True,
@@ -335,17 +362,20 @@ def process_document(
                 _ocr_image(
                     str(path), doc.doc_type, field_template, db=db,
                     extra_instructions=extra_instructions,
+                    tenant_id=tenant_id,
                 ),
                 doc.doc_type,
                 field_template,
                 db=db,
                 extra_instructions=extra_instructions,
+                tenant_id=tenant_id,
             )
         elif doc.file_type == "docx":
             text = _extract_docx(str(path))
             ext = _llm_extract_fields_from_text(
                 text, doc.doc_type, field_template, db=db,
                 extra_instructions=extra_instructions,
+                tenant_id=tenant_id,
             )
             return {
                 "success": True,
@@ -367,6 +397,7 @@ def _ocr_image(
     field_template: list[str],
     db=None,
     extra_instructions: str | None = None,
+    tenant_id: uuid.UUID | None = None,
 ) -> dict:
     """对单张图片调用 DeepSeek 多模态模型 OCR。"""
     ocr = get_ocr_client()
@@ -374,10 +405,10 @@ def _ocr_image(
         image_path,
         doc_type_hint=doc_type,
         field_template=field_template,
-        system_prompt=get_prompt(db, "ocr.image.system"),
-        fields_hint=get_prompt(db, "ocr.image.fields_hint"),
-        infer_hint=get_prompt(db, "ocr.image.infer_hint"),
-        infer_hint_free=get_prompt(db, "ocr.image.infer_hint_free"),
+        system_prompt=get_prompt(db, tenant_id, "ocr.image.system"),
+        fields_hint=get_prompt(db, tenant_id, "ocr.image.fields_hint"),
+        infer_hint=get_prompt(db, tenant_id, "ocr.image.infer_hint"),
+        infer_hint_free=get_prompt(db, tenant_id, "ocr.image.infer_hint_free"),
         extra_instructions=extra_instructions,
     )
     if result.get("success"):
@@ -391,6 +422,7 @@ def _ocr_scanned_pdf(
     field_template: list[str],
     db=None,
     extra_instructions: str | None = None,
+    tenant_id: uuid.UUID | None = None,
 ) -> dict:
     """扫描型 PDF：逐页转图片 OCR，合并结果。"""
     import tempfile
@@ -415,10 +447,10 @@ def _ocr_scanned_pdf(
                 str(tmp_img),
                 doc_type_hint=doc_type,
                 field_template=field_template,
-                system_prompt=get_prompt(db, "ocr.image.system"),
-                fields_hint=get_prompt(db, "ocr.image.fields_hint"),
-                infer_hint=get_prompt(db, "ocr.image.infer_hint"),
-                infer_hint_free=get_prompt(db, "ocr.image.infer_hint_free"),
+                system_prompt=get_prompt(db, tenant_id, "ocr.image.system"),
+                fields_hint=get_prompt(db, tenant_id, "ocr.image.fields_hint"),
+                infer_hint=get_prompt(db, tenant_id, "ocr.image.infer_hint"),
+                infer_hint_free=get_prompt(db, tenant_id, "ocr.image.infer_hint_free"),
                 extra_instructions=extra_instructions,
             )
             if r.get("success"):
@@ -447,4 +479,4 @@ def _ocr_scanned_pdf(
         "fields": merged_fields,
         "confidence": avg_conf,
         "layout": _build_layout(page_layouts),
-    }, doc_type, field_template, db=db, extra_instructions=extra_instructions)
+    }, doc_type, field_template, db=db, extra_instructions=extra_instructions, tenant_id=tenant_id)

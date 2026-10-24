@@ -7,7 +7,7 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
@@ -39,7 +39,9 @@ def list_settings(
     ctx: AuthContext = Depends(require_permission("settings.read")),
 ) -> dict:
     """返回全部可配置项（含内置默认值与 DB 覆盖值）。"""
-    return {"settings": settings_service.get_all_settings(db)}
+    if ctx.tenant is None:
+        raise HTTPException(status_code=403, detail="租户上下文不存在")
+    return {"settings": settings_service.get_all_settings(db, ctx.tenant.id)}
 
 
 @router.put("")
@@ -49,8 +51,17 @@ def update_settings(
     ctx: AuthContext = Depends(require_permission("settings.update")),
 ) -> dict:
     """批量更新；value 为 null 表示重置回默认。"""
+    if ctx.tenant is None:
+        raise HTTPException(status_code=403, detail="租户上下文不存在")
     items = [{"key": it.key, "value": it.value} for it in payload.items]
-    return {"settings": settings_service.update_settings(db, items)}
+    return {
+        "settings": settings_service.update_settings(
+            db,
+            ctx.tenant.id,
+            items,
+            actor_user_id=ctx.user.id,
+        )
+    }
 
 
 @router.post("/optimize-prompt")

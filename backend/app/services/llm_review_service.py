@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import uuid
 from datetime import datetime
 from typing import Any, Optional
 
@@ -168,6 +169,7 @@ def review_unstructured_rules(
     contract,
     docs: list[Document],
     rules: list[Rule],
+    tenant_id: uuid.UUID | None = None,
 ) -> list[dict]:
     """对定性规则执行 LLM 批量审查。
 
@@ -198,7 +200,10 @@ def review_unstructured_rules(
         llm = get_llm_client()
         resp = llm.chat_json(
             messages=[
-                {"role": "system", "content": get_prompt(db, "llm_review.review_system")},
+                {
+                    "role": "system",
+                    "content": get_prompt(db, tenant_id, "llm_review.review_system"),
+                },
                 {"role": "user", "content": user_prompt},
             ],
             temperature=0.1,
@@ -339,6 +344,7 @@ def semantic_equivalence_fallback(
     contract,
     docs: list[Document],
     results: list[ReviewResult],
+    tenant_id: uuid.UUID | None = None,
 ) -> int:
     """对确定性字符串相等失败的规则做 LLM 语义复核。
     修正策略：
@@ -398,7 +404,10 @@ def semantic_equivalence_fallback(
         llm = get_llm_client()
         resp = llm.chat_json(
             messages=[
-                {"role": "system", "content": get_prompt(db, "llm_review.semantic_system")},
+                {
+                    "role": "system",
+                    "content": get_prompt(db, tenant_id, "llm_review.semantic_system"),
+                },
                 {"role": "user", "content": user_prompt},
             ],
             temperature=0.1,
@@ -554,6 +563,7 @@ def semantic_adjudication_fallback(
     contract,
     docs: list[Document],
     results: list[ReviewResult],
+    tenant_id: uuid.UUID | None = None,
 ) -> int:
     """对确定性引擎"判不了/疑似误判"的规则做 LLM 综合裁决（引擎 B-3）。
 
@@ -605,7 +615,14 @@ def semantic_adjudication_fallback(
         llm = get_llm_client()
         resp = llm.chat_json(
             messages=[
-                {"role": "system", "content": get_prompt(db, "llm_review.adjudication_system")},
+                {
+                    "role": "system",
+                    "content": get_prompt(
+                        db,
+                        tenant_id,
+                        "llm_review.adjudication_system",
+                    ),
+                },
                 {"role": "user", "content": user_prompt},
             ],
             temperature=0.1,
@@ -696,7 +713,13 @@ def semantic_adjudication_fallback(
     return changed
 
 
-def ensure_fallback_coverage(db, contract, docs: list[Document], results: list[ReviewResult]) -> int:
+def ensure_fallback_coverage(
+    db,
+    contract,
+    docs: list[Document],
+    results: list[ReviewResult],
+    tenant_id: uuid.UUID | None = None,
+) -> int:
     """兜底强制（引擎 B-3 收口）：确定性引擎"判不了"的结果必须留下兜底痕迹。
 
     背景：LLM 裁决的候选筛选、调用成败、是否逐条作答都是隐式过程，一旦某条既没进
@@ -731,6 +754,7 @@ def semantic_challenge_review(
     contract,
     docs: list[Document],
     results: list[ReviewResult],
+    tenant_id: uuid.UUID | None = None,
 ) -> int:
     """LLM 全量复核（引擎 B-4，可选开关）：只提异议，不改判。
 
@@ -750,7 +774,14 @@ def semantic_challenge_review(
     if not targets:
         return 0
 
-    min_conf = _to_float(get_setting(db, "review.llm_challenge_min_confidence", 0.7))
+    min_conf = _to_float(
+        get_setting(
+            db,
+            tenant_id,
+            "review.llm_challenge_min_confidence",
+            0.7,
+        )
+    )
     if min_conf is None:
         min_conf = 0.7
     aliases = "、".join(contract.alias_list or []) if contract else ""
@@ -786,7 +817,14 @@ def semantic_challenge_review(
             llm = get_llm_client()
             resp = llm.chat_json(
                 messages=[
-                    {"role": "system", "content": get_prompt(db, "llm_review.challenge_system")},
+                    {
+                        "role": "system",
+                        "content": get_prompt(
+                            db,
+                            tenant_id,
+                            "llm_review.challenge_system",
+                        ),
+                    },
                     {"role": "user", "content": user_prompt},
                 ],
                 temperature=0.1,
