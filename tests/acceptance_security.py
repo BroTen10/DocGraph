@@ -35,6 +35,19 @@ def test_all_business_endpoints_require_login(client):
         assert response.status_code == 401, (path, response.status_code)
 
 
+def test_unauthenticated_writes_return_401_before_csrf(client):
+    responses = [
+        client.post(
+            "/api/reviews/start",
+            json={"contract_id": str(uuid4()), "snapshot_id": None},
+        ),
+        client.put("/api/settings", json={"items": []}),
+        client.delete(f"/api/contracts/{uuid4()}"),
+    ]
+    assert [response.status_code for response in responses] == [401, 401, 401]
+    assert all("CSRF" not in response.text for response in responses)
+
+
 def test_public_health_and_version_remain_available(client):
     assert client.get("/api/health").status_code == 200
     assert client.get("/api/version").status_code == 200

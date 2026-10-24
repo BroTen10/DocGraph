@@ -16,7 +16,7 @@ from app.models import (
     UserAccount,
 )
 from app.services.email_service import EmailDeliveryError
-from tests.conftest import authenticate
+from conftest import authenticate
 
 
 def _registration(
