@@ -45,10 +45,12 @@ def main() -> None:
     db = SessionLocal()
     created: list[uuid.UUID] = []
     try:
-        contract_id = db.execute(select(Contract.id).limit(1)).scalar()
-        if contract_id is None:
+        contract = db.execute(select(Contract).limit(1)).scalar()
+        if contract is None:
             print("跳过：库中还没有合同，无法挂载临时审查任务")
             return
+        contract_id = contract.id
+        tenant_id = contract.tenant_id
 
         now_ts = db.execute(select(func.now())).scalar()
         review_service.set_process_start(db)
@@ -57,6 +59,7 @@ def main() -> None:
 
         # 1) 陈旧任务：早于进程启动，且早已超时
         stale = ReviewTask(
+            tenant_id=tenant_id,
             contract_id=contract_id,
             status="running",
             progress=60,
@@ -66,6 +69,7 @@ def main() -> None:
         )
         # 2) 新鲜任务：进程启动之后创建，不应被回收
         fresh = ReviewTask(
+            tenant_id=tenant_id,
             contract_id=contract_id,
             status="running",
             progress=10,
@@ -77,7 +81,10 @@ def main() -> None:
         db.commit()
         created = [stale.id, fresh.id]
 
-        swept = review_service.reconcile_stale_review_tasks(db)
+        swept = review_service.reconcile_stale_review_tasks(
+            db,
+            tenant_id=tenant_id,
+        )
         check("返回值只统计被回收的任务数", swept >= 1, f"swept={swept}")
 
         db.refresh(stale)
@@ -88,7 +95,10 @@ def main() -> None:
         check("回填 end_time", stale.end_time is not None)
         check("进程启动后创建的任务不被误杀", fresh.status == "running", fresh.status)
 
-        again = review_service.reconcile_stale_review_tasks(db)
+        again = review_service.reconcile_stale_review_tasks(
+            db,
+            tenant_id=tenant_id,
+        )
         check("重复调用不再回收已完成回收的任务", again == 0, f"again={again}")
     finally:
         for tid in created:

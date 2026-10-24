@@ -42,7 +42,7 @@ from ..constants import (
     DOC_WAREHOUSE_INOUT,
     STAMP_REQUIREMENTS,
 )
-from ..models import Contract, Document, ReviewResult, ReviewTask, Rule
+from ..models import Contract, Document, ReviewResult, ReviewTask, Rule, RuleSnapshot
 from .contract_normalizer import extract_contract_numbers, normalize_contract_no
 from .field_extraction_service import (
     aggregate_amount,
@@ -61,6 +61,7 @@ from .doc_normalizer import normalize_party_name, resolve_field_aliases
 from .settings_service import get_setting
 from .suggestion_service import build_suggestion_llm
 from . import result_meta
+from ..tenant_scope import tenant_get
 
 logger = logging.getLogger(__name__)
 
@@ -84,7 +85,12 @@ def set_process_start(db: Session) -> None:
         _PROCESS_STARTED_DB_TS = None
 
 
-def reconcile_stale_review_tasks(db: Session, *, force_all: bool = False) -> int:
+def reconcile_stale_review_tasks(
+    db: Session,
+    *,
+    tenant_id: uuid.UUID | None = None,
+    force_all: bool = False,
+) -> int:
     """回收中断的审查任务，避免任务行永久停在 running。
 
     与 OCR 任务同理（见 ocr_task_service.reconcile_stale_tasks）：审查管线跑在进程内
@@ -98,6 +104,8 @@ def reconcile_stale_review_tasks(db: Session, *, force_all: bool = False) -> int
     Returns: 被回收的任务数
     """
     stmt = select(ReviewTask).where(ReviewTask.status.in_(("pending", "running")))
+    if tenant_id is not None:
+        stmt = stmt.where(ReviewTask.tenant_id == tenant_id)
     if not force_all:
         conds = [ReviewTask.start_time < func.now() - timedelta(minutes=REVIEW_STALE_TASK_MINUTES)]
         if _PROCESS_STARTED_DB_TS is not None:
@@ -175,6 +183,8 @@ def _compare_dates(
 # ============ 主流程 ============
 def start_review(
     db: Session,
+    tenant_id: uuid.UUID,
+    user_id: uuid.UUID,
     contract_id: uuid.UUID,
     snapshot_id: Optional[uuid.UUID] = None,
 ) -> ReviewTask:
@@ -182,13 +192,16 @@ def start_review(
 
     完整流程：OCR → 字段提取 → 4 类检查 → 生成建议 → 持久化结果。
     """
-    contract = db.get(Contract, contract_id)
+    contract = tenant_get(db, Contract, contract_id, tenant_id)
     if contract is None:
-        raise ValueError(f"合同不存在: {contract_id}")
-    tenant_id = contract.tenant_id
+        raise LookupError(f"合同不存在: {contract_id}")
+    if snapshot_id is not None:
+        snapshot = tenant_get(db, RuleSnapshot, snapshot_id, tenant_id)
+        if snapshot is None or snapshot.rule_set_id != contract.rule_set_id:
+            raise LookupError(f"图谱快照不存在: {snapshot_id}")
 
     # 先回收中断的旧任务，避免任务列表被陈旧 running 行污染
-    reconcile_stale_review_tasks(db)
+    reconcile_stale_review_tasks(db, tenant_id=tenant_id)
 
     # 创建任务
     task = ReviewTask(
@@ -213,8 +226,8 @@ def start_review(
         thread_db = SessionFactory()
         try:
             bind_tenant(thread_db, tenant_id)
-            thread_task = thread_db.get(ReviewTask, task_id)
-            thread_contract = thread_db.get(Contract, contract_id)
+            thread_task = tenant_get(thread_db, ReviewTask, task_id, tenant_id)
+            thread_contract = tenant_get(thread_db, Contract, contract_id, tenant_id)
             if thread_task is None or thread_contract is None:
                 logger.error("后台审查任务 %s: 任务或合同不存在", task_id)
                 return
@@ -231,7 +244,7 @@ def start_review(
         except Exception as e:
             logger.error("审查任务 %s 失败: %s", task_id, e, exc_info=True)
             try:
-                thread_task = thread_db.get(ReviewTask, task_id)
+                thread_task = tenant_get(thread_db, ReviewTask, task_id, tenant_id)
                 if thread_task is not None:
                     thread_task.status = "failed"
                     thread_task.error = str(e)
@@ -1126,17 +1139,28 @@ def _recompute_summary(items: list[dict]) -> dict:
 
 
 # ============ 结果查询 ============
-def get_task_status(db: Session, task_id: uuid.UUID) -> Optional[ReviewTask]:
-    return db.get(ReviewTask, task_id)
+def get_task_status(
+    db: Session,
+    tenant_id: uuid.UUID,
+    task_id: uuid.UUID,
+) -> Optional[ReviewTask]:
+    return tenant_get(db, ReviewTask, task_id, tenant_id)
 
 
-def _load_document_lookup(db: Session, contract_id: uuid.UUID) -> tuple[dict[str, Document], dict[str, Document]]:
+def _load_document_lookup(
+    db: Session,
+    tenant_id: uuid.UUID,
+    contract_id: uuid.UUID,
+) -> tuple[dict[str, Document], dict[str, Document]]:
     """加载合同下的文档，构造 file_name / id 索引。"""
     from sqlalchemy import select
 
     docs = list(
         db.execute(
-            select(Document).where(Document.contract_id == contract_id)
+            select(Document).where(
+                Document.tenant_id == tenant_id,
+                Document.contract_id == contract_id,
+            )
         ).scalars().all()
     )
     by_name = {d.file_name: d for d in docs}
@@ -1229,22 +1253,29 @@ def _result_to_item(
     }
 
 
-def get_results_by_rule(db: Session, task_id: uuid.UUID) -> dict:
+def get_results_by_rule(
+    db: Session,
+    tenant_id: uuid.UUID,
+    task_id: uuid.UUID,
+) -> dict:
     """按规则维度视图：所有结果列表 + 汇总。"""
     from sqlalchemy import select
 
-    task = db.get(ReviewTask, task_id)
+    task = tenant_get(db, ReviewTask, task_id, tenant_id)
     if task is None:
-        return {"task_id": task_id, "results": [], "summary": {}}
+        raise LookupError(f"审查任务不存在: {task_id}")
 
     stmt = (
         select(ReviewResult)
-        .where(ReviewResult.task_id == task_id)
+        .where(
+            ReviewResult.tenant_id == tenant_id,
+            ReviewResult.task_id == task_id,
+        )
         .order_by(ReviewResult.check_category, ReviewResult.doc_type)
     )
     results = list(db.execute(stmt).scalars().all())
 
-    docs_by_name, docs_by_id = _load_document_lookup(db, task.contract_id)
+    docs_by_name, docs_by_id = _load_document_lookup(db, tenant_id, task.contract_id)
     items = [_result_to_item(r, docs_by_name, docs_by_id) for r in results]
 
     # 过滤：去重 + 合并 unverifiable 字段缺失噪声
@@ -1254,23 +1285,30 @@ def get_results_by_rule(db: Session, task_id: uuid.UUID) -> dict:
     return {"task_id": str(task_id), "results": items, "summary": summary}
 
 
-def get_results_by_doc(db: Session, task_id: uuid.UUID) -> dict:
+def get_results_by_doc(
+    db: Session,
+    tenant_id: uuid.UUID,
+    task_id: uuid.UUID,
+) -> dict:
     """按文档维度视图：每个文件参与的所有检查结果。"""
     from sqlalchemy import select
 
-    task = db.get(ReviewTask, task_id)
+    task = tenant_get(db, ReviewTask, task_id, tenant_id)
     if task is None:
-        return {"task_id": task_id, "docs": [], "summary": {}}
+        raise LookupError(f"审查任务不存在: {task_id}")
 
     stmt = (
         select(ReviewResult)
-        .where(ReviewResult.task_id == task_id)
+        .where(
+            ReviewResult.tenant_id == tenant_id,
+            ReviewResult.task_id == task_id,
+        )
         .order_by(ReviewResult.doc_id)
     )
     results = list(db.execute(stmt).scalars().all())
 
     # 先构造全部 items 列表，便于统一过滤
-    docs_by_name, docs_by_id = _load_document_lookup(db, task.contract_id)
+    docs_by_name, docs_by_id = _load_document_lookup(db, tenant_id, task.contract_id)
     all_items = [_result_to_item(r, docs_by_name, docs_by_id) for r in results]
 
     # 过滤：去重 + 合并 unverifiable 字段缺失噪声
@@ -1314,18 +1352,20 @@ def get_results_by_doc(db: Session, task_id: uuid.UUID) -> dict:
 
 def update_result_status(
     db: Session,
+    tenant_id: uuid.UUID,
     result_id: uuid.UUID,
     status: str,
     note: Optional[str] = None,
-    by: str = "user",
+    by_user_id: uuid.UUID | None = None,
+    by_display_name: str | None = None,
 ) -> ReviewResult:
     """问题状态流转（9-1，C1）：open/confirmed/fixed/closed + 审计历史。
     Raises:
         ValueError: 结果不存在或状态流转非法。
     """
-    result = db.get(ReviewResult, result_id)
+    result = tenant_get(db, ReviewResult, result_id, tenant_id)
     if result is None:
-        raise ValueError(f"审查结果不存在: {result_id}")
+        raise LookupError(f"审查结果不存在: {result_id}")
     if not result_meta.can_transition(result.status, status):
         raise ValueError(f"非法状态流转: {result.status} → {status}")
     history = list(result.status_history or [])
@@ -1333,7 +1373,8 @@ def update_result_status(
         {
             "status": status,
             "at": datetime.now().isoformat(timespec="seconds"),
-            "by": by,
+            "by": str(by_user_id) if by_user_id else "system",
+            "by_name": by_display_name,
             "note": note,
         }
     )

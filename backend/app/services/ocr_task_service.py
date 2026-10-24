@@ -21,7 +21,7 @@ from sqlalchemy.orm import Session
 
 from ..constants import DOC_OTHER
 from ..database import SessionLocal, bind_tenant
-from ..models import Contract, Document, DocumentType, OcrTask
+from ..models import Contract, Document, DocumentType, OcrTask, RuleSet
 from ..tenant_scope import tenant_get
 from .doc_normalizer import normalize_doc_type, resolve_field_aliases
 from .field_extraction_service import normalize_fields
@@ -55,7 +55,12 @@ def set_process_start(db: Session) -> None:
         _PROCESS_STARTED_DB_TS = None
 
 
-def reconcile_stale_tasks(db: Session, *, force_all: bool = False) -> int:
+def reconcile_stale_tasks(
+    db: Session,
+    *,
+    tenant_id: uuid.UUID | None = None,
+    force_all: bool = False,
+) -> int:
     """回收中断的 OCR 任务，避免任务行永久停在 running。
 
     背景：OCR 在进程内后台线程执行，服务重启（含 debug reload）或进程退出会让线程
@@ -68,6 +73,8 @@ def reconcile_stale_tasks(db: Session, *, force_all: bool = False) -> int:
     Returns: 被回收的任务数
     """
     stmt = select(OcrTask).where(OcrTask.status.in_(("pending", "running")))
+    if tenant_id is not None:
+        stmt = stmt.where(OcrTask.tenant_id == tenant_id)
     if not force_all:
         conds = [OcrTask.start_time < func.now() - timedelta(minutes=STALE_TASK_MINUTES)]
         if _PROCESS_STARTED_DB_TS is not None:
@@ -162,10 +169,14 @@ def start_ocr_for_doc(
     """
     doc = tenant_get(db, Document, doc_id, tenant_id)
     if doc is None:
-        raise ValueError("文档不存在")
+        raise LookupError("文档不存在")
+    rule_set = tenant_get(db, RuleSet, rule_set_id, tenant_id)
+    contract = tenant_get(db, Contract, doc.contract_id, tenant_id)
+    if rule_set is None or contract is None or contract.rule_set_id != rule_set_id:
+        raise LookupError("文档不存在")
 
     # 先回收中断的旧任务，避免前端因陈旧 running 状态禁用触发按钮
-    reconcile_stale_tasks(db)
+    reconcile_stale_tasks(db, tenant_id=tenant_id)
 
     profile_data = _prepare_profile(db, tenant_id, doc.doc_type, profile)
     task = OcrTask(
@@ -210,11 +221,17 @@ def start_ocr_for_contract(
     """
     contract = tenant_get(db, Contract, contract_id, tenant_id)
     if contract is None:
-        raise ValueError("合同不存在")
+        raise LookupError("合同不存在")
+    rule_set = tenant_get(db, RuleSet, rule_set_id, tenant_id)
+    if rule_set is None or contract.rule_set_id != rule_set_id:
+        raise LookupError("合同不存在")
 
-    reconcile_stale_tasks(db)
+    reconcile_stale_tasks(db, tenant_id=tenant_id)
 
-    stmt = select(Document).where(Document.contract_id == contract_id)
+    stmt = select(Document).where(
+        Document.tenant_id == tenant_id,
+        Document.contract_id == contract_id,
+    )
     if not force:
         stmt = stmt.where(Document.ocr_status == "pending")
     docs = db.execute(stmt).scalars().all()
@@ -453,18 +470,32 @@ def _run_batch(
 # ============ 查询 ============
 def list_ocr_tasks(
     db: Session,
+    tenant_id: uuid.UUID,
     rule_set_id: uuid.UUID,
     contract_id: Optional[uuid.UUID] = None,
     limit: int = 50,
 ) -> list[OcrTask]:
     """查询 OCR 任务列表（按 rule_set_id 过滤，可按 contract_id 二次过滤）。"""
-    q = select(OcrTask).where(OcrTask.rule_set_id == rule_set_id)
+    if tenant_get(db, RuleSet, rule_set_id, tenant_id) is None:
+        raise LookupError("规则集不存在")
+    if contract_id is not None:
+        contract = tenant_get(db, Contract, contract_id, tenant_id)
+        if contract is None or contract.rule_set_id != rule_set_id:
+            raise LookupError("合同不存在")
+    q = select(OcrTask).where(
+        OcrTask.tenant_id == tenant_id,
+        OcrTask.rule_set_id == rule_set_id,
+    )
     if contract_id is not None:
         q = q.where(OcrTask.contract_id == contract_id)
     q = q.order_by(OcrTask.created_at.desc()).limit(limit)
     return list(db.execute(q).scalars().all())
 
 
-def get_ocr_task(db: Session, task_id: uuid.UUID) -> Optional[OcrTask]:
+def get_ocr_task(
+    db: Session,
+    tenant_id: uuid.UUID,
+    task_id: uuid.UUID,
+) -> Optional[OcrTask]:
     """查询单个 OCR 任务。"""
-    return db.get(OcrTask, task_id)
+    return tenant_get(db, OcrTask, task_id, tenant_id)

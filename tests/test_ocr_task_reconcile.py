@@ -45,10 +45,12 @@ def main() -> None:
     db = SessionLocal()
     created: list[uuid.UUID] = []
     try:
-        rule_set_id = db.execute(select(RuleSet.id).limit(1)).scalar()
-        if rule_set_id is None:
+        rule_set = db.execute(select(RuleSet).limit(1)).scalar()
+        if rule_set is None:
             print("跳过：库中还没有规则集，无法挂载临时任务")
             return
+        rule_set_id = rule_set.id
+        tenant_id = rule_set.tenant_id
 
         now_ts = db.execute(select(func.now())).scalar()
         ocr_task_service.set_process_start(db)
@@ -57,6 +59,7 @@ def main() -> None:
 
         # 1) 陈旧任务：早于进程启动，且早已超时
         stale = OcrTask(
+            tenant_id=tenant_id,
             rule_set_id=rule_set_id,
             scope="single_doc",
             status="running",
@@ -66,6 +69,7 @@ def main() -> None:
         )
         # 2) 新鲜任务：进程启动之后创建，不应被回收
         fresh = OcrTask(
+            tenant_id=tenant_id,
             rule_set_id=rule_set_id,
             scope="single_doc",
             status="running",
@@ -77,7 +81,7 @@ def main() -> None:
         db.commit()
         created = [stale.id, fresh.id]
 
-        swept = ocr_task_service.reconcile_stale_tasks(db)
+        swept = ocr_task_service.reconcile_stale_tasks(db, tenant_id=tenant_id)
         check("返回值只统计被回收的任务数", swept >= 1, f"swept={swept}")
 
         db.refresh(stale)
@@ -89,7 +93,7 @@ def main() -> None:
         check("进程启动后创建的任务不被误杀", fresh.status == "running", fresh.status)
 
         # 幂等：再来一次不应重复处理
-        again = ocr_task_service.reconcile_stale_tasks(db)
+        again = ocr_task_service.reconcile_stale_tasks(db, tenant_id=tenant_id)
         check("重复调用不再回收已完成回收的任务", again == 0, f"again={again}")
     finally:
         for tid in created:

@@ -49,6 +49,8 @@ def trigger_doc_ocr(
                 profile=profile,
             )
         )
+    except LookupError as e:
+        raise HTTPException(status_code=404, detail=str(e))
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
@@ -85,6 +87,8 @@ def trigger_contract_ocr(
                 profile=profile,
             )
         )
+    except LookupError as e:
+        raise HTTPException(status_code=404, detail=str(e))
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
@@ -95,21 +99,35 @@ def list_tasks(
     contract_id: uuid.UUID | None = Query(default=None, description="可选：按合同过滤"),
     limit: int = Query(default=50, ge=1, le=500),
     db: Session = Depends(get_db),
+    ctx: AuthContext = Depends(require_permission("review.view")),
 ) -> list[OcrTaskBrief]:
     """OCR 任务列表（按 rule_set_id 过滤，可按 contract_id 二次过滤）。"""
+    assert ctx.tenant is not None
     # 顺带回收中断的任务，避免前端把陈旧的 running 状态当作"正在识别"
-    ocr_task_service.reconcile_stale_tasks(db)
-    tasks = ocr_task_service.list_ocr_tasks(db, rule_set_id, contract_id, limit)
+    ocr_task_service.reconcile_stale_tasks(db, tenant_id=ctx.tenant.id)
+    try:
+        tasks = ocr_task_service.list_ocr_tasks(
+            db,
+            ctx.tenant.id,
+            rule_set_id,
+            contract_id,
+            limit,
+        )
+    except LookupError as e:
+        raise HTTPException(status_code=404, detail=str(e))
     return [OcrTaskBrief.model_validate(t) for t in tasks]
 
 
 @router.get("/tasks/{task_id}", response_model=OcrTaskOut)
 def get_task(
-    task_id: uuid.UUID, db: Session = Depends(get_db)
+    task_id: uuid.UUID,
+    db: Session = Depends(get_db),
+    ctx: AuthContext = Depends(require_permission("review.view")),
 ) -> OcrTaskOut:
     """查询单个 OCR 任务进度。"""
-    ocr_task_service.reconcile_stale_tasks(db)
-    t = ocr_task_service.get_ocr_task(db, task_id)
+    assert ctx.tenant is not None
+    ocr_task_service.reconcile_stale_tasks(db, tenant_id=ctx.tenant.id)
+    t = ocr_task_service.get_ocr_task(db, ctx.tenant.id, task_id)
     if t is None:
         raise HTTPException(status_code=404, detail="任务不存在")
     return OcrTaskOut.model_validate(t)
