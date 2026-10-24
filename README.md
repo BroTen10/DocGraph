@@ -217,6 +217,14 @@ bash deploy.sh down       # 停止服务
 
 ## 测试
 
+先准备独立测试数据库并导出 `TEST_DATABASE_URL`，完整账号、权限与租户隔离验收：
+
+```powershell
+backend\.venv\Scripts\python.exe -m pytest tests -q
+npm --prefix frontend test -- --run
+npm --prefix frontend run build
+```
+
 部分图谱测试需要 PostgreSQL 和 Neo4j 已启动：
 
 ```powershell
@@ -280,6 +288,7 @@ DocGraph 仓库自身采用 [MIT License](LICENSE)，允许使用、修改、分
 
 - [Docker 单机部署](docs/部署-Docker单机部署.md)
 - [登录权限与多租户隔离需求设计](docs/登录权限与多租户隔离-需求设计.md)
+- [登录权限与多租户隔离验收记录](docs/登录权限与多租户隔离-验收记录.md)
 - [版本管理](docs/版本管理.md)
 - [规则解析控制架构设计](docs/规则解析控制架构设计.md)
 - [泛化规则体系重构设计](docs/泛化规则体系重构设计.md)
