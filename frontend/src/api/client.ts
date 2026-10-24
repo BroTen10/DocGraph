@@ -76,6 +76,20 @@ export function clearCsrfToken(): void {
   csrfToken = ''
 }
 
+const PUBLIC_AUTH_PATHS = [
+  '/auth/login',
+  '/auth/register',
+  '/auth/verify-email',
+  '/auth/accept-invite',
+  '/auth/password/forgot',
+  '/auth/password/reset',
+]
+
+function isPublicAuthRequest(url: string | undefined): boolean {
+  const path = (url ?? '').split('?', 1)[0]
+  return PUBLIC_AUTH_PATHS.some((publicPath) => path.endsWith(publicPath))
+}
+
 http.interceptors.request.use((config) => {
   const method = (config.method ?? 'get').toLowerCase()
   if (csrfToken && ['post', 'put', 'patch', 'delete'].includes(method)) {
@@ -102,7 +116,9 @@ http.interceptors.response.use(
       await new Promise((r) => setTimeout(r, 600))
       return http.request(cfg)
     }
-    if (error.response?.status === 401 && typeof window !== 'undefined') {
+    const publicAuthFailure =
+      error.response?.status === 401 && isPublicAuthRequest(cfg?.url)
+    if (error.response?.status === 401 && !publicAuthFailure && typeof window !== 'undefined') {
       clearCsrfToken()
       window.dispatchEvent(new CustomEvent('docgraph:session-expired'))
     }
@@ -377,10 +393,10 @@ export const rulesApi = {
 // ============ 图谱 ============
 export const graphApi = {
   /** 异步构建图谱（后台线程），返回 task_id */
-  buildAsync: (ruleSetId: string, auto_confirm_all = false, operator = 'system') =>
+  buildAsync: (ruleSetId: string, auto_confirm_all = false) =>
     http
       .post<{ task_id: string; message: string }>('/rules/build-graph-async', null, {
-        params: { auto_confirm_all, operator, rule_set_id: ruleSetId },
+        params: { auto_confirm_all, rule_set_id: ruleSetId },
       })
       .then((r) => r.data),
   /** 查询异步构建进度 */

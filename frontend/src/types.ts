@@ -29,7 +29,7 @@ export interface AuthUser {
   name: string
   email: string
   phone_masked: string
-  role: TenantRole | null
+  role: UserRole | null
 }
 
 export interface TenantInfo {

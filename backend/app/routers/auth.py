@@ -63,10 +63,16 @@ def _clear_session_cookie(response: Response) -> None:
     response.delete_cookie("docgraph_session", path="/")
 
 
+def _effective_role(user: UserAccount, membership) -> str | None:
+    if user.is_platform_admin:
+        return "platform_admin"
+    return membership.role if membership is not None else None
+
+
 def _session_response(context) -> LoginResponse:
     user = context.user
     tenant = context.tenant
-    role = context.membership.role if context.membership is not None else None
+    role = _effective_role(user, context.membership)
     return LoginResponse(
         message="登录成功",
         csrf_token=context.raw_csrf_token,
@@ -209,10 +215,11 @@ def me(
 
     permissions = sorted(
         permissions_for(
-            membership.role if membership is not None else None,
+            _effective_role(user, membership),
             user.is_platform_admin,
         )
     )
+    role = _effective_role(user, membership)
     return MeResponse(
         message="ok",
         csrf_token=raw_csrf,
@@ -221,14 +228,14 @@ def me(
             name=user.name,
             email=user.email_normalized,
             phone_masked=auth_service.mask_phone(user.phone_e164),
-            role=membership.role if membership is not None else None,
+            role=role,
         ),
         tenant=(
             LoginTenantOut(id=str(tenant.id), name=tenant.name)
             if tenant is not None
             else None
         ),
-        role=membership.role if membership is not None else None,
+        role=role,
         permissions=permissions,
     )
 

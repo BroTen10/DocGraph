@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { isValidPassword, normalizePhone } from './validation'
+import { isValidEmail, isValidPassword, normalizePhone } from './validation'
 
 describe('auth validation', () => {
   it.each([
@@ -24,5 +24,16 @@ describe('auth validation', () => {
     expect(isValidPassword('short1')).toBe(false)
     expect(isValidPassword('1234567890')).toBe(false)
     expect(isValidPassword('abcdefghij')).toBe(false)
+  })
+
+  it.each([
+    ['user@example.com', true],
+    [' user@example.com ', true],
+    ['missing-at.example.com', false],
+    ['user@localhost', false],
+    ['user name@example.com', false],
+    [`${'a'.repeat(245)}@example.com`, false],
+  ])('validates email %s', (email, expected) => {
+    expect(isValidEmail(email)).toBe(expected)
   })
 })

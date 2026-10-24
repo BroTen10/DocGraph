@@ -249,13 +249,29 @@ def test_platform_admin_lists_registrations_and_tenants(
 
     registrations = client.get("/api/platform/registrations", headers=headers)
     assert registrations.status_code == 200
+    assert all(item["status"] == "pending_review" for item in registrations.json()["registrations"])
     rows = registrations.json()["registrations"]
     assert any(row["email"] == "listed@example.com" for row in rows)
-    assert all(row["status"] == "pending_review" for row in rows)
 
     tenants = client.get("/api/platform/tenants", headers=headers)
     assert tenants.status_code == 200
     assert isinstance(tenants.json()["tenants"], list)
+
+
+def test_platform_admin_session_uses_explicit_role_contract(client, platform_auth):
+    login = client.post(
+        "/api/auth/login",
+        json={"email": platform_auth.email, "password": "DocGraph2026"},
+    )
+    assert login.status_code == 200
+    assert login.json()["role"] == "platform_admin"
+    assert login.json()["user"]["role"] == "platform_admin"
+    assert login.json()["tenant"] is None
+
+    me = client.get("/api/auth/me")
+    assert me.status_code == 200
+    assert me.json()["role"] == "platform_admin"
+    assert me.json()["user"]["role"] == "platform_admin"
 
 
 def test_bootstrap_requires_environment(monkeypatch):
