@@ -18,6 +18,8 @@ vi.mock('react-pdf', () => ({
 
 const apiMocks = vi.hoisted(() => ({
   ruleSetsList: vi.fn(),
+  registrationsList: vi.fn(),
+  tenantsList: vi.fn(),
 }))
 
 vi.mock('./api/client', async () => {
@@ -38,6 +40,11 @@ vi.mock('./api/client', async () => {
     contractsApi: {
       ...actual.contractsApi,
       list: vi.fn().mockResolvedValue([]),
+    },
+    platformApi: {
+      ...actual.platformApi,
+      listRegistrations: apiMocks.registrationsList,
+      listTenants: apiMocks.tenantsList,
     },
     versionApi: {
       ...actual.versionApi,
@@ -103,6 +110,10 @@ describe('application shell routing', () => {
     localStorage.clear()
     apiMocks.ruleSetsList.mockReset()
     apiMocks.ruleSetsList.mockResolvedValue([ruleSet])
+    apiMocks.registrationsList.mockReset()
+    apiMocks.registrationsList.mockResolvedValue({ registrations: [], total: 0 })
+    apiMocks.tenantsList.mockReset()
+    apiMocks.tenantsList.mockResolvedValue({ tenants: [], total: 0 })
   })
 
   it('hides settings from reviewers and shows tenant workspace menus', async () => {

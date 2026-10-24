@@ -1,5 +1,4 @@
 import { Navigate, Outlet, Route, Routes } from 'react-router-dom'
-import { Card, Typography } from 'antd'
 import UploadPage from './pages/UploadPage'
 import RulesPage from './pages/RulesPage'
 import GraphPage from './pages/GraphPage'
@@ -19,8 +18,8 @@ import { RequireAuth, RequirePermission } from './auth/RequireAuth'
 import { RuleSetProvider } from './context/RuleSetContext'
 import AppLayout from './layouts/AppLayout'
 import PlatformLayout from './layouts/PlatformLayout'
-
-const { Title, Text } = Typography
+import RegistrationReviewPage from './pages/platform/RegistrationReviewPage'
+import TenantListPage from './pages/platform/TenantListPage'
 
 function HomeRedirect() {
   const { loading, role } = useAuth()
@@ -37,21 +36,6 @@ function TenantWorkspace() {
     <RuleSetProvider>
       <Outlet />
     </RuleSetProvider>
-  )
-}
-
-function PlatformLanding({
-  title,
-  description,
-}: {
-  title: string
-  description: string
-}) {
-  return (
-    <Card>
-      <Title level={3}>{title}</Title>
-      <Text type="secondary">{description}</Text>
-    </Card>
   )
 }
 
@@ -99,21 +83,11 @@ export function AppRoutes() {
         <Route element={<PlatformLayout />}>
           <Route
             path="/platform/registrations"
-            element={(
-              <PlatformLanding
-                title="注册审核"
-                description="平台管理员在此审核新租户申请；审核功能将在平台页面任务中完善。"
-              />
-            )}
+            element={<RegistrationReviewPage />}
           />
           <Route
             path="/platform/tenants"
-            element={(
-              <PlatformLanding
-                title="租户管理"
-                description="平台管理员在此查看租户元数据和启停状态，不读取租户业务内容。"
-              />
-            )}
+            element={<TenantListPage />}
           />
         </Route>
       </Route>
