@@ -14,6 +14,7 @@ from ..auth.security import hash_password, new_token
 from ..auth.session_tokens import revoke_user_sessions
 from ..config import settings
 from ..models import (
+    Tenant,
     TenantInvitation,
     TenantMembership,
     UserAccount,
@@ -131,7 +132,7 @@ def invite_member(
     db.add(invitation)
     db.flush()
 
-    url = f"{settings.public_base_url}/accept-invite?token={raw_token}"
+    url = f"{settings.public_base_url}/accept-invite#token={raw_token}"
     try:
         send_invitation_email(email, url)
     except EmailDeliveryError:
@@ -265,6 +266,15 @@ def update_member(
     status: str | None = None,
 ) -> dict | None:
     """Change a member's role or status within one tenant."""
+    if role is None and status is None:
+        raise MemberOperationError("EMPTY_UPDATE", "至少需要修改角色或状态")
+    tenant_exists = db.execute(
+        select(Tenant.id)
+        .where(Tenant.id == tenant_id)
+        .with_for_update()
+    ).scalar_one_or_none()
+    if tenant_exists is None:
+        return None
     row = db.execute(
         select(TenantMembership, UserAccount)
         .join(UserAccount, UserAccount.id == TenantMembership.user_id)
@@ -366,7 +376,7 @@ def resend_invitation(
     invitation.token_hash = token_hash
     invitation.status = "resent"
     invitation.expires_at = _utcnow() + timedelta(hours=INVITATION_TOKEN_HOURS)
-    url = f"{settings.public_base_url}/accept-invite?token={raw_token}"
+    url = f"{settings.public_base_url}/accept-invite#token={raw_token}"
     try:
         send_invitation_email(invitation.email_normalized, url)
     except EmailDeliveryError:

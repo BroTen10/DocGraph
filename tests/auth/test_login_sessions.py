@@ -52,8 +52,8 @@ def test_five_failures_lock_account(client, active_tenant_user):
             "password": "DocGraph2026",
         },
     )
-    assert locked.status_code == 403
-    assert locked.json()["code"] == "ACCOUNT_LOCKED"
+    assert locked.status_code == 401
+    assert locked.json()["detail"] == "邮箱或密码错误"
 
 
 def test_forgot_and_reset_password_revokes_sessions(client, active_tenant_user):
@@ -136,3 +136,34 @@ def test_change_password_requires_current_password(client, active_tenant_user):
     )
     assert changed.status_code == 204
     assert client.get("/api/auth/me").status_code == 401
+
+
+def test_me_keeps_csrf_stable_for_multiple_tabs(client, active_tenant_user):
+    login = client.post(
+        "/api/auth/login",
+        json={"email": "admin@example.com", "password": "DocGraph2026"},
+    )
+    assert login.status_code == 200
+    first = client.get("/api/auth/me")
+    second = client.get("/api/auth/me")
+    assert first.status_code == 200
+    assert second.status_code == 200
+    assert first.json()["csrf_token"] == second.json()["csrf_token"]
+
+
+def test_profile_update_normalizes_phone_and_audits(client, active_tenant_user):
+    login = client.post(
+        "/api/auth/login",
+        json={"email": "admin@example.com", "password": "DocGraph2026"},
+    )
+    headers = {"X-CSRF-Token": login.json()["csrf_token"]}
+    updated = client.put(
+        "/api/auth/profile",
+        json={"name": "新姓名", "phone": "135-0013-5000"},
+        headers=headers,
+    )
+    assert updated.status_code == 200
+    assert updated.json()["user"]["name"] == "新姓名"
+    assert updated.json()["user"]["phone_masked"] == "135****5000"
+    me = client.get("/api/auth/me")
+    assert me.json()["user"]["name"] == "新姓名"

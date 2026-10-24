@@ -46,6 +46,11 @@ export interface AuthSessionResponse {
   permissions: Permission[]
 }
 
+export interface ProfileUpdateResponse {
+  message: string
+  user: AuthUser
+}
+
 export interface RegisterTenantRequest {
   organization_name: string
   admin_name: string
@@ -119,6 +124,26 @@ export interface MemberUpdateRequest {
 
 export interface RevealedPhoneResponse {
   phone: string
+}
+
+export interface AuditLogItem {
+  id: string
+  actor_user_id: string | null
+  action: string
+  target_type: string | null
+  target_id: string | null
+  result: string | null
+  metadata: Record<string, unknown>
+  request_id: string | null
+  ip: string | null
+  created_at: string
+}
+
+export interface AuditLogListResponse {
+  items: AuditLogItem[]
+  total: number
+  offset: number
+  limit: number
 }
 
 export interface RegistrationReview {

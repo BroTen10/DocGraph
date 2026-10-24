@@ -3,6 +3,7 @@ import { SettingOutlined } from '@ant-design/icons'
 import PageHeader from '../components/PageHeader'
 import MembersTab from './settings/MembersTab'
 import RuntimeSettingsTab from './settings/RuntimeSettingsTab'
+import AuditTab from './settings/AuditTab'
 
 const tabs = [
   {
@@ -15,6 +16,11 @@ const tabs = [
     label: '用户与权限',
     children: <MembersTab />,
   },
+  {
+    key: 'audit',
+    label: '审计日志',
+    children: <AuditTab />,
+  },
 ]
 
 export default function SettingsPage() {
@@ -22,7 +28,7 @@ export default function SettingsPage() {
     <div>
       <PageHeader
         title="系统设置"
-        subtitle="管理当前租户的运行参数和成员权限。仅租户管理员可以访问此页面。"
+        subtitle="管理当前租户的运行参数、成员权限和审计记录。仅租户管理员可以访问此页面。"
         icon={<SettingOutlined />}
         bottomGap={12}
       />

@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
+import shutil
 import uuid
 from uuid import uuid4
 
@@ -24,6 +25,7 @@ from app.models import (
     TenantInvitation,
 )
 from app.neo4j_client import get_neo4j_client
+from app.config import settings
 
 
 TENANT_GETS = [
@@ -40,6 +42,7 @@ TENANT_GETS = [
     "/api/rules/build-graph-tasks",
     f"/api/rules/graph?rule_set_id={uuid4()}",
     "/api/tenant/members",
+    "/api/tenant/audit-logs",
 ]
 
 PLATFORM_GETS = [
@@ -61,9 +64,10 @@ def test_unauthenticated_writes_return_401_before_csrf(client):
             json={"contract_id": str(uuid4()), "snapshot_id": None},
         ),
         client.put("/api/settings", json={"items": []}),
+        client.put("/api/auth/profile", json={"name": "未登录"}),
         client.delete(f"/api/contracts/{uuid4()}"),
     ]
-    assert [response.status_code for response in responses] == [401, 401, 401]
+    assert [response.status_code for response in responses] == [401, 401, 401, 401]
     assert all("CSRF" not in response.text for response in responses)
 
 
@@ -321,23 +325,24 @@ def test_tenant_ab_full_resource_isolation(
     migrated_db,
     admin_auth,
     admin_b,
-    tmp_path,
 ):
     assert admin_auth.tenant_id is not None
     assert admin_b.tenant_id is not None
 
+    acceptance_files = settings.ensure_upload_root() / "_acceptance"
+    shutil.rmtree(acceptance_files, ignore_errors=True)
     bundle_a = _create_tenant_bundle(
         migrated_db,
         tenant_id=admin_auth.tenant_id,
         label="a",
-        temp_root=tmp_path,
+        temp_root=acceptance_files,
         tolerance=2.5,
     )
     bundle_b = _create_tenant_bundle(
         migrated_db,
         tenant_id=admin_b.tenant_id,
         label="b",
-        temp_root=tmp_path,
+        temp_root=acceptance_files,
         tolerance=7.5,
     )
     invitation_a = TenantInvitation(
@@ -611,6 +616,7 @@ def test_tenant_ab_full_resource_isolation(
         for graph_id in graph_ids:
             neo4j.clear_graph(graph_id, bundle_a.tenant_id)
             neo4j.clear_graph(graph_id, bundle_b.tenant_id)
+        shutil.rmtree(acceptance_files, ignore_errors=True)
 
 
 def test_disabled_member_existing_session_is_revoked(

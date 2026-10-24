@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import hashlib
+import hmac
+
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.responses import JSONResponse
-from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ..auth.session_tokens import (
@@ -12,17 +14,18 @@ from ..auth.session_tokens import (
     revoke_session,
     revoke_user_sessions,
     rotate_csrf,
-    touch_session,
 )
 from ..auth.permissions import permissions_for
+from ..auth.dependencies import AuthContext, require_permission
 from ..auth.rate_limit import (
     client_ip,
     enforce_login_rate,
     enforce_public_action_rate,
+    enforce_token_action_rate,
 )
 from ..config import settings
 from ..database import get_db
-from ..models import Tenant, TenantMembership, UserAccount
+from ..models import UserAccount
 from ..schemas.auth import (
     ChangePasswordRequest,
     ForgotPasswordRequest,
@@ -34,6 +37,8 @@ from ..schemas.auth import (
     MeResponse,
     RegisterResponse,
     RegisterTenantRequest,
+    ProfileUpdateRequest,
+    ProfileUpdateResponse,
     ResetPasswordRequest,
     ResetPasswordResponse,
     VerifyEmailRequest,
@@ -48,12 +53,21 @@ from ..services.tenant_member_service import MemberOperationError, accept_invita
 router = APIRouter(prefix="/api/auth", tags=["auth"])
 
 
-def _set_session_cookie(response: Response, token: str) -> None:
+def _set_session_cookie(response: Response, token: str, csrf_token: str) -> None:
     response.set_cookie(
         "docgraph_session",
         token,
         max_age=settings.session_absolute_hours * 3600,
         httponly=True,
+        secure=settings.session_cookie_secure,
+        samesite="lax",
+        path="/",
+    )
+    response.set_cookie(
+        "docgraph_csrf",
+        csrf_token,
+        max_age=settings.session_absolute_hours * 3600,
+        httponly=False,
         secure=settings.session_cookie_secure,
         samesite="lax",
         path="/",
@@ -67,6 +81,19 @@ def _clear_session_cookie(response: Response) -> None:
         secure=settings.session_cookie_secure,
         samesite="lax",
     )
+    response.delete_cookie(
+        "docgraph_csrf",
+        path="/",
+        secure=settings.session_cookie_secure,
+        samesite="lax",
+    )
+
+
+def _csrf_cookie_matches(raw_token: str | None, expected_hash: str) -> bool:
+    if not raw_token:
+        return False
+    actual_hash = hashlib.sha256(raw_token.encode("utf-8")).hexdigest()
+    return hmac.compare_digest(actual_hash, expected_hash)
 
 
 def _effective_role(user: UserAccount, membership) -> str | None:
@@ -120,9 +147,11 @@ def register_tenant(
 @router.post("/verify-email", response_model=VerifyEmailResponse)
 def verify_email(
     payload: VerifyEmailRequest,
+    request: Request,
     db: Session = Depends(get_db),
 ) -> VerifyEmailResponse:
     """Verify an email and move the application into the review queue."""
+    enforce_token_action_rate(client_ip(request))
     try:
         status = auth_service.verify_registration_token(db, payload.token)
     except ValueError as exc:
@@ -136,9 +165,11 @@ def verify_email(
 @router.post("/accept-invite", response_model=AcceptInviteResponse)
 def accept_member_invite(
     payload: AcceptInviteRequest,
+    request: Request,
     db: Session = Depends(get_db),
 ) -> AcceptInviteResponse:
     """Accept a tenant invitation and create the account plus membership."""
+    enforce_token_action_rate(client_ip(request))
     try:
         accept_invitation(db, payload.token, payload.password)
     except MemberOperationError as exc:
@@ -180,45 +211,27 @@ def login(
         media_type="application/json",
         status_code=200,
     )
-    _set_session_cookie(response, context.raw_session_token)
+    _set_session_cookie(
+        response,
+        context.raw_session_token,
+        context.raw_csrf_token,
+    )
     return response
 
 
 @router.get("/me", response_model=MeResponse)
 def me(
     request: Request,
+    ctx: AuthContext = Depends(require_permission("profile.read")),
     db: Session = Depends(get_db),
-) -> MeResponse:
-    """Return the current authenticated user and a fresh CSRF token."""
-    token = request.cookies.get("docgraph_session")
-    session = get_active_session(db, token)
-    if session is None:
-        raise HTTPException(status_code=401, detail="未登录或会话已失效")
-
-    touch_session(db, session)
-    raw_csrf = rotate_csrf(db, session)
-
-    user = db.get(UserAccount, session.user_id)
-    if user is None:
-        raise HTTPException(status_code=401, detail="账号不存在")
-
-    tenant = None
-    membership = None
-    if session.tenant_id is not None:
-        row = db.execute(
-            select(TenantMembership, Tenant)
-            .join(Tenant, Tenant.id == TenantMembership.tenant_id)
-            .where(
-                TenantMembership.user_id == user.id,
-                TenantMembership.tenant_id == session.tenant_id,
-                TenantMembership.status == "active",
-            )
-            .limit(1)
-        ).first()
-        if row is None:
-            raise HTTPException(status_code=403, detail="账号或租户状态异常")
-        membership, tenant = row
-
+) -> Response:
+    """Return the current identity while keeping one CSRF token per session."""
+    user = ctx.user
+    tenant = ctx.tenant
+    membership = ctx.membership
+    raw_csrf = request.cookies.get("docgraph_csrf")
+    if not _csrf_cookie_matches(raw_csrf, ctx.session.csrf_hash):
+        raw_csrf = rotate_csrf(db, ctx.session)
     permissions = sorted(
         permissions_for(
             _effective_role(user, membership),
@@ -226,7 +239,7 @@ def me(
         )
     )
     role = _effective_role(user, membership)
-    return MeResponse(
+    payload = MeResponse(
         message="ok",
         csrf_token=raw_csrf,
         user=LoginUserOut(
@@ -244,6 +257,21 @@ def me(
         role=role,
         permissions=permissions,
     )
+    response = Response(
+        content=payload.model_dump_json(),
+        media_type="application/json",
+        status_code=200,
+    )
+    response.set_cookie(
+        "docgraph_csrf",
+        raw_csrf,
+        max_age=settings.session_absolute_hours * 3600,
+        httponly=False,
+        secure=settings.session_cookie_secure,
+        samesite="lax",
+        path="/",
+    )
+    return response
 
 
 @router.post("/logout", status_code=204)
@@ -352,3 +380,33 @@ def change_password(
     response = Response(status_code=204)
     _clear_session_cookie(response)
     return response
+
+
+@router.put("/profile", response_model=ProfileUpdateResponse)
+def update_profile(
+    payload: ProfileUpdateRequest,
+    ctx: AuthContext = Depends(require_permission("profile.update")),
+    db: Session = Depends(get_db),
+) -> ProfileUpdateResponse:
+    """Update the authenticated user's name or phone number."""
+    try:
+        user = auth_service.update_profile(
+            db,
+            ctx.user,
+            tenant_id=ctx.tenant.id if ctx.tenant is not None else None,
+            name=payload.name,
+            phone=payload.phone,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    role = _effective_role(user, ctx.membership)
+    return ProfileUpdateResponse(
+        message="个人资料已更新",
+        user=LoginUserOut(
+            id=str(user.id),
+            name=user.name,
+            email=user.email_normalized,
+            phone_masked=auth_service.mask_phone(user.phone_e164),
+            role=role,
+        ),
+    )

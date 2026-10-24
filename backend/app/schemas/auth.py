@@ -121,3 +121,12 @@ class ChangePasswordRequest(BaseModel):
         validate_password(value)
         return value
 
+
+class ProfileUpdateRequest(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=50)
+    phone: str | None = None
+
+
+class ProfileUpdateResponse(BaseModel):
+    message: str
+    user: LoginUserOut

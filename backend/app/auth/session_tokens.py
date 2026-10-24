@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import hmac
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -42,7 +43,8 @@ def create_session(
 ) -> tuple[AuthSession, str, str]:
     """Add a server-side session to the caller's transaction."""
     now = utcnow()
-    raw_session, session_hash = new_token()
+    raw_session, _ = new_token()
+    session_hash = session_token_hash(raw_session)
     raw_csrf, csrf_hash = new_token()
     session = AuthSession(
         user_id=user.id,
@@ -61,8 +63,13 @@ def create_session(
     return session, raw_session, raw_csrf
 
 
-def _session_hash(raw_session_token: str) -> str:
-    return hashlib.sha256(raw_session_token.encode("utf-8")).hexdigest()
+def session_token_hash(raw_session_token: str) -> str:
+    """Pepper stored session digests with the deployment secret."""
+    return hmac.new(
+        settings.app_secret_key.encode("utf-8"),
+        raw_session_token.encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()
 
 
 def get_active_session(db: Session, raw_session_token: str) -> AuthSession | None:
@@ -71,7 +78,7 @@ def get_active_session(db: Session, raw_session_token: str) -> AuthSession | Non
         return None
     session = db.execute(
         select(AuthSession).where(
-            AuthSession.token_hash == _session_hash(raw_session_token)
+            AuthSession.token_hash == session_token_hash(raw_session_token)
         )
     ).scalar_one_or_none()
     if session is None or session.revoked_at is not None:

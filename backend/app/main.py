@@ -1,7 +1,7 @@
 """FastAPI 应用入口。
 
 启动时：
-1. 初始化 Postgres 表结构（DROP SCHEMA + CREATE SCHEMA + create_all）
+1. 幂等初始化 Postgres 表结构并执行安全迁移
 2. 注册所有路由（含 rule-sets）
 3. 启用 CORS（前端独立部署）
 
@@ -50,6 +50,7 @@ from .routers import (
     rule_sets,
     rules,
     settings as settings_router,
+    tenant_audit,
     tenant_members,
 )
 from .version import app_version, collect_build_info
@@ -72,9 +73,7 @@ async def lifespan(app: FastAPI):
     """应用生命周期：启动时初始化。"""
     logger.info("=== 启动文档审查智能体后端 ===")
     logger.info("版本：%s", collect_build_info()["label"])
-    # 1. 创建表（含 rule_sets 表与 rule_set_id 外键）
-    #    注意：init_db 会先 DROP SCHEMA public CASCADE，再 CREATE SCHEMA public，再 create_all
-    #    用户已确认不迁移旧数据。
+    # 1. 创建缺失表并执行幂等、非破坏性的账号/租户迁移。
     init_db()
     logger.info("Postgres 表已就绪")
     # 多 RuleSet 改造后不再自动插入种子规则。
@@ -230,6 +229,7 @@ async def request_correlation(request: Request, call_next):
 # 注册路由
 app.include_router(auth.router)
 app.include_router(tenant_members.router)
+app.include_router(tenant_audit.router)
 app.include_router(platform.router)
 app.include_router(rule_sets.router)
 app.include_router(contracts.router)

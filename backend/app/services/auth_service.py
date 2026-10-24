@@ -13,6 +13,7 @@ from sqlalchemy.orm import Session
 from ..auth.security import (
     hash_password,
     new_token,
+    normalize_cn_phone,
     normalize_email,
     validate_password,
     verify_password,
@@ -42,6 +43,7 @@ VERIFICATION_TOKEN_HOURS = 24
 RESET_TOKEN_MINUTES = 30
 MAX_LOGIN_FAILURES = 5
 LOCK_MINUTES = 15
+_DUMMY_PASSWORD_HASH = hash_password("DummyPassword2026")
 
 
 class LoginDeniedError(Exception):
@@ -72,7 +74,12 @@ def _login_context_for_user(db: Session, user: UserAccount) -> tuple:
         return None, None
 
     membership = db.execute(
-        select(TenantMembership).where(TenantMembership.user_id == user.id)
+        select(TenantMembership)
+        .where(
+            TenantMembership.user_id == user.id,
+            TenantMembership.status == "active",
+        )
+        .order_by(TenantMembership.created_at, TenantMembership.id)
         .limit(1)
     ).scalar_one_or_none()
     if membership is None:
@@ -131,6 +138,7 @@ def authenticate(
         select(UserAccount).where(UserAccount.email_normalized == canonical_email)
     ).scalar_one_or_none()
     if user is None:
+        verify_password(_DUMMY_PASSWORD_HASH, password)
         audit_service.record(
             db, None, None, "auth.login.failed", result="failure",
             metadata={"reason": "invalid_credentials"},
@@ -140,12 +148,13 @@ def authenticate(
 
     now = _utcnow()
     if user.locked_until is not None and user.locked_until > now:
+        verify_password(user.password_hash, password)
         audit_service.record(
             db, None, user.id, "auth.login.locked", result="failure",
             metadata={"reason": "account_locked"},
         )
         db.commit()
-        raise LoginDeniedError("ACCOUNT_LOCKED", "账号已锁定，请稍后再试")
+        raise ValueError("邮箱或密码错误")
 
     if not verify_password(user.password_hash, password):
         user.failed_login_count += 1
@@ -241,7 +250,7 @@ def request_password_reset(db: Session, email: str) -> bool:
         db, None, user.id, "auth.password.reset_requested",
         target_type="user", target_id=user.id, result="success",
     )
-    url = f"{settings.public_base_url}/reset-password?token={raw_token}"
+    url = f"{settings.public_base_url}/reset-password#token={raw_token}"
     try:
         send_email(
             to_email=user.email_normalized,
@@ -310,6 +319,52 @@ def change_password(
     )
     db.commit()
     revoke_user_sessions(db, user.id)
+
+
+def update_profile(
+    db: Session,
+    user: UserAccount,
+    *,
+    tenant_id=None,
+    name: str | None = None,
+    phone: str | None = None,
+) -> UserAccount:
+    """Update self-service profile fields with normalization and auditing."""
+    changed: dict[str, str] = {}
+    if name is not None:
+        canonical_name = name.strip()
+        if not 1 <= len(canonical_name) <= 50:
+            raise ValueError("姓名长度必须为 1-50 个字符")
+        if canonical_name != user.name:
+            changed["name"] = canonical_name
+            user.name = canonical_name
+    if phone is not None:
+        canonical_phone = normalize_cn_phone(phone)
+        if canonical_phone != user.phone_e164:
+            conflict = db.execute(
+                select(UserAccount.id).where(
+                    UserAccount.phone_e164 == canonical_phone,
+                    UserAccount.id != user.id,
+                )
+            ).scalar_one_or_none()
+            if conflict is not None:
+                raise ValueError("该手机号已被其他账号使用")
+            changed["phone"] = "updated"
+            user.phone_e164 = canonical_phone
+    if changed:
+        audit_service.record(
+            db,
+            tenant_id,
+            user.id,
+            "profile.updated",
+            target_type="user",
+            target_id=user.id,
+            result="success",
+            metadata={"fields": sorted(changed)},
+        )
+        db.commit()
+        db.refresh(user)
+    return user
 
 
 def send_verification_email(email: str, url: str) -> None:
@@ -385,7 +440,7 @@ def register_tenant(
         )
     )
 
-    url = f"{settings.public_base_url}/verify-email?token={raw_token}"
+    url = f"{settings.public_base_url}/verify-email#token={raw_token}"
     try:
         send_verification_email(payload.email, url)
     except EmailDeliveryError:
@@ -437,4 +492,3 @@ def verify_registration_token(db: Session, raw_token: str) -> str:
     )
     db.commit()
     return request.status
-

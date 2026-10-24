@@ -114,10 +114,11 @@ describe('authentication page errors', () => {
       status: 'pending_review',
     })
     function LocationProbe() {
-      return <div data-testid="location-search">{useLocation().search}</div>
+      const location = useLocation()
+      return <div data-testid="location-search">{location.search}{location.hash}</div>
     }
     render(
-      <MemoryRouter initialEntries={['/pending?token=one-time-token']}>
+      <MemoryRouter initialEntries={['/pending#token=one-time-token']}>
         <AuthProvider initialAuth={AUTH}>
           <Routes>
             <Route path="/pending" element={<PendingPage />} />

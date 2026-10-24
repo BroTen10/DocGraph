@@ -52,3 +52,16 @@ def test_production_requires_smtp_host_for_smtp_backend():
             email_backend="smtp",
             smtp_host="",
         )
+
+
+@pytest.mark.parametrize("backend", ["console", "outbox"])
+def test_production_rejects_non_smtp_email_backends(backend):
+    with pytest.raises(ValidationError, match="EMAIL_BACKEND"):
+        Settings(
+            app_debug=False,
+            app_secret_key="x" * 64,
+            session_cookie_secure=True,
+            public_base_url="https://docgraph.example.com",
+            email_backend=backend,
+            smtp_host="smtp.example.com",
+        )

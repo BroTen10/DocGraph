@@ -14,6 +14,7 @@ from ..auth.security import (
     normalize_cn_phone,
     normalize_email,
     validate_password,
+    verify_password,
 )
 from ..auth.session_tokens import revoke_tenant_sessions
 from ..models import (
@@ -22,6 +23,7 @@ from ..models import (
     TenantRegistrationRequest,
     UserAccount,
 )
+from ..migrations.security_v1 import DEFAULT_TENANT_CODE
 from .email_service import EmailDeliveryError, send_email
 from . import audit_service
 
@@ -95,6 +97,116 @@ def create_platform_admin(email: str, phone: str, password: str) -> UserAccount:
             )
         db.refresh(admin)
         return admin
+
+
+def create_default_tenant_admin(
+    email: str,
+    phone: str,
+    password: str,
+    *,
+    name: str = "默认租户管理员",
+) -> UserAccount:
+    """Provision the tenant administrator that owns migrated legacy data.
+
+    This is intentionally separate from platform-admin provisioning: platform
+    operators do not receive tenant business permissions.
+    """
+    try:
+        canonical_email = normalize_email(email)
+        canonical_phone = normalize_cn_phone(phone)
+        validate_password(password)
+    except ValueError as exc:
+        raise PlatformOperationError("INVALID_ADMIN_INPUT", str(exc)) from exc
+
+    from ..database import SessionLocal
+
+    with SessionLocal() as db:
+        tenant = db.execute(
+            select(Tenant).where(Tenant.code == DEFAULT_TENANT_CODE)
+        ).scalar_one_or_none()
+        if tenant is None:
+            raise PlatformOperationError(
+                "DEFAULT_TENANT_MISSING",
+                "默认租户不存在，请先完成数据库迁移",
+            )
+
+        existing = db.execute(
+            select(UserAccount).where(
+                (UserAccount.email_normalized == canonical_email)
+                | (UserAccount.phone_e164 == canonical_phone)
+            )
+        ).scalar_one_or_none()
+        if existing is not None:
+            if (
+                existing.email_normalized != canonical_email
+                or existing.phone_e164 != canonical_phone
+            ):
+                raise PlatformOperationError(
+                    "ADMIN_CONFLICT",
+                    "邮箱或手机号与既有账号冲突",
+                )
+            if existing.is_platform_admin:
+                raise PlatformOperationError(
+                    "PLATFORM_ADMIN_CONFLICT",
+                    "平台管理员不能兼任租户管理员，请使用独立的租户邮箱",
+                )
+            if not verify_password(existing.password_hash, password):
+                raise PlatformOperationError(
+                    "ADMIN_PASSWORD_MISMATCH",
+                    "既有账号密码校验失败，无法绑定默认租户",
+                )
+            user = existing
+        else:
+            user = UserAccount(
+                name=name.strip() or "默认租户管理员",
+                email_normalized=canonical_email,
+                phone_e164=canonical_phone,
+                password_hash=hash_password(password),
+                email_verified_at=_utcnow(),
+                terms_accepted_at=_utcnow(),
+            )
+            db.add(user)
+            db.flush()
+
+        membership = db.execute(
+            select(TenantMembership).where(
+                TenantMembership.tenant_id == tenant.id,
+                TenantMembership.user_id == user.id,
+            )
+        ).scalar_one_or_none()
+        if membership is None:
+            membership = TenantMembership(
+                tenant_id=tenant.id,
+                user_id=user.id,
+                role="tenant_admin",
+                status="active",
+                joined_at=_utcnow(),
+            )
+            db.add(membership)
+        else:
+            membership.role = "tenant_admin"
+            membership.status = "active"
+        db.flush()
+
+        audit_service.record(
+            db,
+            tenant.id,
+            user.id,
+            "tenant.admin.bootstrap",
+            target_type="tenant_member",
+            target_id=membership.id,
+            result="success",
+        )
+        try:
+            db.commit()
+        except IntegrityError:
+            db.rollback()
+            raise PlatformOperationError(
+                "ADMIN_CONFLICT",
+                "初始化默认租户管理员时发生数据冲突",
+            )
+        db.refresh(user)
+        return user
 
 
 def list_registrations(

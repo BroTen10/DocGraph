@@ -147,7 +147,17 @@ preflight() {
 
     local key
     key="$(read_env PG_PASSWORD)"
-    [ -n "$key" ] || warn "backend/.env 未设置 PG_PASSWORD，将使用 compose 默认口令 postgres"
+    case "$key" in
+        ""|postgres|CHANGE_ME_DB_PASSWORD)
+            die "backend/.env 的 PG_PASSWORD 为空、默认值或示例值，生产环境必须使用强随机口令"
+            ;;
+    esac
+    key="$(read_env NEO4J_PASSWORD)"
+    case "$key" in
+        ""|neo4jpassword|CHANGE_ME_NEO4J_PASSWORD)
+            die "backend/.env 的 NEO4J_PASSWORD 为空、默认值或示例值，生产环境必须使用强随机口令"
+            ;;
+    esac
     key="$(read_env APP_SECRET_KEY)"
     [ "${#key}" -ge 32 ] || die "backend/.env 的 APP_SECRET_KEY 少于 32 个字符，生产环境必须使用强随机值"
     case "$key" in
@@ -167,14 +177,13 @@ preflight() {
     esac
     email_backend="$(read_env EMAIL_BACKEND)"
     [ -n "$email_backend" ] || email_backend="smtp"
-    if [ "$email_backend" = "smtp" ]; then
-        smtp_host="$(read_env SMTP_HOST)"
-        mail_from="$(read_env MAIL_FROM)"
-        [ -n "$smtp_host" ] || die "EMAIL_BACKEND=smtp 时必须配置 SMTP_HOST"
-        [ -n "$mail_from" ] || die "EMAIL_BACKEND=smtp 时必须配置 MAIL_FROM"
-        [ "$smtp_host" != "smtp.example.com" ] || die "SMTP_HOST 仍是示例值"
-        [ "$mail_from" != "no-reply@example.com" ] || die "MAIL_FROM 仍是示例值"
-    fi
+    [ "$email_backend" = "smtp" ] || die "生产环境 EMAIL_BACKEND 必须为 smtp"
+    smtp_host="$(read_env SMTP_HOST)"
+    mail_from="$(read_env MAIL_FROM)"
+    [ -n "$smtp_host" ] || die "EMAIL_BACKEND=smtp 时必须配置 SMTP_HOST"
+    [ -n "$mail_from" ] || die "EMAIL_BACKEND=smtp 时必须配置 MAIL_FROM"
+    [ "$smtp_host" != "smtp.example.com" ] || die "SMTP_HOST 仍是示例值"
+    [ "$mail_from" != "no-reply@example.com" ] || die "MAIL_FROM 仍是示例值"
 
     key="$(read_env LLM_API_KEY)"
     case "$key" in
@@ -206,6 +215,14 @@ http_get() {
     fi
 }
 
+http_status() {
+    if command -v curl >/dev/null 2>&1; then
+        curl -sS -o /dev/null -w '%{http_code}' --max-time 8 "$1"
+    else
+        die "部署自检需要 curl 来校验受保护接口状态"
+    fi
+}
+
 wait_health() {
     local url="http://127.0.0.1:${FRONTEND_HOST_PORT}/api/health" body i
     log "健康检查：${url}（最多等 180s）"
@@ -232,18 +249,20 @@ verify() {
         warn "/api/version 不可用（多半是旧镜像），本次部署的版本号是 ${DOCGRAPH_APP_VERSION:-未知}"
     fi
 
-    log "接口探测："
+    log "接口探测（受保护接口必须返回 401）："
     for p in /api/constants/doc-types /api/rule-sets; do
-        if http_get "${base}${p}" >/dev/null 2>&1; then
-            printf '  [OK]   %s%s\n' "$base" "$p"
+        status="$(http_status "${base}${p}")"
+        if [ "$status" = "401" ]; then
+            printf '  [OK]   %s%s -> 401\n' "$base" "$p"
         else
-            printf '  [FAIL] %s%s\n' "$base" "$p"
+            printf '  [FAIL] %s%s -> %s（预期 401）\n' "$base" "$p" "$status"
+            die "受保护接口认证边界不符合预期"
         fi
     done
     if http_get "${base}/" >/dev/null 2>&1; then
         printf '  [OK]   %s/ （前端首页）\n' "$base"
     else
-        printf '  [FAIL] %s/ （前端首页）\n' "$base"
+        die "前端首页不可用"
     fi
 }
 

@@ -11,6 +11,7 @@ from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 
 from ..auth.dependencies import AuthContext, require_permission
+from ..config import settings
 from ..database import get_db
 from ..schemas.contract import (
     ContractAliasUpdate,
@@ -169,7 +170,10 @@ def get_document_file(
     if doc is None:
         raise HTTPException(status_code=404, detail="文件不存在")
 
-    path = Path(doc.file_path)
+    path = Path(doc.file_path).resolve()
+    upload_root = settings.ensure_upload_root().resolve()
+    if not path.is_relative_to(upload_root):
+        raise HTTPException(status_code=404, detail="文件不存在")
     if not path.exists():
         raise HTTPException(status_code=404, detail="文件不存在于磁盘")
 

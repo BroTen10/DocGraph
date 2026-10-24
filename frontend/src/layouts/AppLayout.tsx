@@ -33,6 +33,7 @@ import { Outlet, useLocation, useNavigate } from 'react-router-dom'
 import { authApi, getErrorMessage } from '../api/client'
 import { useAuth } from '../auth/AuthContext'
 import { visibleMenuKeys } from '../auth/permissions'
+import { normalizePhone } from '../auth/validation'
 import { RuleSetSwitcher } from '../components/RuleSetSwitcher'
 import VersionBadge from '../components/VersionBadge'
 import { useRuleSet } from '../context/RuleSetContext'
@@ -62,10 +63,18 @@ const ROLE_LABELS: Record<UserRole, string> = {
   platform_admin: '平台管理员',
 }
 
-export function AccountMenu({ dark = false }: { dark?: boolean }) {
+export function AccountMenu({
+  dark = false,
+  compact = false,
+}: {
+  dark?: boolean
+  compact?: boolean
+}) {
   const navigate = useNavigate()
-  const { user, tenant, role, logout } = useAuth()
+  const { user, tenant, role, logout, refresh } = useAuth()
   const [profileOpen, setProfileOpen] = useState(false)
+  const [profileSaving, setProfileSaving] = useState(false)
+  const [profileError, setProfileError] = useState('')
   const [passwordOpen, setPasswordOpen] = useState(false)
   const [submitting, setSubmitting] = useState(false)
   const [passwordError, setPasswordError] = useState('')
@@ -73,6 +82,10 @@ export function AccountMenu({ dark = false }: { dark?: boolean }) {
     current_password: string
     new_password: string
     confirm_password: string
+  }>()
+  const [profileForm] = Form.useForm<{
+    name: string
+    phone?: string
   }>()
 
   const handleLogout = async () => {
@@ -101,12 +114,41 @@ export function AccountMenu({ dark = false }: { dark?: boolean }) {
     }
   }
 
+  const saveProfile = async () => {
+    try {
+      const values = await profileForm.validateFields()
+      setProfileSaving(true)
+      setProfileError('')
+      await authApi.updateProfile({
+        name: values.name.trim(),
+        ...(values.phone?.trim()
+          ? { phone: normalizePhone(values.phone) }
+          : {}),
+      })
+      await refresh()
+      setProfileOpen(false)
+      message.success('个人资料已更新')
+    } catch (error) {
+      if (error && typeof error === 'object' && 'errorFields' in error) return
+      setProfileError(getErrorMessage(error, '更新个人资料失败'))
+    } finally {
+      setProfileSaving(false)
+    }
+  }
+
   const items: MenuProps['items'] = [
     {
       key: 'profile',
       icon: <UserOutlined />,
       label: '个人资料',
-      onClick: () => setProfileOpen(true),
+      onClick: () => {
+        profileForm.setFieldsValue({
+          name: user?.name || '',
+          phone: '',
+        })
+        setProfileError('')
+        setProfileOpen(true)
+      },
     },
     {
       key: 'password',
@@ -152,7 +194,7 @@ export function AccountMenu({ dark = false }: { dark?: boolean }) {
             style={{ background: 'linear-gradient(135deg, #6366f1 0%, #8b5cf6 100%)' }}
             icon={<UserOutlined />}
           />
-          <span style={{ flex: 1, minWidth: 0, lineHeight: 1.3 }}>
+          {!compact && <span style={{ flex: 1, minWidth: 0, lineHeight: 1.3 }}>
             <span
               style={{
                 display: 'block',
@@ -177,20 +219,57 @@ export function AccountMenu({ dark = false }: { dark?: boolean }) {
             >
               {tenant?.name || (role ? ROLE_LABELS[role] : '')}
             </span>
-          </span>
+          </span>}
         </button>
       </Dropdown>
 
       <Modal
         title="个人资料"
         open={profileOpen}
-        footer={<Button onClick={() => setProfileOpen(false)}>关闭</Button>}
+        okText="保存资料"
+        confirmLoading={profileSaving}
+        onOk={() => void saveProfile()}
+        footer={(
+          <Space>
+            <Button onClick={() => setProfileOpen(false)}>取消</Button>
+            <Button type="primary" loading={profileSaving} onClick={() => void saveProfile()}>
+              保存资料
+            </Button>
+          </Space>
+        )}
         onCancel={() => setProfileOpen(false)}
       >
-        <Space direction="vertical" size={12} style={{ width: '100%' }}>
-          <div><Text type="secondary">姓名：</Text>{user?.name}</div>
-          <div><Text type="secondary">邮箱：</Text>{user?.email}</div>
-          <div><Text type="secondary">手机号：</Text>{user?.phone_masked}</div>
+        {profileError && (
+          <Alert type="error" showIcon message={profileError} style={{ marginBottom: 16 }} />
+        )}
+        <Form form={profileForm} layout="vertical">
+          <Form.Item
+            name="name"
+            label="姓名"
+            rules={[{ required: true, message: '请输入姓名' }]}
+          >
+            <Input maxLength={50} />
+          </Form.Item>
+          <Form.Item label="登录邮箱">
+            <Input value={user?.email} disabled />
+          </Form.Item>
+          <Form.Item
+            name="phone"
+            label={`手机号（当前 ${user?.phone_masked || '未登记'}）`}
+            extra="留空表示不修改；修改后必须是有效的中国大陆手机号。"
+            rules={[
+              {
+                validator: async (_, value: string | undefined) => {
+                  if (!value?.trim()) return
+                  normalizePhone(value)
+                },
+              },
+            ]}
+          >
+            <Input maxLength={20} placeholder="输入新手机号" />
+          </Form.Item>
+        </Form>
+        <Space direction="vertical" size={4}>
           <div><Text type="secondary">租户：</Text>{tenant?.name || '平台管理'}</div>
           <div><Text type="secondary">角色：</Text>{role ? ROLE_LABELS[role] : '—'}</div>
         </Space>
@@ -313,21 +392,19 @@ export default function AppLayout() {
           style={{ borderInlineEnd: 'none', paddingTop: 8 }}
         />
 
-        {!collapsed && (
-          <div
-            style={{
-              position: 'absolute',
-              bottom: 0,
-              left: 0,
-              right: 0,
-              padding: 10,
-              borderTop: '1px solid #f1f5f9',
-              background: '#fafbfc',
-            }}
-          >
-            <AccountMenu />
-          </div>
-        )}
+        <div
+          style={{
+            position: 'absolute',
+            bottom: 0,
+            left: 0,
+            right: 0,
+            padding: collapsed ? '10px 8px' : 10,
+            borderTop: '1px solid #f1f5f9',
+            background: '#fafbfc',
+          }}
+        >
+          <AccountMenu compact={collapsed} />
+        </div>
       </Sider>
 
       <Layout>

@@ -164,6 +164,18 @@ $env:BOOTSTRAP_ADMIN_PASSWORD="ReplaceWithAStrongPassword1"
 平台管理员登录后审核新组织注册申请；租户管理员登录后创建规则集、添加文档类型和审查规则。
 正常入口为 <http://localhost:5173>。
 
+从旧版单租户升级时，存量规则、合同、文档和图谱会迁入 `默认租户`。平台管理员按设计
+不能读取租户业务数据，因此必须再显式初始化一个独立的默认租户管理员：
+
+```powershell
+$env:BOOTSTRAP_TENANT_ADMIN_EMAIL="legacy-admin@example.com"
+$env:BOOTSTRAP_TENANT_ADMIN_PHONE="13800138000"
+$env:BOOTSTRAP_TENANT_ADMIN_PASSWORD="ReplaceWithAStrongPassword1"
+.\.venv\Scripts\python.exe -m app.bootstrap default-tenant-admin
+```
+
+该命令可安全重复执行：同一账号会恢复为有效租户管理员，不会自动把平台管理员提升为租户用户。
+
 > 完成首次依赖安装后，也可以在仓库根目录运行 `start_services.bat` 同时启动前后端。
 
 ## Docker 部署
@@ -200,7 +212,7 @@ bash deploy.sh down       # 停止服务
 | `LLM_API_KEY` | 空 | LLM/OCR 服务密钥，必填 |
 | `APP_SECRET_KEY` | 空 | 至少 32 字符的随机密钥；生产缺少时拒绝启动 |
 | `PUBLIC_BASE_URL` | `https://docs.example.com` | 邀请/验证/重置链接和 Origin 校验的对外地址 |
-| `EMAIL_BACKEND` | `smtp` | `smtp`、`console`（仅开发）或 `outbox`（测试） |
+| `EMAIL_BACKEND` | `smtp` | 开发可用 `console`/`outbox`；生产只允许 `smtp` |
 | `SMTP_HOST` / `MAIL_FROM` | 空 | 生产 SMTP 必填 |
 | `SESSION_IDLE_MINUTES` | `120` | 会话空闲超时 |
 | `SESSION_ABSOLUTE_HOURS` | `12` | 会话绝对有效期 |
@@ -262,6 +274,8 @@ DocGraph/
 - 所有业务 API 都要求登录和服务端权限校验；仅健康检查、版本和公开认证接口豁免。
 - 生产环境必须通过 HTTPS 入口访问，并正确配置 `PUBLIC_BASE_URL`；HSTS 应在 TLS 终结层启用。
 - 首次平台管理员只能通过一次性 `python -m app.bootstrap` 创建，禁止使用固定默认口令。
+- 存量升级后必须执行 `python -m app.bootstrap default-tenant-admin`，否则默认租户业务数据无人可访问。
+- PostgreSQL、Neo4j 端口只绑定宿主机回环地址；生产脚本拒绝默认/示例数据库口令。
 - `backend/.env`、上传的真实单证和数据库卷包含敏感信息，不应提交到 Git。
 - 上线前应保存 PostgreSQL、Neo4j 和上传卷备份，并定期检查安全审计日志。
 

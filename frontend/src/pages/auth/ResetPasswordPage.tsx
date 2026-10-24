@@ -1,8 +1,9 @@
 import { useState } from 'react'
 import { Alert, Button, Form, Input, Result } from 'antd'
-import { Link, useSearchParams } from 'react-router-dom'
+import { Link } from 'react-router-dom'
 import { authApi, getErrorMessage } from '../../api/client'
 import { isValidPassword } from '../../auth/validation'
+import { useOneTimeToken } from '../../auth/useOneTimeToken'
 import AuthShell from './AuthShell'
 
 interface ResetValues {
@@ -11,8 +12,7 @@ interface ResetValues {
 }
 
 export default function ResetPasswordPage() {
-  const [searchParams, setSearchParams] = useSearchParams()
-  const token = searchParams.get('token')
+  const token = useOneTimeToken()
   const [submitting, setSubmitting] = useState(false)
   const [complete, setComplete] = useState(false)
   const [error, setError] = useState('')
@@ -53,9 +53,6 @@ export default function ResetPasswordPage() {
     try {
       await authApi.resetPassword(token, values.password)
       setComplete(true)
-      const next = new URLSearchParams(searchParams)
-      next.delete('token')
-      setSearchParams(next, { replace: true })
     } catch (e) {
       setError(getErrorMessage(e, '密码重置失败'))
     } finally {

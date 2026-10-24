@@ -148,6 +148,7 @@ export default function MembersTab() {
 
   const revealPhone = async (kind: 'member' | 'invitation', id: string) => {
     setActionLoading(id)
+    setActionError(null)
     try {
       const response =
         kind === 'member'
@@ -190,6 +191,7 @@ export default function MembersTab() {
 
   const resendInvitation = async (invitation: Invitation) => {
     setActionLoading(invitation.id)
+    setActionError(null)
     try {
       await tenantMembersApi.resend(invitation.id)
       message.success('邀请已重新发送')
@@ -203,6 +205,7 @@ export default function MembersTab() {
 
   const revokeInvitation = async (invitation: Invitation) => {
     setActionLoading(invitation.id)
+    setActionError(null)
     try {
       await tenantMembersApi.revoke(invitation.id)
       message.success('邀请已撤销')

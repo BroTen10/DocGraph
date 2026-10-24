@@ -10,11 +10,9 @@ from sqlalchemy.orm import Session
 
 from ..models import AuditLog
 from ..observability import (
-    actor_user_id_var,
     request_id_var,
     request_ip_var,
     sanitize_metadata,
-    tenant_id_var,
 )
 
 logger = logging.getLogger(__name__)
@@ -31,16 +29,9 @@ def record(
     metadata: dict[str, Any] | None = None,
 ) -> AuditLog:
     """Add an audit row to the caller's transaction without committing it."""
-    effective_tenant = tenant_id
-    if effective_tenant is None and tenant_id_var.get():
-        effective_tenant = uuid.UUID(tenant_id_var.get())
-    effective_actor = actor_user_id
-    if effective_actor is None and actor_user_id_var.get():
-        effective_actor = uuid.UUID(actor_user_id_var.get())
-
     row = AuditLog(
-        tenant_id=effective_tenant,
-        actor_user_id=effective_actor,
+        tenant_id=tenant_id,
+        actor_user_id=actor_user_id,
         action=action,
         target_type=target_type,
         target_id=target_id,

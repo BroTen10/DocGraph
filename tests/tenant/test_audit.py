@@ -232,3 +232,42 @@ def test_failed_session_creation_does_not_audit_login_success(
             select(AuditLog).where(AuditLog.action == "auth.login.success")
         ).scalar_one_or_none()
     assert audit is None
+
+
+def test_tenant_admin_can_read_only_own_audit_logs(
+    client,
+    admin_auth,
+    admin_b,
+):
+    headers = authenticate(client, admin_auth)
+    response = client.get(
+        "/api/tenant/audit-logs",
+        params={"action": "profile.updated", "limit": 10},
+        headers=headers,
+    )
+    assert response.status_code == 200
+    assert response.json()["total"] == 0
+
+    client.put(
+        "/api/auth/profile",
+        json={"name": "审计管理员"},
+        headers={"X-CSRF-Token": admin_auth.csrf_token},
+    )
+    response = client.get(
+        "/api/tenant/audit-logs",
+        params={"action": "profile.updated", "limit": 10},
+        headers=headers,
+    )
+    assert response.status_code == 200
+    assert response.json()["total"] == 1
+    assert response.json()["items"][0]["action"] == "profile.updated"
+
+    headers_b = authenticate(client, admin_b)
+    other = client.get("/api/tenant/audit-logs", headers=headers_b)
+    assert other.status_code == 200
+    assert all(item["id"] != response.json()["items"][0]["id"] for item in other.json()["items"])
+
+
+def test_viewer_cannot_read_audit_logs(client, viewer_auth):
+    headers = authenticate(client, viewer_auth)
+    assert client.get("/api/tenant/audit-logs", headers=headers).status_code == 403

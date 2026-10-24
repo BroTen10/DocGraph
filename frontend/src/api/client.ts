@@ -31,6 +31,8 @@ import type {
   OcrTask,
   OcrTaskBrief,
   PromptOptimizeResult,
+  ProfileUpdateResponse,
+  AuditLogListResponse,
   RegisterTenantRequest,
   RegisterTenantResponse,
   RegistrationListResponse,
@@ -242,6 +244,8 @@ export const authApi = {
       clearCsrfToken()
     }
   },
+  updateProfile: (data: { name?: string; phone?: string }) =>
+    http.put<ProfileUpdateResponse>('/auth/profile', data).then((r) => r.data),
 }
 
 // ============ 租户成员 ============
@@ -253,7 +257,7 @@ export const tenantMembersApi = {
     http.patch<Member>(`/tenant/members/${membershipId}`, data).then((r) => r.data),
   revealPhone: (membershipId: string) =>
     http
-      .get<RevealedPhoneResponse>(`/tenant/members/${membershipId}/phone`)
+      .post<RevealedPhoneResponse>(`/tenant/members/${membershipId}/phone`)
       .then((r) => r.data),
   resend: (invitationId: string) =>
     http
@@ -261,11 +265,23 @@ export const tenantMembersApi = {
       .then((r) => r.data),
   revealInvitationPhone: (invitationId: string) =>
     http
-      .get<RevealedPhoneResponse>(`/tenant/members/invitations/${invitationId}/phone`)
+      .post<RevealedPhoneResponse>(`/tenant/members/invitations/${invitationId}/phone`)
       .then((r) => r.data),
   revoke: (invitationId: string) =>
     http
       .delete<{ success: boolean }>(`/tenant/members/invitations/${invitationId}`)
+      .then((r) => r.data),
+}
+
+export const tenantAuditApi = {
+  list: (params?: {
+    action?: string
+    actor_user_id?: string
+    offset?: number
+    limit?: number
+  }) =>
+    http
+      .get<AuditLogListResponse>('/tenant/audit-logs', { params })
       .then((r) => r.data),
 }
 

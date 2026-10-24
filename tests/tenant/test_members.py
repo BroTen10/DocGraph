@@ -2,11 +2,16 @@
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
+from threading import Barrier
+
 from conftest import authenticate
 from sqlalchemy import select
 
 from app.database import SessionLocal
-from app.models import AuditLog
+from app.models import AuditLog, TenantMembership
+from app.services import tenant_member_service
+from app.services.tenant_member_service import MemberOperationError
 
 
 def _raw_token_from_invite(delivered: dict) -> str:
@@ -34,6 +39,8 @@ def test_tenant_admin_invites_and_accepts_member(client, admin_auth, monkeypatch
     )
     assert invited.status_code == 201
     assert delivered["email"] == "wang@example.com"
+    assert "/accept-invite#token=" in delivered["url"]
+    assert "?token=" not in delivered["url"]
 
     raw_token = _raw_token_from_invite(delivered)
     accepted = client.post(
@@ -103,7 +110,7 @@ def test_member_list_is_tenant_scoped(client, admin_auth, admin_b):
 
 def test_reveal_member_phone_is_scoped_and_audited(client, admin_auth, admin_b):
     headers = authenticate(client, admin_auth)
-    response = client.get(
+    response = client.post(
         f"/api/tenant/members/{admin_auth.membership_id}/phone",
         headers=headers,
     )
@@ -124,7 +131,7 @@ def test_reveal_member_phone_is_scoped_and_audited(client, admin_auth, admin_b):
         assert str(audit.target_id) == str(admin_auth.membership_id)
 
     headers = authenticate(client, admin_b)
-    assert client.get(
+    assert client.post(
         f"/api/tenant/members/{admin_auth.membership_id}/phone",
         headers=headers,
     ).status_code == 404
@@ -150,7 +157,7 @@ def test_reveal_invitation_phone_is_audited(client, admin_auth, monkeypatch):
     invitation_id = invited.json()["id"]
     assert "phone" not in invited.json()
 
-    revealed = client.get(
+    revealed = client.post(
         f"/api/tenant/members/invitations/{invitation_id}/phone",
         headers=headers,
     )
@@ -165,3 +172,51 @@ def test_reveal_invitation_phone_is_audited(client, admin_auth, monkeypatch):
             )
         ).scalars().first()
         assert audit is not None
+
+
+def test_concurrent_admin_demotions_keep_one_admin(
+    two_tenants,
+    admin_auth,
+    make_auth_fixture,
+):
+    tenant_id = two_tenants[0].id
+    second_admin = make_auth_fixture(
+        tenant_id,
+        "tenant_admin",
+        "second-admin@example.com",
+    )
+    barrier = Barrier(2)
+
+    def demote(membership_id):
+        with SessionLocal() as db:
+            barrier.wait(timeout=5)
+            try:
+                tenant_member_service.update_member(
+                    db,
+                    admin_auth.user_id,
+                    tenant_id,
+                    membership_id,
+                    role="viewer",
+                )
+                return "updated"
+            except MemberOperationError as exc:
+                return exc.code
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        results = list(
+            executor.map(
+                demote,
+                [admin_auth.membership_id, second_admin.membership_id],
+            )
+        )
+
+    assert sorted(results) == ["LAST_TENANT_ADMIN", "updated"]
+    with SessionLocal() as db:
+        active_admins = db.execute(
+            select(TenantMembership).where(
+                TenantMembership.tenant_id == tenant_id,
+                TenantMembership.role == "tenant_admin",
+                TenantMembership.status == "active",
+            )
+        ).scalars().all()
+        assert len(active_admins) == 1

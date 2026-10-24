@@ -12,6 +12,7 @@ from app.database import SessionLocal
 from app.models import (
     AuthSession,
     Tenant,
+    TenantMembership,
     TenantRegistrationRequest,
     UserAccount,
 )
@@ -318,3 +319,42 @@ def test_bootstrap_rejects_missing_or_invalid_phone(migrated_db, monkeypatch):
             )
         ).scalar_one()
         assert count == 0
+
+
+def test_bootstrap_creates_default_tenant_admin(client, migrated_db, monkeypatch):
+    monkeypatch.setenv("BOOTSTRAP_TENANT_ADMIN_EMAIL", "legacy-admin@example.com")
+    monkeypatch.setenv("BOOTSTRAP_TENANT_ADMIN_PHONE", "136-0013-6000")
+    monkeypatch.setenv("BOOTSTRAP_TENANT_ADMIN_PASSWORD", "LegacyAdmin2026")
+    monkeypatch.setattr("app.database.init_db", lambda: None)
+
+    assert bootstrap.main(["default-tenant-admin"]) == 0
+
+    with SessionLocal() as db:
+        tenant = db.execute(
+            select(Tenant).where(Tenant.code == "default")
+        ).scalar_one()
+        user = db.execute(
+            select(UserAccount).where(
+                UserAccount.email_normalized == "legacy-admin@example.com"
+            )
+        ).scalar_one()
+        membership = db.execute(
+            select(TenantMembership).where(
+                TenantMembership.tenant_id == tenant.id,
+                TenantMembership.user_id == user.id,
+            )
+        ).scalar_one()
+        assert membership.role == "tenant_admin"
+        assert membership.status == "active"
+        assert user.phone_e164 == "+8613600136000"
+
+    login = client.post(
+        "/api/auth/login",
+        json={
+            "email": "legacy-admin@example.com",
+            "password": "LegacyAdmin2026",
+        },
+    )
+    assert login.status_code == 200
+    assert login.json()["role"] == "tenant_admin"
+    assert login.json()["tenant"]["name"] == "默认租户"

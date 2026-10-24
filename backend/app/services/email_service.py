@@ -76,4 +76,3 @@ def _send_smtp(
 def clear_outbox() -> None:
     """Remove captured outbox messages. Used by tests and local tooling."""
     OUTBOX.clear()
-

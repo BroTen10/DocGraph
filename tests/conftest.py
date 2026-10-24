@@ -133,6 +133,7 @@ def authenticate(client, auth: AuthFixture) -> dict[str, str]:
 @pytest.fixture
 def make_auth_fixture(migrated_db):
     from app.auth.security import hash_password, new_token
+    from app.auth.session_tokens import session_token_hash
     from app.models import AuthSession, TenantMembership, UserAccount
 
     def factory(tenant_id, role, email, membership=None):
@@ -155,13 +156,13 @@ def make_auth_fixture(migrated_db):
             )
             migrated_db.add(membership)
             migrated_db.flush()
-        raw_session, session_hash = new_token()
+        raw_session, _ = new_token()
         raw_csrf, csrf_hash = new_token()
         migrated_db.add(
             AuthSession(
                 user_id=user.id,
                 tenant_id=tenant_id,
-                token_hash=session_hash,
+                token_hash=session_token_hash(raw_session),
                 csrf_hash=csrf_hash,
                 expires_at=_utcnow() + timedelta(hours=12),
                 idle_expires_at=_utcnow() + timedelta(hours=2),
@@ -241,6 +242,7 @@ def active_tenant_user(migrated_db):
 @pytest.fixture
 def platform_auth(migrated_db):
     from app.auth.security import hash_password, new_token
+    from app.auth.session_tokens import session_token_hash
     from app.models import AuthSession, UserAccount
 
     user = UserAccount(
@@ -253,13 +255,13 @@ def platform_auth(migrated_db):
     )
     migrated_db.add(user)
     migrated_db.flush()
-    raw_session, session_hash = new_token()
+    raw_session, _ = new_token()
     raw_csrf, csrf_hash = new_token()
     migrated_db.add(
         AuthSession(
             user_id=user.id,
             tenant_id=None,
-            token_hash=session_hash,
+            token_hash=session_token_hash(raw_session),
             csrf_hash=csrf_hash,
             expires_at=_utcnow() + timedelta(hours=12),
             idle_expires_at=_utcnow() + timedelta(hours=2),

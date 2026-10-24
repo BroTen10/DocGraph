@@ -38,6 +38,8 @@ def test_register_then_verify_enters_review_queue(client, monkeypatch):
     response = _register(client)
     assert response.status_code == 202
     assert delivered["email"] == "zhang@example.com"
+    assert "/verify-email#token=" in delivered["url"]
+    assert "?token=" not in delivered["url"]
 
     token = delivered["url"].split("token=", 1)[1]
     verified = client.post("/api/auth/verify-email", json={"token": token})
@@ -174,4 +176,3 @@ def test_expired_verification_token_is_rejected(client, monkeypatch):
 
     expired = client.post("/api/auth/verify-email", json={"token": token})
     assert expired.status_code == 400
-

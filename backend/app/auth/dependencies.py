@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Any
 
 from fastapi import Depends, HTTPException, Request
@@ -13,6 +14,7 @@ from sqlalchemy.orm import Session
 from ..database import get_db
 from ..models import Tenant, TenantMembership, UserAccount
 from ..observability import bind_principal
+from ..tenant_scope import bind_tenant
 from .permissions import permissions_for
 from .session_tokens import get_active_session, touch_session
 
@@ -41,6 +43,9 @@ def get_auth_context(
     user = db.get(UserAccount, session.user_id)
     if user is None:
         raise HTTPException(status_code=401, detail="账号不存在")
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    if user.locked_until is not None and user.locked_until > now:
+        raise HTTPException(status_code=403, detail="账号已锁定")
 
     tenant: Tenant | None = None
     membership: TenantMembership | None = None
@@ -62,6 +67,7 @@ def get_auth_context(
     elif not user.is_platform_admin:
         raise HTTPException(status_code=403, detail="账号状态异常")
 
+    bind_tenant(db, tenant.id if tenant is not None else None)
     touch_session(db, session)
     bind_principal(user.id, tenant.id if tenant is not None else None)
     request.state.actor_user_id = str(user.id)

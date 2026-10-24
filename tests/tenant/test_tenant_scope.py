@@ -6,8 +6,9 @@ from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.database import Base, engine
+from app.database import SessionLocal
 from app.models.mixins import TenantOwnedMixin
-from app.tenant_scope import bind_tenant, tenant_get, tenant_select
+from app.tenant_scope import bind_tenant, current_tenant_id, tenant_get, tenant_select
 
 
 class ScopedRecord(TenantOwnedMixin, Base):
@@ -71,3 +72,30 @@ def test_before_flush_assigns_or_blocks_tenant(migrated_db, two_tenants):
         migrated_db.rollback()
     finally:
         migrated_db.info.pop("tenant_id", None)
+
+
+def test_authenticated_context_binds_request_session_to_tenant(admin_auth):
+    from starlette.requests import Request
+    from app.auth.dependencies import get_auth_context
+
+    request = Request(
+        {
+            "type": "http",
+            "method": "GET",
+            "path": "/api/contracts",
+            "headers": [
+                (
+                    b"cookie",
+                    f"docgraph_session={admin_auth.session_token}".encode("ascii"),
+                )
+            ],
+            "client": ("127.0.0.1", 12345),
+            "server": ("testserver", 80),
+            "scheme": "http",
+            "query_string": b"",
+        }
+    )
+    with SessionLocal() as db:
+        ctx = get_auth_context(request, db)
+        assert current_tenant_id(db) == admin_auth.tenant_id
+        assert ctx.tenant.id == admin_auth.tenant_id

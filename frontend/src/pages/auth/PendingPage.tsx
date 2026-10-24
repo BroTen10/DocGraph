@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState } from 'react'
 import { Alert, Result, Spin } from 'antd'
-import { Link, useLocation, useSearchParams } from 'react-router-dom'
+import { Link, useLocation } from 'react-router-dom'
 import { authApi, getErrorMessage } from '../../api/client'
+import { useOneTimeToken } from '../../auth/useOneTimeToken'
 
 type PendingStatus = 'pending_email' | 'pending_review' | 'rejected' | 'verified' | 'error'
 
@@ -29,9 +30,8 @@ const COPY: Record<PendingStatus, { title: string; subTitle: string }> = {
 }
 
 export default function PendingPage() {
-  const [searchParams, setSearchParams] = useSearchParams()
   const location = useLocation()
-  const token = searchParams.get('token')
+  const token = useOneTimeToken()
   const initialStatus = token
     ? 'verified'
     : (location.state as { status?: PendingStatus } | null)?.status ?? 'pending_email'
@@ -60,15 +60,12 @@ export default function PendingPage() {
       .finally(() => {
         if (active) {
           setVerifying(false)
-          const next = new URLSearchParams(searchParams)
-          next.delete('token')
-          setSearchParams(next, { replace: true })
         }
       })
     return () => {
       active = false
     }
-  }, [searchParams, setSearchParams, token])
+  }, [token])
 
   if (verifying) {
     return (

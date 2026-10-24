@@ -8,10 +8,10 @@ services:
     environment:
       POSTGRES_DB: ${PG_DB:-doc_review}
       POSTGRES_USER: ${PG_USER:-postgres}
-      POSTGRES_PASSWORD: ${PG_PASSWORD:-postgres}
+      POSTGRES_PASSWORD: ${PG_PASSWORD:?PG_PASSWORD must be set}
       TZ: Asia/Shanghai
     ports:
-      - "${PG_PORT:-15432}:5432"
+      - "127.0.0.1:${PG_PORT:-15432}:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
@@ -25,14 +25,14 @@ services:
     container_name: doc-review-neo4j
     restart: unless-stopped
     environment:
-      NEO4J_AUTH: ${NEO4J_USER:-neo4j}/${NEO4J_PASSWORD:-neo4jpassword}
+      NEO4J_AUTH: ${NEO4J_USER:-neo4j}/${NEO4J_PASSWORD:?NEO4J_PASSWORD must be set}
       NEO4J_server_memory_heap_initial__size: 512m
       NEO4J_server_memory_heap_max__size: 1G
       NEO4J_server_memory_pagecache_size: 512m
       TZ: Asia/Shanghai
     ports:
-      - "7474:7474"
-      - "${NEO4J_BOLT_PORT:-17687}:7687"
+      - "127.0.0.1:7474:7474"
+      - "127.0.0.1:${NEO4J_BOLT_PORT:-17687}:7687"
     volumes:
       - neo4j_data:/data
       - neo4j_logs:/logs

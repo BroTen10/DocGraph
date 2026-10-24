@@ -50,7 +50,9 @@ class SlidingWindowLimiter:
 
 
 _LOGIN_LIMITER = SlidingWindowLimiter(limit=10, window_seconds=60)
+_LOGIN_IP_LIMITER = SlidingWindowLimiter(limit=30, window_seconds=60)
 _PUBLIC_ACTION_LIMITER = SlidingWindowLimiter(limit=5, window_seconds=60)
+_TOKEN_ACTION_LIMITER = SlidingWindowLimiter(limit=10, window_seconds=60)
 
 
 def _valid_ip(value: str | None) -> str | None:
@@ -104,7 +106,9 @@ def _client_key(ip: str | None) -> str:
 
 
 def enforce_login_rate(ip: str | None, email: str) -> None:
-    """Enforce login limits by IP and canonical email."""
+    """Enforce independent IP and IP+account login buckets."""
+    if not _LOGIN_IP_LIMITER.allow(_client_key(ip)):
+        raise HTTPException(status_code=429, detail="登录尝试过于频繁，请稍后再试")
     key = f"{_client_key(ip)}:{email.strip().lower()}"
     if not _LOGIN_LIMITER.allow(key):
         raise HTTPException(status_code=429, detail="登录尝试过于频繁，请稍后再试")
@@ -119,7 +123,15 @@ def enforce_public_action_rate(ip: str | None) -> None:
         )
 
 
+def enforce_token_action_rate(ip: str | None) -> None:
+    """Limit email verification and invitation token attempts by IP."""
+    if not _TOKEN_ACTION_LIMITER.allow(_client_key(ip)):
+        raise HTTPException(status_code=429, detail="操作过于频繁，请稍后再试")
+
+
 def reset_limiters() -> None:
     """Clear limiter state; intended for tests and single-process restarts."""
     _LOGIN_LIMITER.reset()
+    _LOGIN_IP_LIMITER.reset()
     _PUBLIC_ACTION_LIMITER.reset()
+    _TOKEN_ACTION_LIMITER.reset()

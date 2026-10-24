@@ -33,7 +33,7 @@ def list_members(
     return MemberListResponse(**tenant_member_service.list_members(db, ctx.tenant.id))
 
 
-@router.get("/{membership_id}/phone", response_model=RevealedPhoneResponse)
+@router.post("/{membership_id}/phone", response_model=RevealedPhoneResponse)
 def reveal_member_phone(
     membership_id: uuid.UUID,
     request: Request,
@@ -118,7 +118,7 @@ def resend_invitation(
     return InvitationOut(**tenant_member_service.invitation_to_dict(invitation))
 
 
-@router.get("/invitations/{invitation_id}/phone", response_model=RevealedPhoneResponse)
+@router.post("/invitations/{invitation_id}/phone", response_model=RevealedPhoneResponse)
 def reveal_invitation_phone(
     invitation_id: uuid.UUID,
     request: Request,

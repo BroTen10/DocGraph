@@ -8,8 +8,8 @@
 | --- | --- | --- | --- |
 | `frontend` | `frontend/Dockerfile`（node 构建 → nginx:1.27-alpine） | `${FRONTEND_HOST_PORT:-8080}` | 统一对外入口，托管 SPA 并反代 `/api` 到 backend |
 | `backend` | `backend/Dockerfile`（python:3.12-slim + uvicorn） | `127.0.0.1:${BACKEND_HOST_PORT:-8800}` | 只绑回环；API 有认证和租户权限，统一经 nginx 访问 |
-| `postgres` | `public.ecr.aws/docker/library/postgres:16-alpine` | `15432` | 卷 `postgres_data` |
-| `neo4j` | `public.ecr.aws/docker/library/neo4j:5.26.0-community` | `7474` / `17687` | 卷 `neo4j_data`、`neo4j_logs` |
+| `postgres` | `public.ecr.aws/docker/library/postgres:16-alpine` | `127.0.0.1:15432` | 卷 `postgres_data`；不得暴露到公网 |
+| `neo4j` | `public.ecr.aws/docker/library/neo4j:5.26.0-community` | `127.0.0.1:7474` / `127.0.0.1:17687` | 卷 `neo4j_data`、`neo4j_logs`；不得暴露到公网 |
 | 上传文件 | 卷 `uploads_data` → 容器 `/data/uploads` | — | `UPLOAD_ROOT` 由 compose 注入 |
 
 ## 步骤
@@ -30,7 +30,8 @@
    - `APP_SECRET_KEY`：至少 32 字符的随机值，不能使用示例值；
    - `PUBLIC_BASE_URL`：已完成 TLS 的 `https://` 对外地址；
    - `EMAIL_BACKEND=smtp` 以及 `SMTP_HOST`、`MAIL_FROM`、SMTP 凭据；
-   - `LLM_API_KEY` 和一致的 `PG_PASSWORD`；
+   - `LLM_API_KEY`；
+   - 强随机且非示例值的 `PG_PASSWORD` 与 `NEO4J_PASSWORD`；
    - `DB_RESET_ON_STARTUP=false`。
 
    首次部署在数据库启动后执行一次平台管理员初始化：
@@ -45,12 +46,22 @@
 
    `BOOTSTRAP_ADMIN_PASSWORD` 必须包含字母和数字且长于 10 位；命令不会打印口令。
 
+   如果这是从旧版单租户升级，启动迁移会把全部存量业务数据归入默认租户。
+   平台管理员不能直接读取这些数据，必须再初始化一个独立的默认租户管理员：
+
+   ```bash
+   BOOTSTRAP_TENANT_ADMIN_EMAIL=legacy-admin@example.com \
+   BOOTSTRAP_TENANT_ADMIN_PHONE=13800138000 \
+   BOOTSTRAP_TENANT_ADMIN_PASSWORD='ReplaceWithAStrongPassword1' \
+   python -m app.bootstrap default-tenant-admin
+   ```
+
    **数据库口令只有一份来源**：`deploy.sh` 用 `docker compose --env-file backend/.env` 启动，
    所以 compose 里的 `POSTGRES_PASSWORD`、`NEO4J_AUTH` 与后端进程读到的 `PG_PASSWORD`、
    `NEO4J_PASSWORD` 一定同值。注意 compose 变量优先级是 **shell 环境 > `--env-file` > 根目录 `.env`**，
    如果 shell 里 export 过同名变量，会覆盖 `backend/.env`（脚本会提示）。
-   手工敲 `docker compose up -d` 而不带 `--env-file` 时，会用根目录 `.env` 或内置默认值
-   （`postgres` / `neo4jpassword`）初始化数据库，后端随即认证失败 —— 请统一走 `bash deploy.sh`。
+   手工敲 `docker compose up -d` 而不带 `--env-file` 时，Compose 会因缺少数据库口令而拒绝启动；
+   请统一带 `--env-file backend/.env` 或走 `bash deploy.sh`。
 
 4. 执行部署（幂等，可反复跑）：
 
@@ -84,7 +95,7 @@ bash deploy.sh                 # 校验 → dc build 重建 backend 镜像 → u
 - **幂等、无数据风险**：可反复执行；`backend/.env` 与数据卷（`postgres_data` / `neo4j_data` / `uploads_data`）都不受影响。
 - **升级前必须备份**：PostgreSQL、Neo4j 和上传卷三者应同时备份。启动时的安全迁移会把存量业务数据归入默认租户并新增租户约束；迁移失败会阻止继续服务，禁止用重置清库绕过。
 - **systemd + nginx 形态**（腾讯云那份指引）：`git pull` → `sudo systemctl restart docgraph-backend`；依赖有变化才重建 venv，前端有改动才 `npm ci && npm run build` 并重新拷贝 `dist`。
-- **升级后自检**：`bash deploy.sh check` 通过，并在「系统设置 → 运行参数」能看到随版本新增的开关（例如 `LLM 全量复核（只提异议，不改判）`，默认关闭）。新增开关只写数据库 `system_settings`，不需要改 `.env` 或 compose。
+- **升级后自检**：`bash deploy.sh check` 会确认公开健康接口可用，并确认受保护业务接口未登录返回 `401`；任何非预期状态都会使检查失败。随后执行 `default-tenant-admin` 初始化，并在「系统设置 → 运行参数」检查新增开关。
 
 ### 升级前后的版本核对
 
@@ -139,13 +150,13 @@ OCR 与审查任务都跑在进程内后台线程，因此**容器/进程重启�
 
 | 用途 | 命令 | 形态 |
 | --- | --- | --- |
-| 日常开发（主力） | `docker compose up -d postgres neo4j` + `start_services.bat` | 后端 `backend\.venv` 跑 uvicorn `--reload`（8800），前端 Vite dev server（5173），改代码即时生效 |
+| 日常开发（主力） | `docker compose --env-file backend/.env up -d postgres neo4j` + `start_services.bat` | 后端 `backend\.venv` 跑 uvicorn `--reload`（8800），前端 Vite dev server（5173），改代码即时生效 |
 | 发布前预演 / 环境对齐 | `BACKEND_HOST_PORT=8811 docker compose --profile deploy up -d --build backend frontend` | 容器化形态（前端 8080、后端 8811），与服务器同一套镜像与 Linux 依赖 |
 | 只收容器、留数据库 | `docker compose --profile deploy rm -sf backend frontend` | 容器删除，`postgres`/`neo4j` 与数据卷不受影响 |
 
-注意：`deploy.sh` 用 `--env-file backend/.env` 解析数据库口令，裸 `docker compose` 则用内置默认值
-（`postgres` / `neo4jpassword`），两套口令解析结果不同，会让 `postgres`/`neo4j` 容器被**重建一次**
-（数据卷不动、数据不丢，但数据库会重启几十秒）。本机想避免这次重建，就把本地命令也写成
+注意：PostgreSQL 与 Neo4j 不再提供默认口令。所有 Compose 命令都应使用
+`--env-file backend/.env`，否则 Compose 会因 `PG_PASSWORD` / `NEO4J_PASSWORD` 缺失而拒绝解析。
+本机命令应统一写成
 `docker compose --env-file backend/.env up -d postgres neo4j`。
 
 两者同时跑要注意三点：
