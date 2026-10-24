@@ -12,23 +12,28 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 
-from sqlalchemy import Boolean, DateTime, String, Text, func
+from sqlalchemy import Boolean, DateTime, String, Text, UniqueConstraint, func
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
 from ..database import Base
+from .mixins import TenantOwnedMixin
 
 
-class DocumentType(Base):
+class DocumentType(TenantOwnedMixin, Base):
     """文档类型定义。"""
 
     __tablename__ = "document_types"
+    __table_args__ = (
+        UniqueConstraint("id", "tenant_id", name="uq_document_types_id_tenant"),
+        UniqueConstraint("tenant_id", "name", name="uq_document_types_tenant_name"),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
     )
-    # 文档类型名称（唯一），如"代理协议"
-    name: Mapped[str] = mapped_column(String(64), unique=True, nullable=False, index=True)
+    # 文档类型名称（租户内唯一），如"代理协议"
+    name: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
     # 简短描述
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
     # 类型类别：required（必备）/ supporting（配套）/ other（其他/多余）

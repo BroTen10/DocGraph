@@ -5,23 +5,33 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 
-from sqlalchemy import DateTime, Float, ForeignKey, String, Text, func
+from sqlalchemy import DateTime, Float, ForeignKeyConstraint, String, Text, UniqueConstraint, func
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from ..database import Base
+from .mixins import TenantOwnedMixin
 
 
-class Document(Base):
+class Document(TenantOwnedMixin, Base):
     """单个上传的业务文件。"""
 
     __tablename__ = "documents"
+    __table_args__ = (
+        UniqueConstraint("id", "tenant_id", name="uq_documents_id_tenant"),
+        ForeignKeyConstraint(
+            ["contract_id", "tenant_id"],
+            ["contracts.id", "contracts.tenant_id"],
+            name="fk_documents_contract_tenant",
+            ondelete="CASCADE",
+        ),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
     )
     contract_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("contracts.id", ondelete="CASCADE"), index=True
+        UUID(as_uuid=True), index=True
     )
     file_name: Mapped[str] = mapped_column(String(512), nullable=False)
     file_path: Mapped[str] = mapped_column(String(1024), nullable=False)
@@ -53,7 +63,10 @@ class Document(Base):
 
     contract: Mapped["Contract"] = relationship("Contract", back_populates="documents")
     review_results: Mapped[list["ReviewResult"]] = relationship(
-        "ReviewResult", back_populates="document", cascade="all, delete-orphan"
+        "ReviewResult",
+        back_populates="document",
+        cascade="all, delete-orphan",
+        overlaps="task,document",
     )
 
     def __repr__(self) -> str:  # pragma: no cover

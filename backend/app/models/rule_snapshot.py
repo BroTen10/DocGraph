@@ -5,17 +5,27 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 
-from sqlalchemy import DateTime, ForeignKey, Integer, String, Text, func
+from sqlalchemy import DateTime, ForeignKeyConstraint, Integer, String, Text, UniqueConstraint, func
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from ..database import Base
+from .mixins import TenantOwnedMixin
 
 
-class RuleSnapshot(Base):
+class RuleSnapshot(TenantOwnedMixin, Base):
     """规则集快照：每次"一键重建图谱"时保存当前启用规则集。"""
 
     __tablename__ = "rule_snapshots"
+    __table_args__ = (
+        UniqueConstraint("id", "tenant_id", name="uq_rule_snapshots_id_tenant"),
+        ForeignKeyConstraint(
+            ["rule_set_id", "tenant_id"],
+            ["rule_sets.id", "rule_sets.tenant_id"],
+            name="fk_rule_snapshots_rule_set_tenant",
+            ondelete="CASCADE",
+        ),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
@@ -23,7 +33,6 @@ class RuleSnapshot(Base):
     # 所属规则集（命名空间），删除规则集时级联删除快照
     rule_set_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True),
-        ForeignKey("rule_sets.id", ondelete="CASCADE"),
         index=True,
         nullable=False,
     )

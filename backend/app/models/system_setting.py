@@ -9,8 +9,10 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import DateTime, String, Text, func
-from sqlalchemy.dialects.postgresql import JSONB
+import uuid
+
+from sqlalchemy import DateTime, ForeignKey, String, Text, func
+from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
 from ..database import Base
@@ -21,6 +23,12 @@ class SystemSetting(Base):
 
     __tablename__ = "system_settings"
 
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("tenants.id", ondelete="CASCADE"),
+        primary_key=True,
+        index=True,
+    )
     # 设置键，如 ocr.image.system / review.amount_tolerance_percent
     key: Mapped[str] = mapped_column(String(128), primary_key=True)
     # 设置值（JSONB：字符串/数值/布尔/数组）

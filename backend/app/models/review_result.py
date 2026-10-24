@@ -5,23 +5,39 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 
-from sqlalchemy import DateTime, Float, ForeignKey, String, Text, func
+from sqlalchemy import DateTime, Float, ForeignKeyConstraint, String, Text, UniqueConstraint, func
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from ..database import Base
+from .mixins import TenantOwnedMixin
 
 
-class ReviewResult(Base):
+class ReviewResult(TenantOwnedMixin, Base):
     """单条规则的审查结果。三态：pass / fail / unverifiable。"""
 
     __tablename__ = "review_results"
+    __table_args__ = (
+        UniqueConstraint("id", "tenant_id", name="uq_review_results_id_tenant"),
+        ForeignKeyConstraint(
+            ["task_id", "tenant_id"],
+            ["review_tasks.id", "review_tasks.tenant_id"],
+            name="fk_review_results_task_tenant",
+            ondelete="CASCADE",
+        ),
+        ForeignKeyConstraint(
+            ["doc_id", "tenant_id"],
+            ["documents.id", "documents.tenant_id"],
+            name="fk_review_results_doc_tenant",
+            ondelete="NO ACTION",
+        ),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
     )
     task_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("review_tasks.id", ondelete="CASCADE"), index=True
+        UUID(as_uuid=True), index=True
     )
     # 关联规则（不强制外键，因为规则可能被删除/快照保留）
     rule_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True, index=True)
@@ -31,7 +47,7 @@ class ReviewResult(Base):
     check_category: Mapped[str | None] = mapped_column(String(32), nullable=True)
     # 关联文档（可空，齐套性等规则可能不绑定单个文档）
     doc_id: Mapped[uuid.UUID | None] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("documents.id", ondelete="SET NULL"), nullable=True
+        UUID(as_uuid=True), nullable=True
     )
     # 结果：pass / fail / unverifiable
     result: Mapped[str] = mapped_column(String(16), nullable=False, index=True)
@@ -63,8 +79,12 @@ class ReviewResult(Base):
         DateTime, server_default=func.now(), nullable=False
     )
 
-    task: Mapped["ReviewTask"] = relationship("ReviewTask", back_populates="results")
-    document: Mapped["Document | None"] = relationship("Document", back_populates="review_results")
+    task: Mapped["ReviewTask"] = relationship(
+        "ReviewTask", back_populates="results", overlaps="review_results"
+    )
+    document: Mapped["Document | None"] = relationship(
+        "Document", back_populates="review_results", overlaps="task"
+    )
 
     def __repr__(self) -> str:  # pragma: no cover
         return f"<ReviewResult [{self.result}]>"

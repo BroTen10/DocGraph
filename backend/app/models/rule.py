@@ -9,6 +9,7 @@ from sqlalchemy import (
     Boolean,
     DateTime,
     Float,
+    ForeignKeyConstraint,
     ForeignKey,
     Integer,
     String,
@@ -20,14 +21,22 @@ from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from ..database import Base
+from .mixins import TenantOwnedMixin
 
 
-class Rule(Base):
+class Rule(TenantOwnedMixin, Base):
     """审查规则：按"文件类型 × 检查项"二维组织，自然语言描述 + 容差参数。"""
 
     __tablename__ = "rules"
     __table_args__ = (
         UniqueConstraint("rule_set_id", "rule_no", name="uq_rules_rule_set_rule_no"),
+        UniqueConstraint("id", "tenant_id", name="uq_rules_id_tenant"),
+        ForeignKeyConstraint(
+            ["rule_set_id", "tenant_id"],
+            ["rule_sets.id", "rule_sets.tenant_id"],
+            name="fk_rules_rule_set_tenant",
+            ondelete="CASCADE",
+        ),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(
@@ -36,7 +45,6 @@ class Rule(Base):
     # 所属规则集（命名空间），删除规则集时级联删除规则
     rule_set_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True),
-        ForeignKey("rule_sets.id", ondelete="CASCADE"),
         index=True,
         nullable=False,
     )

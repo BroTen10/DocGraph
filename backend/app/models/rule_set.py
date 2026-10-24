@@ -9,14 +9,15 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 
-from sqlalchemy import Boolean, DateTime, Integer, String, Text, func
+from sqlalchemy import Boolean, DateTime, Index, Integer, String, Text, UniqueConstraint, func, text
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from ..database import Base
+from .mixins import TenantOwnedMixin
 
 
-class RuleSet(Base):
+class RuleSet(TenantOwnedMixin, Base):
     """规则集：一套独立的审查规则命名空间。
 
     一个 RuleSet 下挂载多个 Rule、RuleSnapshot、Contract，
@@ -24,12 +25,22 @@ class RuleSet(Base):
     """
 
     __tablename__ = "rule_sets"
+    __table_args__ = (
+        UniqueConstraint("id", "tenant_id", name="uq_rule_sets_id_tenant"),
+        UniqueConstraint("tenant_id", "name", name="uq_rule_sets_tenant_name"),
+        Index(
+            "uq_rule_sets_one_default_per_tenant",
+            "tenant_id",
+            unique=True,
+            postgresql_where=text("is_default"),
+        ),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
     )
-    # 规则集名称（唯一）
-    name: Mapped[str] = mapped_column(String(128), unique=True, nullable=False)
+    # 规则集名称（租户内唯一）
+    name: Mapped[str] = mapped_column(String(128), nullable=False)
     # 规则集描述
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
     # 适用文件类型清单，如 ["代理协议","委托单","报关单"]

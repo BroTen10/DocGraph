@@ -2,6 +2,7 @@
 
 import json
 import logging
+import uuid
 from collections.abc import Generator
 
 from sqlalchemy import create_engine, text
@@ -94,15 +95,18 @@ def init_db() -> None:
 
     # 增量迁移：新增列与表（create_all 不处理已有表的列变更）
     _run_migrations(engine)
+    from .migrations.security_v1 import apply_security_v1_migration
+
+    default_tenant = apply_security_v1_migration(engine)
     # 规则流水号回填与存量提示清洗
     _migrate_rule_numbering()
     # 方案 A：存量已确认规则的缺陷标记为"已处理"（确认即认可）
     _migrate_defect_resolution()
     # 种子数据：内置默认 Skill + 文档类型
     _seed_builtin_skill()
-    _seed_doc_types()
+    _seed_doc_types(default_tenant)
     # 批次 11：规范名/别名单源 + 存量清洗（幂等）
-    _migrate_canonical_types()
+    _migrate_canonical_types(default_tenant)
 
 
 def _run_migrations(engine) -> None:
@@ -398,7 +402,7 @@ def _seed_builtin_skill() -> None:
         logger.info("已 seed 内置默认 Skill: %s", skill.name)
 
 
-def _seed_doc_types() -> None:
+def _seed_doc_types(tenant_id: uuid.UUID) -> None:
     """种子数据：将 constants.py 中的硬编码文档类型写入 document_types 表。
 
     仅在表为空时写入，不覆盖已有数据（用户自定义的类型不会被冲掉）。
@@ -407,9 +411,13 @@ def _seed_doc_types() -> None:
     from sqlalchemy import select, func
 
     with SessionLocal() as db:
-        count = db.execute(select(func.count(DocumentType.id))).scalar()
+        count = db.execute(
+            select(func.count(DocumentType.id)).where(
+                DocumentType.tenant_id == tenant_id
+            )
+        ).scalar()
         if count and count > 0:
-            logger.info("document_types 表已有 %d 条记录，跳过种子", count)
+            logger.info("租户 %s 的 document_types 已有 %d 条记录，跳过种子", tenant_id, count)
             return
 
     from .constants import (
@@ -438,6 +446,7 @@ def _seed_doc_types() -> None:
         for idx, name in enumerate(ALL_DOC_TYPES):
             category, is_required = _seed_category(name)
             dt = DocumentType(
+                tenant_id=tenant_id,
                 name=name,
                 category=category,
                 is_required=is_required,
@@ -451,7 +460,7 @@ def _seed_doc_types() -> None:
         logger.info("已 seed %d 个内置文档类型", len(ALL_DOC_TYPES))
 
 
-def _migrate_canonical_types() -> None:
+def _migrate_canonical_types(tenant_id: uuid.UUID) -> None:
     """批次 11：规范名/别名单源 + 存量清洗（幂等，可重复执行）。
 
     1. 补齐内置规范类型（含此前缺失的"出口报关单"），写入内置 aliases/field_aliases 默认值；
@@ -472,7 +481,12 @@ def _migrate_canonical_types() -> None:
 
     with SessionLocal() as db:
         # ---- 1) 补齐内置规范类型 + 别名默认值 ----
-        existing = {dt.name: dt for dt in db.execute(select(DocumentType)).scalars()}
+        existing = {
+            dt.name: dt
+            for dt in db.execute(
+                select(DocumentType).where(DocumentType.tenant_id == tenant_id)
+            ).scalars()
+        }
         changed = False
         for name in C.ALL_DOC_TYPES:
             dt = existing.get(name)
@@ -488,6 +502,7 @@ def _migrate_canonical_types() -> None:
                 else:
                     category, is_required = "extra", False
                 dt = DocumentType(
+                    tenant_id=tenant_id,
                     name=name,
                     category=category,
                     is_required=is_required,
@@ -519,7 +534,11 @@ def _migrate_canonical_types() -> None:
                 logger.info("文档类型「%s」已并入「%s」的别名（置为 rejected）", alias, canonical)
 
         # ---- 3) 存量数据归一：文档 ----
-        for d in list(db.execute(select(Document)).scalars()):
+        for d in list(
+            db.execute(
+                select(Document).where(Document.tenant_id == tenant_id)
+            ).scalars()
+        ):
             dirty = False
             nt = normalize_doc_type(db, d.doc_type)
             if nt and nt != d.doc_type:
@@ -534,7 +553,11 @@ def _migrate_canonical_types() -> None:
                 db.commit()
 
         # ---- 3) 存量数据归一：规则 ----
-        for r in list(db.execute(select(Rule)).scalars()):
+        for r in list(
+            db.execute(
+                select(Rule).where(Rule.tenant_id == tenant_id)
+            ).scalars()
+        ):
             dirty = False
             if r.doc_type:
                 nt = normalize_doc_type(db, r.doc_type)
@@ -555,7 +578,11 @@ def _migrate_canonical_types() -> None:
                 db.commit()
 
         # ---- 3) 存量数据归一：规则集 doc_types ----
-        for rs in list(db.execute(select(RuleSet)).scalars()):
+        for rs in list(
+            db.execute(
+                select(RuleSet).where(RuleSet.tenant_id == tenant_id)
+            ).scalars()
+        ):
             nd = sorted(
                 {
                     normalize_doc_type(db, x) or str(x)

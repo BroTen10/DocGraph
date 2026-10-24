@@ -5,23 +5,39 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 
-from sqlalchemy import DateTime, ForeignKey, Integer, String, Text, func
+from sqlalchemy import DateTime, ForeignKeyConstraint, Integer, String, Text, UniqueConstraint, func
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from ..database import Base
+from .mixins import TenantOwnedMixin
 
 
-class ReviewTask(Base):
+class ReviewTask(TenantOwnedMixin, Base):
     """一次审查任务（一个合同触发一次）。"""
 
     __tablename__ = "review_tasks"
+    __table_args__ = (
+        UniqueConstraint("id", "tenant_id", name="uq_review_tasks_id_tenant"),
+        ForeignKeyConstraint(
+            ["contract_id", "tenant_id"],
+            ["contracts.id", "contracts.tenant_id"],
+            name="fk_review_tasks_contract_tenant",
+            ondelete="CASCADE",
+        ),
+        ForeignKeyConstraint(
+            ["snapshot_id", "tenant_id"],
+            ["rule_snapshots.id", "rule_snapshots.tenant_id"],
+            name="fk_review_tasks_snapshot_tenant",
+            ondelete="NO ACTION",
+        ),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
     )
     contract_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("contracts.id", ondelete="CASCADE"), index=True
+        UUID(as_uuid=True), index=True
     )
     start_time: Mapped[datetime] = mapped_column(
         DateTime, server_default=func.now(), nullable=False
@@ -35,7 +51,7 @@ class ReviewTask(Base):
     stage: Mapped[str | None] = mapped_column(String(128), nullable=True)
     # 使用的规则快照 ID
     snapshot_id: Mapped[uuid.UUID | None] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("rule_snapshots.id", ondelete="SET NULL"), nullable=True
+        UUID(as_uuid=True), nullable=True
     )
     # 汇总统计
     summary: Mapped[dict] = mapped_column(JSONB, default=dict, nullable=False)
@@ -43,7 +59,10 @@ class ReviewTask(Base):
 
     contract: Mapped["Contract"] = relationship("Contract", back_populates="review_tasks")
     results: Mapped[list["ReviewResult"]] = relationship(
-        "ReviewResult", back_populates="task", cascade="all, delete-orphan"
+        "ReviewResult",
+        back_populates="task",
+        cascade="all, delete-orphan",
+        overlaps="document,review_results",
     )
 
     def __repr__(self) -> str:  # pragma: no cover

@@ -5,17 +5,27 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 
-from sqlalchemy import DateTime, ForeignKey, String, Text, func
+from sqlalchemy import DateTime, ForeignKeyConstraint, String, Text, UniqueConstraint, func
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from ..database import Base
+from .mixins import TenantOwnedMixin
 
 
-class Contract(Base):
+class Contract(TenantOwnedMixin, Base):
     """合同记录（一个合同号 ↔ 一个文件夹 ↔ N 个文件）。"""
 
     __tablename__ = "contracts"
+    __table_args__ = (
+        UniqueConstraint("id", "tenant_id", name="uq_contracts_id_tenant"),
+        ForeignKeyConstraint(
+            ["rule_set_id", "tenant_id"],
+            ["rule_sets.id", "rule_sets.tenant_id"],
+            name="fk_contracts_rule_set_tenant",
+            ondelete="CASCADE",
+        ),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
@@ -23,7 +33,6 @@ class Contract(Base):
     # 所属规则集（命名空间），删除规则集时级联删除合同
     rule_set_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True),
-        ForeignKey("rule_sets.id", ondelete="CASCADE"),
         index=True,
         nullable=False,
     )
