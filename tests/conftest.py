@@ -19,8 +19,9 @@ if not _DATABASE_NAME.endswith("_test"):
     )
 
 os.environ["DATABASE_URL"] = _TEST_DSN
-os.environ["APP_DEBUG"] = "false"
+os.environ["APP_DEBUG"] = "true"
 os.environ["APP_SECRET_KEY"] = "test-only-secret-key-" + "x" * 48
+os.environ["SESSION_COOKIE_SECURE"] = "false"
 os.environ["EMAIL_BACKEND"] = "outbox"
 _BACKEND_DIR = Path(__file__).resolve().parents[1] / "backend"
 sys.path.insert(0, str(_BACKEND_DIR))
@@ -169,3 +170,30 @@ def reviewer_auth(two_tenants, make_auth_fixture):
 @pytest.fixture
 def viewer_auth(two_tenants, make_auth_fixture):
     return make_auth_fixture(two_tenants[0].id, "viewer", "viewer-a@example.com")
+
+
+@pytest.fixture
+def active_tenant_user(migrated_db):
+    from app.auth.security import hash_password
+    from app.models import Tenant, TenantMembership, UserAccount
+
+    tenant = Tenant(name="登录测试租户", status="active")
+    user = UserAccount(
+        name="登录管理员",
+        email_normalized="admin@example.com",
+        phone_e164="+8613600136000",
+        password_hash=hash_password("DocGraph2026"),
+        email_verified_at=datetime.utcnow(),
+    )
+    migrated_db.add_all([tenant, user])
+    migrated_db.flush()
+    migrated_db.add(
+        TenantMembership(
+            tenant_id=tenant.id,
+            user_id=user.id,
+            role="tenant_admin",
+            status="active",
+        )
+    )
+    migrated_db.commit()
+    return user

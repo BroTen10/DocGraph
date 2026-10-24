@@ -1,14 +1,35 @@
-"""Public authentication endpoints for registration and email verification."""
+"""Public and session-authenticated authentication endpoints."""
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
+from fastapi.responses import JSONResponse
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from ..auth.session_tokens import (
+    get_active_session,
+    revoke_session,
+    revoke_user_sessions,
+    rotate_csrf,
+    touch_session,
+)
+from ..config import settings
 from ..database import get_db
+from ..models import Tenant, TenantMembership, UserAccount
 from ..schemas.auth import (
+    ChangePasswordRequest,
+    ForgotPasswordRequest,
+    ForgotPasswordResponse,
+    LoginRequest,
+    LoginResponse,
+    LoginTenantOut,
+    LoginUserOut,
+    MeResponse,
     RegisterResponse,
     RegisterTenantRequest,
+    ResetPasswordRequest,
+    ResetPasswordResponse,
     VerifyEmailRequest,
     VerifyEmailResponse,
 )
@@ -16,6 +37,45 @@ from ..services import auth_service
 from ..services.email_service import EmailDeliveryError
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
+
+
+def _set_session_cookie(response: Response, token: str) -> None:
+    response.set_cookie(
+        "docgraph_session",
+        token,
+        max_age=settings.session_absolute_hours * 3600,
+        httponly=True,
+        secure=settings.session_cookie_secure,
+        samesite="lax",
+        path="/",
+    )
+
+
+def _clear_session_cookie(response: Response) -> None:
+    response.delete_cookie("docgraph_session", path="/")
+
+
+def _session_response(context) -> LoginResponse:
+    user = context.user
+    tenant = context.tenant
+    return LoginResponse(
+        message="登录成功",
+        csrf_token=context.raw_csrf_token,
+        user=LoginUserOut(
+            id=str(user.id),
+            name=user.name,
+            email=user.email_normalized,
+            phone_masked=auth_service.mask_phone(user.phone_e164),
+            role=context.membership.role if context.membership is not None else None,
+        ),
+        tenant=(
+            LoginTenantOut(id=str(tenant.id), name=tenant.name)
+            if tenant is not None
+            else None
+        ),
+        role=context.membership.role if context.membership is not None else None,
+        permissions=[],
+    )
 
 
 @router.post("/register", response_model=RegisterResponse, status_code=202)
@@ -39,14 +99,187 @@ def verify_email(
     payload: VerifyEmailRequest,
     db: Session = Depends(get_db),
 ) -> VerifyEmailResponse:
-    """Verify an email and move the application into review queue."""
+    """Verify an email and move the application into the review queue."""
     try:
         status = auth_service.verify_registration_token(db, payload.token)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
-
     return VerifyEmailResponse(
         message="邮箱已验证，请等待平台管理员审核",
         status=status,
     )
 
+
+@router.post("/login", response_model=LoginResponse)
+def login(
+    payload: LoginRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+) -> LoginResponse:
+    """Log a user in and create a revocable server-side session."""
+    ip = request.client.host if request.client is not None else None
+    user_agent = request.headers.get("user-agent")
+    try:
+        context = auth_service.authenticate(
+            db,
+            payload.email,
+            payload.password,
+            ip=ip,
+            user_agent=user_agent,
+        )
+    except auth_service.LoginDeniedError as exc:
+        return JSONResponse(
+            status_code=403,
+            content={"code": exc.code, "message": exc.message},
+        )
+    except ValueError:
+        raise HTTPException(status_code=401, detail="邮箱或密码错误")
+
+    response = Response(
+        content=_session_response(context).model_dump_json(),
+        media_type="application/json",
+        status_code=200,
+    )
+    _set_session_cookie(response, context.raw_session_token)
+    return response
+
+
+@router.get("/me", response_model=MeResponse)
+def me(
+    request: Request,
+    db: Session = Depends(get_db),
+) -> MeResponse:
+    """Return the current authenticated user and a fresh CSRF token."""
+    token = request.cookies.get("docgraph_session")
+    session = get_active_session(db, token)
+    if session is None:
+        raise HTTPException(status_code=401, detail="未登录或会话已失效")
+
+    touch_session(db, session)
+    raw_csrf = rotate_csrf(db, session)
+
+    user = db.get(UserAccount, session.user_id)
+    if user is None:
+        raise HTTPException(status_code=401, detail="账号不存在")
+
+    tenant = None
+    membership = None
+    if session.tenant_id is not None:
+        row = db.execute(
+            select(TenantMembership, Tenant)
+            .join(Tenant, Tenant.id == TenantMembership.tenant_id)
+            .where(
+                TenantMembership.user_id == user.id,
+                TenantMembership.tenant_id == session.tenant_id,
+                TenantMembership.status == "active",
+            )
+            .limit(1)
+        ).first()
+        if row is None:
+            raise HTTPException(status_code=403, detail="账号或租户状态异常")
+        membership, tenant = row
+
+    return MeResponse(
+        message="ok",
+        csrf_token=raw_csrf,
+        user=LoginUserOut(
+            id=str(user.id),
+            name=user.name,
+            email=user.email_normalized,
+            phone_masked=auth_service.mask_phone(user.phone_e164),
+            role=membership.role if membership is not None else None,
+        ),
+        tenant=(
+            LoginTenantOut(id=str(tenant.id), name=tenant.name)
+            if tenant is not None
+            else None
+        ),
+        role=membership.role if membership is not None else None,
+        permissions=[],
+    )
+
+
+@router.post("/logout", status_code=204)
+def logout(
+    request: Request,
+    db: Session = Depends(get_db),
+) -> Response:
+    """Revoke the current session and clear its cookie."""
+    token = request.cookies.get("docgraph_session")
+    if token:
+        revoke_session(db, token)
+    response = Response(status_code=204)
+    _clear_session_cookie(response)
+    return response
+
+
+@router.post("/logout-all", status_code=204)
+def logout_all(
+    request: Request,
+    db: Session = Depends(get_db),
+) -> Response:
+    """Revoke every session belonging to the current user."""
+    token = request.cookies.get("docgraph_session")
+    session = get_active_session(db, token)
+    if session is not None:
+        revoke_user_sessions(db, session.user_id)
+    response = Response(status_code=204)
+    _clear_session_cookie(response)
+    return response
+
+
+@router.post("/password/forgot", response_model=ForgotPasswordResponse, status_code=202)
+def forgot_password(
+    payload: ForgotPasswordRequest,
+    db: Session = Depends(get_db),
+) -> ForgotPasswordResponse:
+    """Always return an accepted response to avoid account enumeration."""
+    auth_service.request_password_reset(db, payload.email)
+    return ForgotPasswordResponse(message="如果该邮箱已注册，重置邮件已发送")
+
+
+@router.post("/password/reset", response_model=ResetPasswordResponse)
+def reset_password(
+    payload: ResetPasswordRequest,
+    db: Session = Depends(get_db),
+) -> Response:
+    """Consume a one-time token and replace the password."""
+    try:
+        auth_service.reset_password(db, payload.token, payload.new_password)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    response = Response(
+        content=ResetPasswordResponse(message="密码已重置").model_dump_json(),
+        media_type="application/json",
+        status_code=200,
+    )
+    _clear_session_cookie(response)
+    return response
+
+
+@router.put("/password", status_code=204)
+def change_password(
+    payload: ChangePasswordRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+) -> Response:
+    """Change the current user's password and revoke all sessions."""
+    token = request.cookies.get("docgraph_session")
+    session = get_active_session(db, token)
+    if session is None:
+        raise HTTPException(status_code=401, detail="未登录或会话已失效")
+    user = db.get(UserAccount, session.user_id)
+    if user is None:
+        raise HTTPException(status_code=401, detail="账号不存在")
+    try:
+        auth_service.change_password(
+            db,
+            user,
+            payload.current_password,
+            payload.new_password,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    response = Response(status_code=204)
+    _clear_session_cookie(response)
+    return response

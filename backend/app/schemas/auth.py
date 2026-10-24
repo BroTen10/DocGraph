@@ -56,3 +56,68 @@ class VerifyEmailResponse(BaseModel):
     message: str
     status: str
 
+
+class LoginRequest(BaseModel):
+    email: EmailStr
+    password: str
+
+
+class LoginUserOut(BaseModel):
+    id: str
+    name: str
+    email: str
+    phone_masked: str
+    role: str | None = None
+
+
+class LoginTenantOut(BaseModel):
+    id: str
+    name: str
+
+
+class LoginResponse(BaseModel):
+    message: str
+    csrf_token: str
+    user: LoginUserOut
+    tenant: LoginTenantOut | None
+    role: str | None
+    permissions: list[str] = Field(default_factory=list)
+
+
+class MeResponse(LoginResponse):
+    pass
+
+
+class ForgotPasswordRequest(BaseModel):
+    email: EmailStr
+
+
+class ForgotPasswordResponse(BaseModel):
+    message: str
+
+
+class ResetPasswordRequest(BaseModel):
+    token: str = Field(min_length=20, max_length=256)
+    new_password: str
+
+    @field_validator("new_password")
+    @classmethod
+    def _valid_new_password(cls, value: str) -> str:
+        validate_password(value)
+        return value
+
+
+class ResetPasswordResponse(BaseModel):
+    message: str
+
+
+class ChangePasswordRequest(BaseModel):
+    current_password: str
+    new_password: str
+
+    @field_validator("new_password")
+    @classmethod
+    def _valid_new_password(cls, value: str) -> str:
+        validate_password(value)
+        return value
+
