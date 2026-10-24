@@ -5,7 +5,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 
-from sqlalchemy import DateTime, ForeignKeyConstraint, String, Text, UniqueConstraint, func
+from sqlalchemy import DateTime, ForeignKey, ForeignKeyConstraint, String, Text, UniqueConstraint, func
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -24,6 +24,8 @@ class Contract(TenantOwnedMixin, Base):
             ["rule_sets.id", "rule_sets.tenant_id"],
             name="fk_contracts_rule_set_tenant",
             ondelete="CASCADE",
+            deferrable=True,
+            initially="DEFERRED",
         ),
     )
 
@@ -33,6 +35,7 @@ class Contract(TenantOwnedMixin, Base):
     # 所属规则集（命名空间），删除规则集时级联删除合同
     rule_set_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True),
+        ForeignKey("rule_sets.id", ondelete="CASCADE"),
         index=True,
         nullable=False,
     )
@@ -50,12 +53,22 @@ class Contract(TenantOwnedMixin, Base):
     note: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     # 反向关系到 RuleSet
-    rule_set: Mapped["RuleSet"] = relationship("RuleSet", back_populates="contracts")
+    rule_set: Mapped["RuleSet"] = relationship(
+        "RuleSet",
+        back_populates="contracts",
+        primaryjoin="Contract.rule_set_id == RuleSet.id",
+    )
     documents: Mapped[list["Document"]] = relationship(
-        "Document", back_populates="contract", cascade="all, delete-orphan"
+        "Document",
+        back_populates="contract",
+        cascade="all, delete-orphan",
+        primaryjoin="Contract.id == Document.contract_id",
     )
     review_tasks: Mapped[list["ReviewTask"]] = relationship(
-        "ReviewTask", back_populates="contract", cascade="all, delete-orphan"
+        "ReviewTask",
+        back_populates="contract",
+        cascade="all, delete-orphan",
+        primaryjoin="Contract.id == ReviewTask.contract_id",
     )
 
     def __repr__(self) -> str:  # pragma: no cover

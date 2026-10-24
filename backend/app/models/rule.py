@@ -36,6 +36,8 @@ class Rule(TenantOwnedMixin, Base):
             ["rule_sets.id", "rule_sets.tenant_id"],
             name="fk_rules_rule_set_tenant",
             ondelete="CASCADE",
+            deferrable=True,
+            initially="DEFERRED",
         ),
     )
 
@@ -45,6 +47,7 @@ class Rule(TenantOwnedMixin, Base):
     # 所属规则集（命名空间），删除规则集时级联删除规则
     rule_set_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True),
+        ForeignKey("rule_sets.id", ondelete="CASCADE"),
         index=True,
         nullable=False,
     )
@@ -96,7 +99,11 @@ class Rule(TenantOwnedMixin, Base):
     )
 
     # 反向关系
-    rule_set: Mapped["RuleSet"] = relationship("RuleSet", back_populates="rules")
+    rule_set: Mapped["RuleSet"] = relationship(
+        "RuleSet",
+        back_populates="rules",
+        primaryjoin="Rule.rule_set_id == RuleSet.id",
+    )
 
     @property
     def rule_code(self) -> str:

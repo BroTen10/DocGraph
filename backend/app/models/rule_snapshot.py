@@ -5,7 +5,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 
-from sqlalchemy import DateTime, ForeignKeyConstraint, Integer, String, Text, UniqueConstraint, func
+from sqlalchemy import DateTime, ForeignKey, ForeignKeyConstraint, Integer, String, Text, UniqueConstraint, func
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -24,6 +24,8 @@ class RuleSnapshot(TenantOwnedMixin, Base):
             ["rule_sets.id", "rule_sets.tenant_id"],
             name="fk_rule_snapshots_rule_set_tenant",
             ondelete="CASCADE",
+            deferrable=True,
+            initially="DEFERRED",
         ),
     )
 
@@ -33,6 +35,7 @@ class RuleSnapshot(TenantOwnedMixin, Base):
     # 所属规则集（命名空间），删除规则集时级联删除快照
     rule_set_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True),
+        ForeignKey("rule_sets.id", ondelete="CASCADE"),
         index=True,
         nullable=False,
     )
@@ -51,4 +54,8 @@ class RuleSnapshot(TenantOwnedMixin, Base):
     note: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     # 反向关系
-    rule_set: Mapped["RuleSet"] = relationship("RuleSet", back_populates="snapshots")
+    rule_set: Mapped["RuleSet"] = relationship(
+        "RuleSet",
+        back_populates="snapshots",
+        primaryjoin="RuleSnapshot.rule_set_id == RuleSet.id",
+    )

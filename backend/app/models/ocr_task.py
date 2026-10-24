@@ -10,7 +10,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 
-from sqlalchemy import DateTime, ForeignKeyConstraint, Integer, String, Text, UniqueConstraint, func
+from sqlalchemy import DateTime, ForeignKey, ForeignKeyConstraint, Integer, String, Text, UniqueConstraint, func
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -29,18 +29,24 @@ class OcrTask(TenantOwnedMixin, Base):
             ["rule_sets.id", "rule_sets.tenant_id"],
             name="fk_ocr_tasks_rule_set_tenant",
             ondelete="CASCADE",
+            deferrable=True,
+            initially="DEFERRED",
         ),
         ForeignKeyConstraint(
             ["contract_id", "tenant_id"],
             ["contracts.id", "contracts.tenant_id"],
             name="fk_ocr_tasks_contract_tenant",
             ondelete="NO ACTION",
+            deferrable=True,
+            initially="DEFERRED",
         ),
         ForeignKeyConstraint(
             ["doc_id", "tenant_id"],
             ["documents.id", "documents.tenant_id"],
             name="fk_ocr_tasks_doc_tenant",
             ondelete="NO ACTION",
+            deferrable=True,
+            initially="DEFERRED",
         ),
     )
 
@@ -50,6 +56,7 @@ class OcrTask(TenantOwnedMixin, Base):
     # 所属规则集（命名空间），删除规则集时级联删除任务
     rule_set_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True),
+        ForeignKey("rule_sets.id", ondelete="CASCADE"),
         index=True,
         nullable=False,
     )
@@ -58,12 +65,14 @@ class OcrTask(TenantOwnedMixin, Base):
     # scope=single_doc 时关联的文档 id
     doc_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True),
+        ForeignKey("documents.id", ondelete="SET NULL"),
         index=True,
         nullable=True,
     )
     # 两种 scope 都存 contract_id，便于按合同查询任务列表
     contract_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True),
+        ForeignKey("contracts.id", ondelete="SET NULL"),
         index=True,
         nullable=True,
     )

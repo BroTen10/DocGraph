@@ -137,7 +137,10 @@ def test_migration_is_idempotent(migrated_db):
 
 def test_legacy_rows_backfill_tenant_from_parent_relationships(migrated_db):
     from app.database import engine
-    from app.migrations.security_v1 import apply_security_v1_migration
+    from app.migrations.security_v1 import (
+        COMPOSITE_FOREIGN_KEYS,
+        apply_security_v1_migration,
+    )
 
     migrated_db.rollback()
     rule_set_id = uuid.uuid4()
@@ -151,6 +154,10 @@ def test_legacy_rows_backfill_tenant_from_parent_relationships(migrated_db):
 
     with engine.begin() as conn:
         conn.execute(text("TRUNCATE TABLE rule_sets CASCADE"))
+        for table, name, _, _, _, _ in COMPOSITE_FOREIGN_KEYS:
+            conn.execute(
+                text(f"ALTER TABLE {table} DROP CONSTRAINT IF EXISTS {name}")
+            )
         for table in (
             "rule_sets",
             "rules",
@@ -285,3 +292,123 @@ def test_legacy_rows_backfill_tenant_from_parent_relationships(migrated_db):
                 {"id": row_id},
             ).scalar_one()
             assert actual == tenant_id, table
+
+
+def test_fresh_schema_contract_delete_keeps_ocr_task_and_nulls_reference(migrated_db):
+    tenant_id = _default_tenant_id(migrated_db)
+    rule_set = RuleSet(tenant_id=tenant_id, name="删除语义规则集")
+    migrated_db.add(rule_set)
+    migrated_db.flush()
+    contract = Contract(
+        tenant_id=tenant_id,
+        rule_set_id=rule_set.id,
+        contract_no="DELETE-001",
+    )
+    migrated_db.add(contract)
+    migrated_db.flush()
+    ocr_task = OcrTask(
+        tenant_id=tenant_id,
+        rule_set_id=rule_set.id,
+        contract_id=contract.id,
+        scope="contract_batch",
+        status="completed",
+    )
+    migrated_db.add(ocr_task)
+    migrated_db.commit()
+    task_id = ocr_task.id
+
+    migrated_db.execute(
+        text("DELETE FROM contracts WHERE id = :contract_id"),
+        {"contract_id": contract.id},
+    )
+    migrated_db.commit()
+    migrated_db.expire_all()
+
+    preserved = migrated_db.get(OcrTask, task_id)
+    assert preserved is not None
+    assert preserved.contract_id is None
+
+
+def test_fresh_schema_nullable_snapshot_and_document_refs_are_set_null(migrated_db):
+    tenant_id = _default_tenant_id(migrated_db)
+    rule_set = RuleSet(tenant_id=tenant_id, name="可选引用规则集")
+    migrated_db.add(rule_set)
+    migrated_db.flush()
+    snapshot = RuleSnapshot(
+        tenant_id=tenant_id,
+        rule_set_id=rule_set.id,
+        rule_count=0,
+        rules_json=[],
+    )
+    contract = Contract(
+        tenant_id=tenant_id,
+        rule_set_id=rule_set.id,
+        contract_no="OPTIONAL-001",
+    )
+    migrated_db.add_all([snapshot, contract])
+    migrated_db.flush()
+    document = Document(
+        tenant_id=tenant_id,
+        contract_id=contract.id,
+        file_name="optional.pdf",
+        file_path="/tmp/optional.pdf",
+        file_type="pdf",
+    )
+    migrated_db.add(document)
+    migrated_db.flush()
+    review_task = ReviewTask(
+        tenant_id=tenant_id,
+        contract_id=contract.id,
+        snapshot_id=snapshot.id,
+        status="completed",
+    )
+    migrated_db.add(review_task)
+    migrated_db.flush()
+    result = ReviewResult(
+        tenant_id=tenant_id,
+        task_id=review_task.id,
+        doc_id=document.id,
+        result="pass",
+        status="closed",
+    )
+    migrated_db.add(result)
+    migrated_db.commit()
+    review_id = review_task.id
+    result_id = result.id
+
+    migrated_db.execute(
+        text("DELETE FROM rule_snapshots WHERE id = :snapshot_id"),
+        {"snapshot_id": snapshot.id},
+    )
+    migrated_db.execute(
+        text("DELETE FROM documents WHERE id = :document_id"),
+        {"document_id": document.id},
+    )
+    migrated_db.commit()
+    migrated_db.expire_all()
+
+    preserved_task = migrated_db.get(ReviewTask, review_id)
+    preserved_result = migrated_db.get(ReviewResult, result_id)
+    assert preserved_task is not None
+    assert preserved_task.snapshot_id is None
+    assert preserved_result is not None
+    assert preserved_result.doc_id is None
+
+
+def test_composite_fk_rejects_cross_tenant_parent(migrated_db, two_tenants):
+    tenant_a, tenant_b = two_tenants
+    foreign_rule_set = RuleSet(tenant_id=tenant_b.id, name="乙租户规则集")
+    migrated_db.add(foreign_rule_set)
+    migrated_db.commit()
+
+    migrated_db.add(
+        Rule(
+            tenant_id=tenant_a.id,
+            rule_set_id=foreign_rule_set.id,
+            rule_no=1,
+            rule_text="不得跨租户挂载",
+        )
+    )
+    with pytest.raises(IntegrityError):
+        migrated_db.commit()
+    migrated_db.rollback()

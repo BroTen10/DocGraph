@@ -123,6 +123,20 @@ COMPOSITE_FOREIGN_KEYS = (
     ("review_results", "fk_review_results_doc_tenant", ("doc_id", "tenant_id"), "documents", ("id", "tenant_id"), "NO ACTION"),
 )
 
+LEGACY_SINGLE_FOREIGN_KEYS = (
+    ("rules", "rule_set_id", "rule_sets", "CASCADE"),
+    ("rule_snapshots", "rule_set_id", "rule_sets", "CASCADE"),
+    ("contracts", "rule_set_id", "rule_sets", "CASCADE"),
+    ("documents", "contract_id", "contracts", "CASCADE"),
+    ("ocr_tasks", "rule_set_id", "rule_sets", "CASCADE"),
+    ("ocr_tasks", "contract_id", "contracts", "SET NULL"),
+    ("ocr_tasks", "doc_id", "documents", "SET NULL"),
+    ("review_tasks", "contract_id", "contracts", "CASCADE"),
+    ("review_tasks", "snapshot_id", "rule_snapshots", "SET NULL"),
+    ("review_results", "task_id", "review_tasks", "CASCADE"),
+    ("review_results", "doc_id", "documents", "SET NULL"),
+)
+
 COMPOSITE_UNIQUE_INDEXES = (
     ("uq_rule_sets_id_tenant", "rule_sets", ("id", "tenant_id")),
     ("uq_rules_id_tenant", "rules", ("id", "tenant_id")),
@@ -152,19 +166,33 @@ def _constraint_exists(conn: Connection, table: str, name: str) -> bool:
     )
 
 
-def _column_exists(conn: Connection, table: str, column: str) -> bool:
+def _single_column_fk_exists(
+    conn: Connection,
+    table: str,
+    column: str,
+    parent: str,
+) -> bool:
     return bool(
         conn.execute(
             text(
                 """
                 SELECT 1
-                FROM information_schema.columns
-                WHERE table_schema = current_schema()
-                  AND table_name = :table_name
-                  AND column_name = :column_name
+                FROM pg_constraint AS c
+                JOIN pg_attribute AS a
+                  ON a.attrelid = c.conrelid
+                 AND a.attnum = c.conkey[1]
+                WHERE c.contype = 'f'
+                  AND c.conrelid = CAST(:table_name AS regclass)
+                  AND c.confrelid = CAST(:parent_name AS regclass)
+                  AND cardinality(c.conkey) = 1
+                  AND a.attname = :column_name
                 """
             ),
-            {"table_name": table, "column_name": column},
+            {
+                "table_name": table,
+                "parent_name": parent,
+                "column_name": column,
+            },
         ).scalar()
     )
 
@@ -177,11 +205,20 @@ def _add_foreign_key(
     parent: str,
     parent_columns: Iterable[str],
     ondelete: str,
+    deferred: bool = False,
 ) -> None:
     if _constraint_exists(conn, table, name):
+        if deferred:
+            conn.execute(
+                text(
+                    f"ALTER TABLE {table} "
+                    f"ALTER CONSTRAINT {name} DEFERRABLE INITIALLY DEFERRED"
+                )
+            )
         return
     column_sql = ", ".join(columns)
     parent_sql = ", ".join(parent_columns)
+    deferrable_sql = "DEFERRABLE INITIALLY DEFERRED" if deferred else ""
     conn.execute(
         text(
             f"""
@@ -190,6 +227,7 @@ def _add_foreign_key(
             FOREIGN KEY ({column_sql})
             REFERENCES {parent} ({parent_sql})
             ON DELETE {ondelete}
+            {deferrable_sql}
             NOT VALID
             """
         )
@@ -198,6 +236,8 @@ def _add_foreign_key(
 
 
 def _add_tenant_fk(conn: Connection, table: str, ondelete: str = "RESTRICT") -> None:
+    if _single_column_fk_exists(conn, table, "tenant_id", "tenants"):
+        return
     _add_foreign_key(
         conn,
         table,
@@ -388,6 +428,23 @@ def _install_composite_constraints(conn: Connection) -> None:
             parent,
             parent_columns,
             ondelete,
+            deferred=True,
+        )
+
+
+def _ensure_legacy_single_column_fks(conn: Connection) -> None:
+    """Keep the original column-scoped delete behavior alongside tenant integrity FKs."""
+    for table, column, parent, ondelete in LEGACY_SINGLE_FOREIGN_KEYS:
+        if _single_column_fk_exists(conn, table, column, parent):
+            continue
+        _add_foreign_key(
+            conn,
+            table,
+            f"fk_{table}_{column}",
+            (column,),
+            parent,
+            ("id",),
+            ondelete,
         )
 
 
@@ -461,6 +518,7 @@ def apply_security_v1_migration(engine: Engine) -> uuid.UUID:
         default_tenant = _ensure_default_tenant(conn)
         _backfill_tenant_columns(conn, default_tenant)
         _install_tenant_constraints(conn)
+        _ensure_legacy_single_column_fks(conn)
         _install_composite_constraints(conn)
         _ensure_one_default_per_tenant(conn, default_tenant)
 

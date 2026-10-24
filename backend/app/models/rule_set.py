@@ -69,13 +69,22 @@ class RuleSet(TenantOwnedMixin, Base):
 
     # 反向关系
     rules: Mapped[list["Rule"]] = relationship(
-        "Rule", back_populates="rule_set", cascade="all, delete-orphan"
+        "Rule",
+        back_populates="rule_set",
+        cascade="all, delete-orphan",
+        primaryjoin="RuleSet.id == Rule.rule_set_id",
     )
     snapshots: Mapped[list["RuleSnapshot"]] = relationship(
-        "RuleSnapshot", back_populates="rule_set", cascade="all, delete-orphan"
+        "RuleSnapshot",
+        back_populates="rule_set",
+        cascade="all, delete-orphan",
+        primaryjoin="RuleSet.id == RuleSnapshot.rule_set_id",
     )
     contracts: Mapped[list["Contract"]] = relationship(
-        "Contract", back_populates="rule_set", cascade="all, delete-orphan"
+        "Contract",
+        back_populates="rule_set",
+        cascade="all, delete-orphan",
+        primaryjoin="RuleSet.id == Contract.rule_set_id",
     )
 
     def __repr__(self) -> str:  # pragma: no cover
