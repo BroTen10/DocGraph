@@ -515,7 +515,7 @@ class UserAccount(Base):
 ```python
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from uuid import UUID
+from uuid import UUID, uuid4
 
 
 @dataclass(frozen=True)
@@ -540,10 +540,11 @@ def make_auth_fixture(migrated_db):
     from app.models import AuthSession, TenantMembership, UserAccount
 
     def factory(tenant_id, role, email, membership=None):
+        phone_suffix = uuid4().int % 100_000_000
         user = UserAccount(
             name=f"{role}测试用户",
             email_normalized=email,
-            phone_e164=f"+86138{int(tenant_id.int % 100000000):08d}",
+            phone_e164=f"+86138{phone_suffix:08d}",
             password_hash=hash_password("DocGraph2026"),
             email_verified_at=datetime.utcnow(),
         )
@@ -1645,8 +1646,9 @@ def test_ocr_and_review_ids_from_other_tenant_return_404(client, admin_auth, adm
     assert client.get(f"/api/reviews/{review_task_a.id}").status_code == 404
 
 
-def test_task_list_uses_tenant(admin_a_client, review_task_a, review_task_b):
-    ids = {item["id"] for item in admin_a_client.get("/api/reviews").json()}
+def test_task_list_uses_tenant(client, admin_auth, review_task_a, review_task_b):
+    authenticate(client, admin_auth)
+    ids = {item["id"] for item in client.get("/api/reviews").json()}
     assert review_task_a.id in ids
     assert review_task_b.id not in ids
 ```
@@ -2031,6 +2033,11 @@ git commit -m "feat: add frontend auth contracts and test tooling"
 - [ ] **Step 1: 写会话 Provider 失败测试**
 
 ```tsx
+function Probe() {
+  const { role } = useAuth()
+  return <div>{role}</div>
+}
+
 it('loads current user and csrf token', async () => {
   vi.spyOn(authApi, 'me').mockResolvedValue({
     user: { id: 'u1', name: '张三' },
@@ -2110,6 +2117,26 @@ git commit -m "feat: add frontend authentication flows"
 - [ ] **Step 1: 写路由与菜单失败测试**
 
 ```tsx
+function renderAppWithAuth(auth: { role: Role; permissions: string[] } | null) {
+  return render(
+    <MemoryRouter initialEntries={[auth?.role === 'platform_admin' ? '/platform/registrations' : '/upload']}>
+      <AuthProvider initialAuth={auth ? {
+        loading: false,
+        user: { id: 'u1', name: '测试用户' },
+        tenant: auth.role === 'platform_admin' ? null : { id: 't1', name: '测试租户' },
+        role: auth.role,
+        permissions: new Set(auth.permissions),
+        login: async () => undefined,
+        logout: async () => undefined,
+        refresh: async () => undefined,
+        hasPermission: (permission: string) => auth.permissions.includes(permission),
+      } : null}>
+        <AppRoutes />
+      </AuthProvider>
+    </MemoryRouter>,
+  )
+}
+
 it('does not render settings menu for reviewer', async () => {
   renderAppWithAuth({ role: 'reviewer', permissions: ['review.view'] })
   expect(await screen.findByText('文档上传')).toBeInTheDocument()
@@ -2210,7 +2237,7 @@ git commit -m "feat: add permission-aware frontend routing"
 
 ```tsx
 it('hides role editing from reviewer at route level', () => {
-  expect(canAccess('/settings', 'reviewer')).toBe(false)
+  expect(visibleMenuKeys('reviewer')).not.toContain('/settings')
 })
 
 it('shows masked phone and role in member table', async () => {
@@ -2334,6 +2361,27 @@ git commit -m "feat: add platform approval interface"
 - [ ] **Step 1: 写角色按钮失败测试**
 
 ```tsx
+function renderWithAuth(
+  ui: ReactNode,
+  auth: { role: Role; permissions: string[] },
+) {
+  return render(
+    <AuthProvider initialAuth={{
+      loading: false,
+      user: { id: 'u1', name: '测试用户' },
+      tenant: { id: 't1', name: '测试租户' },
+      role: auth.role,
+      permissions: new Set(auth.permissions),
+      login: async () => undefined,
+      logout: async () => undefined,
+      refresh: async () => undefined,
+      hasPermission: (permission: string) => auth.permissions.includes(permission),
+    }}>
+      {ui}
+    </AuthProvider>,
+  )
+}
+
 it('viewer cannot see upload trigger', async () => {
   renderWithAuth(<UploadPage />, { role: 'viewer', permissions: ['review.view'] })
   expect(screen.queryByText('开始上传')).not.toBeInTheDocument()
