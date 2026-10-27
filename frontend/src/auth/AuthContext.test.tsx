@@ -47,7 +47,7 @@ function seededAuth(overrides: Partial<AuthContextValue> = {}): AuthContextValue
     tenant: SESSION.tenant,
     role: SESSION.role,
     permissions: new Set(SESSION.permissions),
-    login: async () => undefined,
+    login: async () => SESSION.role,
     logout: async () => undefined,
     refresh: async () => undefined,
     hasPermission: () => true,

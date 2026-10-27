@@ -60,10 +60,10 @@ def _first_doc_for_type(docs: list[Document], doc_type: str | None) -> Optional[
 def _get_field(doc: Document, key: str, aliases: list[str] | None = None):
     """从文档的 extracted_fields 取字段值，支持别名与复合算术表达式。"""
     fields = doc.extracted_fields or {}
-    if key in fields and fields[key] is not None:
+    if key in fields and fields[key] is not None and str(fields[key]).strip():
         return fields[key]
     for alias in (aliases or []):
-        if alias in fields and fields[alias] is not None:
+        if alias in fields and fields[alias] is not None and str(fields[alias]).strip():
             return fields[alias]
     # 复合字段表达式（如 "件数*数量"）：OCR 字段里不存在该字面名，
     # 按同一份文档的原子字段求值。取不到值时保持 None（由调用方记缺失）。
@@ -862,8 +862,18 @@ def _dispatch_compare(
         return _cmp_numeric(src_doc_type, src_field, tgt_doc_type, tgt_field, docs, "ge", tolerance, tolerance_params, aggregate)
     if op == "时间早于":
         return _cmp_date(src_doc_type, src_field, tgt_doc_type, tgt_field, docs, allow_same_day=False, aggregate=aggregate)
+    if op == "时间晚于":
+        return _cmp_date_reversed(
+            src_doc_type, src_field, tgt_doc_type, tgt_field, docs,
+            allow_same_day=False, aggregate=aggregate,
+        )
     if op == "时间不晚于":
         return _cmp_date(src_doc_type, src_field, tgt_doc_type, tgt_field, docs, allow_same_day=True, aggregate=aggregate)
+    if op == "时间不早于":
+        return _cmp_date_reversed(
+            src_doc_type, src_field, tgt_doc_type, tgt_field, docs,
+            allow_same_day=True, aggregate=aggregate,
+        )
     if op == "总额等于":
         return _cmp_total_eq(
             src_doc_type, src_field, tgt_doc_type, tgt_field, docs,
@@ -872,9 +882,14 @@ def _dispatch_compare(
     if op == "包含于":
         return _cmp_contains(src_doc_type, src_field, tgt_doc_type, tgt_field, docs)
 
-    # 未知 operator，降级为字符串相等
-    logger.warning("未知 operator: %s，降级为字符串相等", op)
-    return _cmp_eq(src_doc_type, src_field, tgt_doc_type, tgt_field, docs)
+    # 未知 operator 不能静默降级成字符串相等，否则日期/数量规则会被错误
+    # 地当作标签比较。返回 unverifiable，让规则解析或人工复核修复算子。
+    logger.warning("未知 operator: %s，判定为无法核验", op)
+    return (
+        "unverifiable",
+        f"不支持的比较算子：{op or '<空>'}",
+        {"reason": "unsupported_operator", "operator": op},
+    )
 
 
 # ---------- operator 实现 ----------
@@ -892,8 +907,10 @@ def _cmp_eq(
     - 否则按字符串集合比较：任一侧的任一值匹配另一侧的任一值即通过
     批次 7-2：aggregate=ALL 时要求两侧集合完全一致；ANY/None 保持任一匹配。
     """
-    src_vals = _collect_fields(docs, src_doc_type, src_field)
-    tgt_vals = _collect_fields(docs, tgt_doc_type, tgt_field)
+    src_pairs, src_missing = _collect_field_evidence(docs, src_doc_type, src_field)
+    tgt_pairs, tgt_missing = _collect_field_evidence(docs, tgt_doc_type, tgt_field)
+    src_vals = [v for _, v in src_pairs]
+    tgt_vals = [v for _, v in tgt_pairs]
     if not src_vals or not tgt_vals:
         # 8-3：防空满足——数据缺失显式区分为 unverifiable，携带字段级缺失清单
         return (
@@ -902,6 +919,17 @@ def _cmp_eq(
             {
                 "reason": "field_data_missing",
                 "missing_fields": _collect_missing(docs, [(src_doc_type, src_field), (tgt_doc_type, tgt_field)]),
+            },
+        )
+    # SUM/default comparisons need every contributing document. With ANY, one
+    # missing document cannot invalidate a positive match from another document.
+    if aggregate != "ANY" and (src_missing or tgt_missing):
+        return (
+            "unverifiable",
+            f"{src_doc_type}.{src_field} 或 {tgt_doc_type}.{tgt_field} 存在不完整数据",
+            {
+                "reason": "incomplete_field_data",
+                "missing_fields": src_missing + tgt_missing,
             },
         )
 
@@ -1019,8 +1047,10 @@ def _cmp_numeric(
     - ANY：任一 src 值满足与任一 tgt 值的比较（最宽松）
     - ALL：所有 src 值都满足与所有 tgt 值的比较（最严格）
     """
-    src_vals = _collect_fields(docs, src_doc_type, src_field)
-    tgt_vals = _collect_fields(docs, tgt_doc_type, tgt_field)
+    src_pairs, src_missing = _collect_field_evidence(docs, src_doc_type, src_field)
+    tgt_pairs, tgt_missing = _collect_field_evidence(docs, tgt_doc_type, tgt_field)
+    src_vals = [v for _, v in src_pairs]
+    tgt_vals = [v for _, v in tgt_pairs]
     if not src_vals or not tgt_vals:
         return (
             "unverifiable",
@@ -1028,6 +1058,15 @@ def _cmp_numeric(
             {
                 "reason": "field_data_missing",
                 "missing_fields": _collect_missing(docs, [(src_doc_type, src_field), (tgt_doc_type, tgt_field)]),
+            },
+        )
+    if aggregate != "ANY" and (src_missing or tgt_missing):
+        return (
+            "unverifiable",
+            f"{src_doc_type}.{src_field} 或 {tgt_doc_type}.{tgt_field} 存在不完整数据",
+            {
+                "reason": "incomplete_field_data",
+                "missing_fields": src_missing + tgt_missing,
             },
         )
 
@@ -1081,8 +1120,10 @@ def _cmp_date(
     即所有 src 日期都应在所有 tgt 日期之前（或同日允许）。
     批次 7-2：aggregate=ANY 时取 src 最早 vs tgt 最晚（任一满足即可）。
     """
-    src_vals = _collect_fields(docs, src_doc_type, src_field)
-    tgt_vals = _collect_fields(docs, tgt_doc_type, tgt_field)
+    src_pairs, src_missing = _collect_field_evidence(docs, src_doc_type, src_field)
+    tgt_pairs, tgt_missing = _collect_field_evidence(docs, tgt_doc_type, tgt_field)
+    src_vals = [v for _, v in src_pairs]
+    tgt_vals = [v for _, v in tgt_pairs]
     if not src_vals or not tgt_vals:
         return (
             "unverifiable",
@@ -1090,6 +1131,15 @@ def _cmp_date(
             {
                 "reason": "field_data_missing",
                 "missing_fields": _collect_missing(docs, [(src_doc_type, src_field), (tgt_doc_type, tgt_field)]),
+            },
+        )
+    if aggregate != "ANY" and (src_missing or tgt_missing):
+        return (
+            "unverifiable",
+            f"{src_doc_type}.{src_field} 或 {tgt_doc_type}.{tgt_field} 存在不完整日期数据",
+            {
+                "reason": "incomplete_field_data",
+                "missing_fields": src_missing + tgt_missing,
             },
         )
 
@@ -1131,6 +1181,40 @@ def _cmp_date(
     )
 
 
+def _cmp_date_reversed(
+    src_doc_type: str,
+    src_field: str,
+    tgt_doc_type: str,
+    tgt_field: str,
+    docs: list[Document],
+    *,
+    allow_same_day: bool,
+    aggregate: Optional[str] = None,
+) -> tuple[str, str, dict]:
+    """校验 source 不早于（或晚于）target。
+
+    实现上交换左右侧后复用 ``_cmp_date``：target <= source 等价于
+    source >= target。多文档默认仍要求所有 source 都不早于所有 target。
+    """
+    result, issue, detail = _cmp_date(
+        tgt_doc_type,
+        tgt_field,
+        src_doc_type,
+        src_field,
+        docs,
+        allow_same_day=allow_same_day,
+        aggregate=aggregate,
+    )
+    detail = dict(detail or {})
+    detail["direction"] = "src_not_before_target"
+    if result == "fail":
+        issue = (
+            f"{src_doc_type}.{src_field} 早于 {tgt_doc_type}.{tgt_field}"
+            + ("" if allow_same_day else "或与其同日（严格顺序不允许同日）")
+        )
+    return result, issue, detail
+
+
 def _cmp_total_eq(
     src_doc_type: str, src_field: str,
     tgt_doc_type: str, tgt_field: str,
@@ -1147,11 +1231,18 @@ def _cmp_total_eq(
     src_total, src_missing = _aggregate_field(docs, src_doc_type, src_field)
     tgt_total, tgt_missing = _aggregate_field(docs, tgt_doc_type, tgt_field)
     missing = (src_missing or []) + (tgt_missing or [])
-    if src_total is None or tgt_total is None:
+    if src_total is None or tgt_total is None or missing:
         return (
             "unverifiable",
-            f"{src_doc_type}.{src_field} 或 {tgt_doc_type}.{tgt_field} 金额字段数据缺失",
-            {"reason": "field_data_missing", "missing_fields": missing},
+            f"{src_doc_type}.{src_field} 或 {tgt_doc_type}.{tgt_field} 金额字段数据缺失或合计不完整",
+            {
+                "reason": (
+                    "incomplete_field_data"
+                    if src_total is not None and tgt_total is not None
+                    else "field_data_missing"
+                ),
+                "missing_fields": missing,
+            },
         )
     diff = src_total - tgt_total
     pct = _amount_diff_pct(src_total, tgt_total)
@@ -1187,8 +1278,10 @@ def _cmp_contains(
     docs: list[Document],
 ) -> tuple[str, str, dict]:
     """包含关系（多单汇总语义）：src 字段值应包含于 tgt 字段值（合同号归一化场景）。"""
-    src_vals = _collect_fields(docs, src_doc_type, src_field)
-    tgt_vals = _collect_fields(docs, tgt_doc_type, tgt_field)
+    src_pairs, src_missing = _collect_field_evidence(docs, src_doc_type, src_field)
+    tgt_pairs, tgt_missing = _collect_field_evidence(docs, tgt_doc_type, tgt_field)
+    src_vals = [v for _, v in src_pairs]
+    tgt_vals = [v for _, v in tgt_pairs]
     if not src_vals or not tgt_vals:
         return (
             "unverifiable",
@@ -1196,6 +1289,15 @@ def _cmp_contains(
             {
                 "reason": "field_data_missing",
                 "missing_fields": _collect_missing(docs, [(src_doc_type, src_field), (tgt_doc_type, tgt_field)]),
+            },
+        )
+    if src_missing or tgt_missing:
+        return (
+            "unverifiable",
+            f"{src_doc_type}.{src_field} 或 {tgt_doc_type}.{tgt_field} 存在不完整数据",
+            {
+                "reason": "incomplete_field_data",
+                "missing_fields": src_missing + tgt_missing,
             },
         )
 

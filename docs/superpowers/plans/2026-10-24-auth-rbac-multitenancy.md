@@ -16,7 +16,7 @@
 - 角色固定为 `tenant_admin`、`reviewer`、`viewer`、`platform_admin`。
 - 邮箱统一去空格并转小写，作为全局唯一登录名。
 - 手机号接受 `+86`、空格和短横线输入，规范化后必须是 `+861[3-9]\d{9}`。
-- 密码长度为 10-64 个字符，至少包含一个字母和一个数字，使用 Argon2id 哈希。
+- 密码长度为 6-64 个字符，至少包含一个字母和一个数字，使用 Argon2id 哈希。
 - 会话为空闲 2 小时、绝对 12 小时；连续失败 5 次锁定 15 分钟。
 - 会话令牌不得写入 `localStorage`；Cookie 在生产环境必须为 `HttpOnly`、`Secure`、`SameSite=Lax`。
 - 新租户注册必须完成邮箱验证并由平台管理员审核。
@@ -358,8 +358,8 @@ def normalize_email(value: str) -> str:
 
 
 def validate_password(value: str) -> None:
-    if not 10 <= len(value) <= 64 or not re.search(r"[A-Za-z]", value) or not re.search(r"\d", value):
-        raise ValueError("密码需为 10-64 位，并同时包含字母和数字")
+    if not 6 <= len(value) <= 64 or not re.search(r"[A-Za-z]", value) or not re.search(r"\d", value):
+        raise ValueError("密码需为 6-64 位，并同时包含字母和数字")
 
 
 def hash_password(value: str) -> str:

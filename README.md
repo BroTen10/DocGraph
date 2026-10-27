@@ -169,7 +169,7 @@ $env:BOOTSTRAP_ADMIN_PASSWORD="ReplaceWithAStrongPassword1"
 
 ```powershell
 $env:BOOTSTRAP_TENANT_ADMIN_EMAIL="legacy-admin@example.com"
-$env:BOOTSTRAP_TENANT_ADMIN_PHONE="13800138000"
+$env:BOOTSTRAP_TENANT_ADMIN_PHONE="13900139000"
 $env:BOOTSTRAP_TENANT_ADMIN_PASSWORD="ReplaceWithAStrongPassword1"
 .\.venv\Scripts\python.exe -m app.bootstrap default-tenant-admin
 ```
@@ -199,6 +199,26 @@ bash deploy.sh status     # 查看容器状态
 bash deploy.sh logs       # 查看日志
 bash deploy.sh restart    # 重启服务
 bash deploy.sh down       # 停止服务
+```
+
+部署成功后，管理员初始化必须在后端容器内执行。先按 `.env.example` 在
+`backend/.env` 中填写对应的一次性 `BOOTSTRAP_*` 参数：
+
+```bash
+# 首次部署：平台管理员
+docker compose --env-file backend/.env --profile deploy \
+  exec backend python -m app.bootstrap
+
+# 从旧版单租户升级：独立的默认租户管理员
+docker compose --env-file backend/.env --profile deploy \
+  exec backend python -m app.bootstrap default-tenant-admin
+```
+
+两组账号必须使用不同的邮箱和手机号。完成后清空六个 `BOOTSTRAP_*` 配置并重建后端：
+
+```bash
+docker compose --env-file backend/.env --profile deploy \
+  up -d --force-recreate backend
 ```
 
 完整说明见 [Docker 单机部署文档](docs/部署-Docker单机部署.md)。
@@ -273,23 +293,55 @@ DocGraph/
 
 - 所有业务 API 都要求登录和服务端权限校验；仅健康检查、版本和公开认证接口豁免。
 - 生产环境必须通过 HTTPS 入口访问，并正确配置 `PUBLIC_BASE_URL`；HSTS 应在 TLS 终结层启用。
-- 首次平台管理员只能通过一次性 `python -m app.bootstrap` 创建，禁止使用固定默认口令。
-- 存量升级后必须执行 `python -m app.bootstrap default-tenant-admin`，否则默认租户业务数据无人可访问。
+- 首次平台管理员只能通过一次性 `python -m app.bootstrap` 创建；Docker 部署应在
+  `backend` 容器内执行，禁止使用固定默认口令。
+- 存量升级后必须在 `backend` 容器内执行
+  `python -m app.bootstrap default-tenant-admin`，否则默认租户业务数据无人可访问。
 - PostgreSQL、Neo4j 端口只绑定宿主机回环地址；生产脚本拒绝默认/示例数据库口令。
 - `backend/.env`、上传的真实单证和数据库卷包含敏感信息，不应提交到 Git。
 - 上线前应保存 PostgreSQL、Neo4j 和上传卷备份，并定期检查安全审计日志。
 
 ## 备份与升级
 
-升级前先停止写入并备份三个数据面：
+升级前先停止写入，备份文件必须保存在仓库和数据卷之外：
 
 ```bash
-docker compose exec postgres pg_dump -U postgres doc_review > docgraph-postgres.sql
-docker compose exec neo4j neo4j-admin database dump neo4j --to-path=/backups
-tar -C /var/lib/docker/volumes -czf docgraph-uploads.tar.gz docgraph_uploads_data
+BACKUP_DIR="/opt/docgraph/backups/$(date +%Y%m%d-%H%M%S)"
+install -d -m 700 "$BACKUP_DIR"
+
+docker compose --env-file backend/.env --profile deploy stop frontend backend
+docker compose --env-file backend/.env exec -T postgres sh -c \
+  'pg_dump -U "$POSTGRES_USER" -d "$POSTGRES_DB" --format=custom' \
+  > "$BACKUP_DIR/postgres.dump"
+docker compose --env-file backend/.env --profile deploy stop postgres
 ```
 
-随后执行 `bash deploy.sh`。启动过程会幂等添加账号/租户字段、回填默认租户并校验约束。
+Neo4j Community 的离线 dump 需要先停止 Neo4j，并把备份目录挂载进一次性容器：
+
+```bash
+docker compose --env-file backend/.env --profile deploy stop neo4j
+install -d -m 700 "$BACKUP_DIR/neo4j"
+sudo chown -R 7474:7474 "$BACKUP_DIR/neo4j"
+
+docker compose --env-file backend/.env --profile deploy run \
+  --rm --no-deps \
+  -v "$BACKUP_DIR/neo4j:/backups" \
+  --entrypoint neo4j-admin \
+  neo4j database dump neo4j --to-path=/backups
+```
+
+上传卷使用只读挂载打包：
+
+```bash
+docker run --rm \
+  -v docgraph_uploads_data:/from:ro \
+  -v "$BACKUP_DIR:/to" \
+  public.ecr.aws/docker/library/alpine:3.21 \
+  sh -c 'tar -C /from -czf /to/uploads.tar.gz .'
+```
+
+同时保留 `backend/.env`、旧提交和旧镜像。随后执行 `bash deploy.sh`。启动过程会幂等添加
+账号/租户字段、回填默认租户并校验约束。
 禁止用 `DB_RESET_ON_STARTUP=true` 处理生产升级。
 
 ## 开源许可

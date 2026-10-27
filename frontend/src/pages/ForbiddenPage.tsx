@@ -1,10 +1,11 @@
 import { Button, Result } from 'antd'
 import { Link } from 'react-router-dom'
 import { useAuth } from '../auth/AuthContext'
+import { homePathForRole } from '../auth/permissions'
 
 export default function ForbiddenPage() {
   const { role } = useAuth()
-  const destination = role === 'platform_admin' ? '/platform/registrations' : '/upload'
+  const destination = homePathForRole(role)
   return (
     <main className="auth-page">
       <div className="auth-panel">

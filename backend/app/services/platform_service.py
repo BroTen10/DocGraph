@@ -387,9 +387,40 @@ def list_tenants(db: Session) -> list[dict]:
         .group_by(TenantMembership.tenant_id)
         .subquery()
     )
+    admin_contact = (
+        select(
+            TenantMembership.tenant_id,
+            TenantMembership.role.label("admin_role"),
+            UserAccount.name.label("admin_name"),
+            UserAccount.email_normalized.label("admin_email"),
+            UserAccount.phone_e164.label("admin_phone_e164"),
+            func.row_number().over(
+                partition_by=TenantMembership.tenant_id,
+                order_by=(TenantMembership.created_at, TenantMembership.id),
+            ).label("admin_rank"),
+        )
+        .join(UserAccount, UserAccount.id == TenantMembership.user_id)
+        .where(
+            TenantMembership.role == "tenant_admin",
+            TenantMembership.status == "active",
+        )
+        .subquery()
+    )
     rows = db.execute(
-        select(Tenant, func.coalesce(member_count.c.count, 0))
+        select(
+            Tenant,
+            func.coalesce(member_count.c.count, 0),
+            admin_contact.c.admin_role,
+            admin_contact.c.admin_name,
+            admin_contact.c.admin_email,
+            admin_contact.c.admin_phone_e164,
+        )
         .outerjoin(member_count, member_count.c.tenant_id == Tenant.id)
+        .outerjoin(
+            admin_contact,
+            (admin_contact.c.tenant_id == Tenant.id)
+            & (admin_contact.c.admin_rank == 1),
+        )
         .order_by(Tenant.created_at.desc())
     ).all()
     return [
@@ -400,8 +431,14 @@ def list_tenants(db: Session) -> list[dict]:
             "approved_at": tenant.approved_at,
             "created_at": tenant.created_at,
             "member_count": int(count),
+            "admin_role": admin_role,
+            "admin_name": admin_name,
+            "admin_email": admin_email,
+            "admin_phone_masked": (
+                _mask_phone(admin_phone_e164) if admin_phone_e164 else None
+            ),
         }
-        for tenant, count in rows
+        for tenant, count, admin_role, admin_name, admin_email, admin_phone_e164 in rows
     ]
 
 

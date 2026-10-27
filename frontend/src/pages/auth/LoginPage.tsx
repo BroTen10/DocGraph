@@ -4,6 +4,7 @@ import { LockOutlined, MailOutlined } from '@ant-design/icons'
 import { Link, useLocation, useNavigate } from 'react-router-dom'
 import { getErrorMessage } from '../../api/client'
 import { useAuth } from '../../auth/AuthContext'
+import { postLoginPathForRole } from '../../auth/permissions'
 import AuthShell from './AuthShell'
 
 interface LoginValues {
@@ -23,8 +24,8 @@ export default function LoginPage() {
     setSubmitting(true)
     setError('')
     try {
-      await login(values.email.trim(), values.password)
-      navigate(requestedPath || '/', { replace: true })
+      const role = await login(values.email.trim(), values.password)
+      navigate(postLoginPathForRole(role, requestedPath), { replace: true })
     } catch (e) {
       setError(getErrorMessage(e, '登录失败，请稍后重试'))
     } finally {

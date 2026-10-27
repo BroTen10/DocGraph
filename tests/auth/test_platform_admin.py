@@ -239,7 +239,7 @@ def test_platform_admin_lists_registrations_and_tenants(
     migrated_db,
     platform_auth,
 ):
-    _registration(migrated_db, email="listed@example.com")
+    registration = _registration(migrated_db, email="listed@example.com")
     _registration(
         migrated_db,
         email="rejected-listed@example.com",
@@ -254,9 +254,25 @@ def test_platform_admin_lists_registrations_and_tenants(
     rows = registrations.json()["registrations"]
     assert any(row["email"] == "listed@example.com" for row in rows)
 
+    headers = authenticate(client, platform_auth)
+    approved = client.post(
+        f"/api/platform/registrations/{registration.id}/approve",
+        json={},
+        headers=headers,
+    )
+    assert approved.status_code == 200
+
     tenants = client.get("/api/platform/tenants", headers=headers)
     assert tenants.status_code == 200
-    assert isinstance(tenants.json()["tenants"], list)
+    listed_tenant = next(
+        row
+        for row in tenants.json()["tenants"]
+        if row["id"] == approved.json()["tenant_id"]
+    )
+    assert listed_tenant["admin_name"] == "申请人"
+    assert listed_tenant["admin_email"] == "listed@example.com"
+    assert listed_tenant["admin_phone_masked"] == "138****8000"
+    assert listed_tenant["admin_role"] == "tenant_admin"
 
 
 def test_platform_admin_session_uses_explicit_role_contract(client, platform_auth):

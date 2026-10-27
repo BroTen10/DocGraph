@@ -120,6 +120,38 @@ export default function TenantListPage() {
         render: (value: string) => <Text strong>{value}</Text>,
       },
       {
+        title: '管理员',
+        dataIndex: 'admin_name',
+        key: 'admin_name',
+        width: 110,
+        render: (value: string | null) => value || <Text type="secondary">未设置</Text>,
+      },
+      {
+        title: '账号类型',
+        dataIndex: 'admin_role',
+        key: 'admin_role',
+        width: 120,
+        render: (value: 'tenant_admin' | null) => (
+          value === 'tenant_admin'
+            ? <Tag color="blue">租户管理员</Tag>
+            : <Text type="secondary">未设置</Text>
+        ),
+      },
+      {
+        title: '邮箱',
+        dataIndex: 'admin_email',
+        key: 'admin_email',
+        width: 220,
+        render: (value: string | null) => value || <Text type="secondary">—</Text>,
+      },
+      {
+        title: '手机号',
+        dataIndex: 'admin_phone_masked',
+        key: 'admin_phone_masked',
+        width: 140,
+        render: (value: string | null) => value || <Text type="secondary">—</Text>,
+      },
+      {
         title: '状态',
         dataIndex: 'status',
         key: 'status',
@@ -206,7 +238,8 @@ export default function TenantListPage() {
             租户管理
           </Title>
           <Paragraph type="secondary" style={{ margin: '6px 0 0' }}>
-            仅展示租户元数据、成员数量和访问状态，不提供任何租户业务内容入口。
+            仅展示租户元数据、管理员账号类型、成员数量和访问状态；
+            账号类型为只读信息，不提供租户角色修改入口。
           </Paragraph>
         </div>
         <Button icon={<ReloadOutlined />} onClick={load} loading={loading}>
@@ -220,7 +253,7 @@ export default function TenantListPage() {
         dataSource={rows}
         loading={loading}
         pagination={{ pageSize: 20, hideOnSinglePage: true }}
-        scroll={{ x: 950 }}
+        scroll={{ x: 1620 }}
         locale={{ emptyText: '暂无租户' }}
       />
 

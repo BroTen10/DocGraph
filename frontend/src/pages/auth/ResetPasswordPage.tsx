@@ -72,7 +72,7 @@ export default function ResetPasswordPage() {
             {
               validator: async (_, value: string) => {
                 if (value && !isValidPassword(value)) {
-                  throw new Error('密码需为 10-64 位，并同时包含字母和数字')
+                  throw new Error('密码需为 6-64 位，并同时包含字母和数字')
                 }
               },
             },

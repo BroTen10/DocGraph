@@ -193,7 +193,7 @@ function authFor(role: UserRole, permissions: string[]): AuthContextValue {
     tenant: { id: 'tenant-1', name: '测试租户' },
     role,
     permissions: new Set(permissions),
-    login: async () => undefined,
+    login: async () => role,
     logout: async () => undefined,
     refresh: async () => undefined,
     hasPermission: (permission) => permissions.includes(permission),

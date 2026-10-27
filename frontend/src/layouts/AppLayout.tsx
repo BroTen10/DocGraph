@@ -300,7 +300,7 @@ export function AccountMenu({
             label="新密码"
             rules={[
               { required: true, message: '请输入新密码' },
-              { min: 10, message: '密码至少 10 位' },
+              { min: 6, message: '密码至少 6 位' },
             ]}
           >
             <Input.Password autoComplete="new-password" />

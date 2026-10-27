@@ -135,6 +135,10 @@ def list_tenants(
             approved_at=row["approved_at"],
             created_at=row["created_at"],
             member_count=row["member_count"],
+            admin_role=row["admin_role"],
+            admin_name=row["admin_name"],
+            admin_email=row["admin_email"],
+            admin_phone_masked=row["admin_phone_masked"],
         )
         for row in rows
     ]

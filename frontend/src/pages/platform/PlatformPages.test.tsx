@@ -1,7 +1,8 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { render, screen, waitFor } from '@testing-library/react'
+import { render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { platformApi } from '../../api/client'
+import type { PlatformTenant } from '../../types'
 import RegistrationReviewPage from './RegistrationReviewPage'
 import TenantListPage from './TenantListPage'
 
@@ -19,13 +20,17 @@ const registration = {
   created_at: '2026-10-24T00:00:00Z',
 }
 
-const tenant = {
+const tenant: PlatformTenant = {
   id: 't1',
   name: '测试贸易公司',
   status: 'active',
   approved_at: '2026-10-24T02:00:00Z',
   created_at: '2026-10-24T00:00:00Z',
   member_count: 3,
+  admin_name: '张三',
+  admin_email: 'zhang@example.com',
+  admin_phone_masked: '138****8000',
+  admin_role: 'tenant_admin',
 }
 
 afterEach(() => {
@@ -110,6 +115,12 @@ describe('TenantListPage', () => {
 
     expect(await screen.findByText('测试贸易公司')).toBeInTheDocument()
     expect(screen.getByText('3')).toBeInTheDocument()
+    expect(screen.getByText('张三')).toBeInTheDocument()
+    expect(screen.getByText('zhang@example.com')).toBeInTheDocument()
+    expect(screen.getByText('138****8000')).toBeInTheDocument()
+    expect(screen.getByRole('columnheader', { name: '账号类型' })).toBeInTheDocument()
+    const accountTypeCell = screen.getByRole('cell', { name: '租户管理员' })
+    expect(within(accountTypeCell).queryByRole('combobox')).not.toBeInTheDocument()
     expect(screen.queryByText('合同')).not.toBeInTheDocument()
     expect(screen.queryByText('审查结果')).not.toBeInTheDocument()
 

@@ -180,6 +180,10 @@ export interface PlatformTenant {
   approved_at: string | null
   created_at: string
   member_count: number
+  admin_name: string | null
+  admin_email: string | null
+  admin_phone_masked: string | null
+  admin_role: 'tenant_admin' | null
 }
 
 export interface TenantListResponse {

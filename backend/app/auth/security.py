@@ -53,11 +53,11 @@ def validate_password(value: str) -> None:
     """Validate the product password policy without altering the password."""
     if (
         not isinstance(value, str)
-        or not 10 <= len(value) <= 64
+        or not 6 <= len(value) <= 64
         or not re.search(r"[A-Za-z]", value)
         or not re.search(r"\d", value)
     ):
-        raise ValueError("密码需为 10-64 位，并同时包含字母和数字")
+        raise ValueError("密码需为 6-64 位，并同时包含字母和数字")
 
 
 def hash_password(value: str) -> str:

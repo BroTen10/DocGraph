@@ -43,7 +43,11 @@ def test_mail_and_token_normalization():
     assert digest != raw
 
 
-@pytest.mark.parametrize("password", ["short1", "1234567890", "abcdefghij"])
+def test_accepts_minimum_length_password():
+    validate_password("Abc123")
+
+
+@pytest.mark.parametrize("password", ["Abc12", "1234567890", "abcdefghij"])
 def test_rejects_weak_password(password):
     with pytest.raises(ValueError):
         validate_password(password)

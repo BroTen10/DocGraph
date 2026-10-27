@@ -51,6 +51,10 @@ class TenantOut(BaseModel):
     approved_at: datetime | None = None
     created_at: datetime
     member_count: int = 0
+    admin_role: Literal["tenant_admin"] | None = None
+    admin_name: str | None = None
+    admin_email: str | None = None
+    admin_phone_masked: str | None = None
 
 
 class TenantListResponse(BaseModel):

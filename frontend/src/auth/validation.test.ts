@@ -21,7 +21,8 @@ describe('auth validation', () => {
 
   it('enforces the same password shape as the backend', () => {
     expect(isValidPassword('DocGraph2026')).toBe(true)
-    expect(isValidPassword('short1')).toBe(false)
+    expect(isValidPassword('Abc123')).toBe(true)
+    expect(isValidPassword('Abc12')).toBe(false)
     expect(isValidPassword('1234567890')).toBe(false)
     expect(isValidPassword('abcdefghij')).toBe(false)
   })

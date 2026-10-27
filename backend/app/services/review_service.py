@@ -132,10 +132,10 @@ def _docs_by_type(docs: list[Document], doc_type: str) -> list[Document]:
 def _get_field(doc: Document, key: str, aliases: list[str] | None = None):
     """从文档的 extracted_fields 取字段值，支持别名。"""
     fields = doc.extracted_fields or {}
-    if key in fields and fields[key] is not None:
+    if key in fields and fields[key] is not None and str(fields[key]).strip():
         return fields[key]
     for alias in (aliases or []):
-        if alias in fields and fields[alias] is not None:
+        if alias in fields and fields[alias] is not None and str(fields[alias]).strip():
             return fields[alias]
     return None
 

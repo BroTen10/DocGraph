@@ -34,27 +34,15 @@
    - 强随机且非示例值的 `PG_PASSWORD` 与 `NEO4J_PASSWORD`；
    - `DB_RESET_ON_STARTUP=false`。
 
-   首次部署在数据库启动后执行一次平台管理员初始化：
+   初始化管理员需要的一次性参数也先写入同一个 `.env`：
 
-   ```bash
-   cd backend
-   BOOTSTRAP_ADMIN_EMAIL=admin@example.com \
-   BOOTSTRAP_ADMIN_PHONE=13800138000 \
-   BOOTSTRAP_ADMIN_PASSWORD='ReplaceWithAStrongPassword1' \
-   python -m app.bootstrap
-   ```
+   - 首次部署填写 `BOOTSTRAP_ADMIN_EMAIL`、`BOOTSTRAP_ADMIN_PHONE`、
+     `BOOTSTRAP_ADMIN_PASSWORD`；
+   - 从旧版单租户升级时，再填写独立的
+     `BOOTSTRAP_TENANT_ADMIN_EMAIL`、`BOOTSTRAP_TENANT_ADMIN_PHONE`、
+     `BOOTSTRAP_TENANT_ADMIN_PASSWORD`。
 
-   `BOOTSTRAP_ADMIN_PASSWORD` 必须包含字母和数字且长于 10 位；命令不会打印口令。
-
-   如果这是从旧版单租户升级，启动迁移会把全部存量业务数据归入默认租户。
-   平台管理员不能直接读取这些数据，必须再初始化一个独立的默认租户管理员：
-
-   ```bash
-   BOOTSTRAP_TENANT_ADMIN_EMAIL=legacy-admin@example.com \
-   BOOTSTRAP_TENANT_ADMIN_PHONE=13800138000 \
-   BOOTSTRAP_TENANT_ADMIN_PASSWORD='ReplaceWithAStrongPassword1' \
-   python -m app.bootstrap default-tenant-admin
-   ```
+   两组账号必须使用不同的邮箱和手机号。密码必须为 6-64 位并同时包含字母和数字。
 
    **数据库口令只有一份来源**：`deploy.sh` 用 `docker compose --env-file backend/.env` 启动，
    所以 compose 里的 `POSTGRES_PASSWORD`、`NEO4J_AUTH` 与后端进程读到的 `PG_PASSWORD`、
@@ -80,7 +68,30 @@
    - 手工执行时务必带上 profile，否则只会拉起 postgres/neo4j：
      `docker compose --env-file backend/.env --profile deploy up -d`
 
-5. 其它子命令：`bash deploy.sh check|status|logs [服务]|restart|down`。
+5. 在容器内初始化管理员。
+
+   ```bash
+   cd /opt/docgraph/app
+
+   # 首次部署：平台管理员
+   docker compose --env-file backend/.env --profile deploy \
+     exec backend python -m app.bootstrap
+
+   # 从旧版单租户升级：独立创建默认租户管理员
+   docker compose --env-file backend/.env --profile deploy \
+     exec backend python -m app.bootstrap default-tenant-admin
+   ```
+
+   平台管理员不能读取租户业务数据。旧版数据迁入默认租户后，必须由独立的默认租户管理员访问。
+   初始化完成后，将 `.env` 中六个 `BOOTSTRAP_*` 值清空，并重建后端容器，
+   避免一次性初始化参数继续留在运行环境：
+
+   ```bash
+   docker compose --env-file backend/.env --profile deploy \
+     up -d --force-recreate backend
+   ```
+
+6. 其它子命令：`bash deploy.sh check|status|logs [服务]|restart|down`。
 
 ## 升级（拉新代码后重新部署）
 
@@ -92,10 +103,10 @@ bash deploy.sh                 # 校验 → dc build 重建 backend 镜像 → u
 ```
 
 - **必须 rebuild 才生效**：`deploy.sh` 会 `dc build`，改过的代码随镜像更新；`bash deploy.sh restart` 只是重启容器，不带新代码，别拿它当升级手段。
-- **幂等、无数据风险**：可反复执行；`backend/.env` 与数据卷（`postgres_data` / `neo4j_data` / `uploads_data`）都不受影响。
+- **幂等、保留数据卷**：可反复执行；`backend/.env` 与数据卷（`postgres_data` / `neo4j_data` / `uploads_data`）不会被删除，但升级仍必须先完成三数据面备份。
 - **升级前必须备份**：PostgreSQL、Neo4j 和上传卷三者应同时备份。启动时的安全迁移会把存量业务数据归入默认租户并新增租户约束；迁移失败会阻止继续服务，禁止用重置清库绕过。
 - **systemd + nginx 形态**（腾讯云那份指引）：`git pull` → `sudo systemctl restart docgraph-backend`；依赖有变化才重建 venv，前端有改动才 `npm ci && npm run build` 并重新拷贝 `dist`。
-- **升级后自检**：`bash deploy.sh check` 会确认公开健康接口可用，并确认受保护业务接口未登录返回 `401`；任何非预期状态都会使检查失败。随后执行 `default-tenant-admin` 初始化，并在「系统设置 → 运行参数」检查新增开关。
+- **升级后自检**：`bash deploy.sh check` 会确认公开健康接口可用，并确认受保护业务接口未登录返回 `401`；任何非预期状态都会使检查失败。随后按“步骤 5”在容器内执行 `default-tenant-admin` 初始化，并在「系统设置 → 运行参数」检查新增开关。
 
 ### 升级前后的版本核对
 

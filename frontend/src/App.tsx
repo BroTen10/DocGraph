@@ -15,6 +15,7 @@ import ResetPasswordPage from './pages/auth/ResetPasswordPage'
 import AcceptInvitePage from './pages/auth/AcceptInvitePage'
 import { useAuth } from './auth/AuthContext'
 import { RequireAuth, RequirePermission } from './auth/RequireAuth'
+import { homePathForRole } from './auth/permissions'
 import { RuleSetProvider } from './context/RuleSetContext'
 import AppLayout from './layouts/AppLayout'
 import PlatformLayout from './layouts/PlatformLayout'
@@ -24,11 +25,7 @@ import TenantListPage from './pages/platform/TenantListPage'
 function HomeRedirect() {
   const { loading, role } = useAuth()
   if (loading) return null
-  if (role === 'platform_admin') {
-    return <Navigate to="/platform/registrations" replace />
-  }
-  if (role) return <Navigate to="/upload" replace />
-  return <Navigate to="/login" replace />
+  return <Navigate to={homePathForRole(role)} replace />
 }
 
 function TenantWorkspace() {

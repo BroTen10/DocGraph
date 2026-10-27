@@ -24,7 +24,7 @@ export interface AuthContextValue {
   tenant: TenantInfo | null
   role: UserRole | null
   permissions: Set<string>
-  login: (email: string, password: string) => Promise<void>
+  login: (email: string, password: string) => Promise<UserRole | null>
   logout: () => Promise<void>
   refresh: () => Promise<void>
   hasPermission: (permission: Permission) => boolean
@@ -49,6 +49,7 @@ const PUBLIC_AUTH_PATHS = new Set([
   '/forgot-password',
   '/reset-password',
   '/accept-invite',
+  '/forbidden',
 ])
 
 function stateFromSession(session: AuthSessionResponse): Omit<AuthContextValue, 'login' | 'logout' | 'refresh' | 'hasPermission'> {
@@ -132,7 +133,9 @@ export function AuthProvider({ children, initialAuth }: AuthProviderProps) {
   const login = useCallback(async (email: string, password: string) => {
     setLoading(true)
     try {
-      applySession(await authApi.login(email, password))
+      const session = await authApi.login(email, password)
+      applySession(session)
+      return session.role
     } catch (error) {
       clearSession()
       throw error

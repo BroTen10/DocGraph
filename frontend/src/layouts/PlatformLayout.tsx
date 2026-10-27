@@ -1,8 +1,10 @@
 import { useState } from 'react'
-import { Layout, Menu, Space, Typography } from 'antd'
+import { Button, Layout, Menu, Space, Tooltip, Typography } from 'antd'
 import {
   AuditOutlined,
   BankOutlined,
+  MenuFoldOutlined,
+  MenuUnfoldOutlined,
 } from '@ant-design/icons'
 import { Outlet, useLocation, useNavigate } from 'react-router-dom'
 import VersionBadge from '../components/VersionBadge'
@@ -38,7 +40,13 @@ export default function PlatformLayout() {
         collapsedWidth={72}
         collapsed={collapsed}
         collapsible
-        style={{ position: 'sticky', top: 0, height: '100vh' }}
+        trigger={null}
+        style={{
+          position: 'sticky',
+          top: 0,
+          height: '100vh',
+          background: '#001529',
+        }}
       >
         <div
           style={{
@@ -67,8 +75,8 @@ export default function PlatformLayout() {
           </div>
           {!collapsed && (
             <div style={{ lineHeight: 1.25 }}>
-              <div style={{ fontSize: 14, fontWeight: 700, color: '#f8fafc' }}>DocGraph 平台</div>
-              <div style={{ fontSize: 11, color: '#94a3b8' }}>Platform Administration</div>
+              <div className="platform-brand-name">DocGraph 平台</div>
+              <div className="platform-brand-subtitle">Platform Administration</div>
             </div>
           )}
         </div>
@@ -100,6 +108,14 @@ export default function PlatformLayout() {
           }}
         >
           <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+            <Tooltip title={collapsed ? '展开菜单' : '收起菜单'} placement="bottom">
+              <Button
+                type="text"
+                aria-label={collapsed ? '展开菜单' : '收起菜单'}
+                icon={collapsed ? <MenuUnfoldOutlined /> : <MenuFoldOutlined />}
+                onClick={() => setCollapsed((value) => !value)}
+              />
+            </Tooltip>
             <span style={{ fontSize: 16, fontWeight: 600, color: '#0f172a' }}>{title}</span>
             <Text type="secondary" style={{ fontSize: 12 }}>
               仅展示平台元数据，不访问租户业务内容

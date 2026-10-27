@@ -100,6 +100,27 @@ body {
   letter-spacing: 0.5px;
 }
 
+/* 平台侧栏品牌锁定：深色背景上使用足够大的实体色与字重，避免细字发虚。 */
+.platform-brand-name {
+  color: #ffffff;
+  font-size: 15px;
+  font-weight: 700;
+  line-height: 1.25;
+  letter-spacing: 0.01em;
+  -webkit-font-smoothing: auto;
+  text-rendering: auto;
+}
+
+.platform-brand-subtitle {
+  color: #cbd5e1;
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 1.35;
+  white-space: nowrap;
+  -webkit-font-smoothing: auto;
+  text-rendering: auto;
+}
+
 /* ===== AntD 组件微调 ===== */
 
 /* Menu 选中态:渐变指示条 */

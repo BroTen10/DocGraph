@@ -24,7 +24,7 @@ export function isValidPhone(value: string): boolean {
 
 export function isValidPassword(value: string): boolean {
   return (
-    value.length >= 10 &&
+    value.length >= 6 &&
     value.length <= 64 &&
     /[A-Za-z]/.test(value) &&
     /\d/.test(value)

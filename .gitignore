@@ -90,5 +90,9 @@ findings.md
 task_plan.md
 .workbuddy/
 acceptance_output/
+
+# ============ 研究/基准产物（不进入产品发布包） ============
+research/
+
 nul
 ~

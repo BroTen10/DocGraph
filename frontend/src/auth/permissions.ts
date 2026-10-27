@@ -82,3 +82,17 @@ export function visibleMenuKeys(role: UserRole | null | undefined): string[] {
   }
   return []
 }
+
+export function homePathForRole(role: UserRole | null | undefined): string {
+  return visibleMenuKeys(role)[0] ?? '/login'
+}
+
+export function postLoginPathForRole(
+  role: UserRole | null | undefined,
+  requestedPath: string | undefined,
+): string {
+  if (requestedPath && visibleMenuKeys(role).includes(requestedPath)) {
+    return requestedPath
+  }
+  return homePathForRole(role)
+}
