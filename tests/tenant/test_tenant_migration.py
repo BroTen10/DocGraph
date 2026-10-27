@@ -18,6 +18,7 @@ from app.models import (
     RuleSnapshot,
     RuleParseSkill,
     SystemSetting,
+    Tenant,
 )
 from app.models.mixins import TenantOwnedMixin
 
@@ -133,6 +134,62 @@ def test_migration_is_idempotent(migrated_db):
     assert migrated_db.execute(
         select(func.count(RuleSet.id)).where(RuleSet.tenant_id == first_tenant)
     ).scalar_one() == first_count
+
+
+def test_migration_removes_legacy_global_document_type_name_uniqueness(
+    migrated_db,
+):
+    from app.database import SessionLocal, engine
+    from app.migrations.security_v1 import apply_security_v1_migration
+
+    migrated_db.rollback()
+    with engine.begin() as conn:
+        conn.execute(text("DROP INDEX IF EXISTS ix_document_types_name"))
+        conn.execute(
+            text(
+                "CREATE UNIQUE INDEX ix_document_types_name "
+                "ON document_types (name)"
+            )
+        )
+
+    apply_security_v1_migration(engine)
+
+    with engine.connect() as conn:
+        legacy_index = conn.execute(
+            text(
+                "SELECT indexdef FROM pg_indexes "
+                "WHERE schemaname = 'public' "
+                "AND indexname = 'ix_document_types_name'"
+            )
+        ).scalar_one_or_none()
+    assert legacy_index is None
+
+    with SessionLocal() as db:
+        tenant_a = Tenant(name="迁移租户甲", status="active")
+        tenant_b = Tenant(name="迁移租户乙", status="active")
+        db.add_all([tenant_a, tenant_b])
+        db.flush()
+        db.add_all(
+            [
+                DocumentType(
+                    tenant_id=tenant_a.id,
+                    name="跨租户同名文档类型",
+                    source="manual",
+                ),
+                DocumentType(
+                    tenant_id=tenant_b.id,
+                    name="跨租户同名文档类型",
+                    source="manual",
+                ),
+            ]
+        )
+        db.commit()
+
+    assert migrated_db.execute(
+        select(func.count(DocumentType.id)).where(
+            DocumentType.name == "跨租户同名文档类型"
+        )
+    ).scalar_one() == 2
 
 
 def test_legacy_rows_backfill_tenant_from_parent_relationships(migrated_db):

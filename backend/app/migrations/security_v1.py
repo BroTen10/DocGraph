@@ -395,6 +395,7 @@ def _install_tenant_constraints(conn: Connection) -> None:
                 f"DROP CONSTRAINT IF EXISTS {table}_name_key"
             )
         )
+    conn.execute(text("DROP INDEX IF EXISTS ix_document_types_name"))
     conn.execute(
         text(
             "CREATE UNIQUE INDEX IF NOT EXISTS uq_rule_sets_tenant_name "
