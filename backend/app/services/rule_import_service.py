@@ -1353,7 +1353,6 @@ def import_rules_with_skills(
     if skill_ids:
         # 指定了具体的 Skill 列表，只加载这些（批次 3-6：停用/不存在的 Skill 显式报错，杜绝静默丢弃）
         from ..models import RuleParseSkill
-        from sqlalchemy import select
         requested = list(dict.fromkeys(skill_ids))
         skills = db.execute(
             select(RuleParseSkill).where(

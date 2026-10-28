@@ -32,7 +32,63 @@ from app.services.rule_import_service import (  # noqa: E402
     _normalize_text,
     _split_text,
     import_rules_from_text,
+    import_rules_with_skills,
 )
+
+
+class ImportSkillScopeTests(unittest.TestCase):
+    def test_default_skill_selection_resolves_ruleset_before_compile(self) -> None:
+        tenant_id = uuid.uuid4()
+        rule_set_id = uuid.uuid4()
+        rule_set = SimpleNamespace(id=rule_set_id)
+        expected = {
+            "total": 0,
+            "imported": 0,
+            "skipped": 0,
+            "rules": [],
+            "errors": [],
+        }
+
+        class FakeSession:
+            def __init__(self) -> None:
+                self.statements = []
+
+            def execute(self, statement):
+                self.statements.append(statement)
+                return SimpleNamespace(scalar_one_or_none=lambda: rule_set)
+
+        db = FakeSession()
+        directive = SimpleNamespace()
+        with (
+            patch(
+                "app.services.rule_parse_engine.compile_directive",
+                return_value=directive,
+            ) as compile_directive,
+            patch(
+                "app.services.rule_import_service.import_rules_from_text",
+                return_value=expected,
+            ) as import_rules,
+        ):
+            result = import_rules_with_skills(
+                db,
+                tenant_id,
+                rule_set_id,
+                "报关单申报金额应与合同金额一致",
+            )
+
+        self.assertIs(result, expected)
+        self.assertEqual(len(db.statements), 1)
+        compile_directive.assert_called_once_with(db, tenant_id, rule_set_id)
+        import_rules.assert_called_once_with(
+            db,
+            tenant_id,
+            rule_set_id,
+            "报关单申报金额应与合同金额一致",
+            directive=directive,
+            progress=None,
+            source_rows=None,
+            source_meta=None,
+        )
 
 
 class ExcelMergedCellTests(unittest.TestCase):
