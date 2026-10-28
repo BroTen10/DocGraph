@@ -397,5 +397,72 @@ class ImportPipelineSourceRefTests(unittest.TestCase):
         )
 
 
+class InvalidAssertionImportTests(unittest.TestCase):
+    def test_incomplete_assertion_requires_confirmation(self) -> None:
+        llm_response = {
+            "rules": [
+                {
+                    "rule_text": "派车单实际交货地址应与订单约定交货地址一致",
+                    "structure": {
+                        "assertion": {
+                            "source": {
+                                "doc_type": "派车单",
+                                "field": "实际交货地址",
+                            },
+                            "operator": "等于",
+                        }
+                    },
+                }
+            ]
+        }
+        captured_payloads = []
+
+        def capture_rule(_db, _tenant_id, _rule_set_id, payload):
+            captured_payloads.append(payload)
+            return _fake_create_rule(_db, _tenant_id, _rule_set_id, payload)
+
+        with (
+            patch(
+                "app.services.rule_import_service.get_llm_client",
+                return_value=_FakeLLM(llm_response),
+            ),
+            patch(
+                "app.services.rule_import_service.get_prompt",
+                side_effect=lambda _db, _tenant_id, key: (
+                    "{doc_types}{check_categories}{raw_text}"
+                    if key == "rule_import.user"
+                    else "system"
+                ),
+            ),
+            patch(
+                "app.services.rule_import_service._known_doc_types",
+                return_value=[],
+            ),
+            patch(
+                "app.services.rule_import_service._known_check_categories",
+                return_value=[],
+            ),
+            patch(
+                "app.services.rule_import_service.create_rule",
+                side_effect=capture_rule,
+            ),
+        ):
+            result = import_rules_from_text(
+                _FakeDB(),
+                uuid.uuid4(),
+                uuid.uuid4(),
+                "派车单实际交货地址应与订单约定交货地址一致",
+            )
+
+        self.assertEqual(result["imported"], 1)
+        self.assertEqual(len(captured_payloads), 1)
+        payload = captured_payloads[0]
+        self.assertIsNone(payload.structure)
+        self.assertEqual(payload.status, "pending")
+        self.assertFalse(payload.enabled)
+        self.assertEqual(payload.defects[0].type, "incomplete_condition")
+        self.assertIn("target", payload.defects[0].description)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

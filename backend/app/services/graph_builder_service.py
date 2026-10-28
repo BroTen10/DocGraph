@@ -231,6 +231,18 @@ def _node_name(doc_type: str, field: str, aggregate: Optional[str] = None) -> st
     return name
 
 
+def _has_complete_assertion(rule: Rule) -> bool:
+    """结构化断言可确定性转图的前提：source/target 都有字段。"""
+    assertion = (rule.structure or {}).get("assertion")
+    if not isinstance(assertion, dict):
+        return False
+    for side in ("source", "target"):
+        value = assertion.get(side)
+        if not isinstance(value, dict) or not str(value.get("field") or "").strip():
+            return False
+    return True
+
+
 def _convert_structured_rule(rule: Rule, rule_index: int) -> RuleGraphConvertResult:
     """结构化规则程序化转换（批次 7）：从 rule.structure.assertion 生成图谱。
 
@@ -616,7 +628,7 @@ def build_graph(
             result = _convert_completeness_rule(rule, idx)
         elif rule.check_category == CHECK_STAMP:
             result = _convert_stamp_rule(rule, idx)
-        elif (rule.structure or {}).get("assertion"):
+        elif _has_complete_assertion(rule):
             # 批次 7：有结构化断言的规则程序化转图谱（确定性，不调 LLM）
             _report(
                 "结构化规则转换",
@@ -625,11 +637,22 @@ def build_graph(
             )
             result = _convert_structured_rule(rule, idx)
         else:
-            _report(
-                "LLM 转换规则",
-                10 + int((idx - 1) / total * 70),
-                f"正在转换规则 {idx}/{total}：[{rule.doc_type}] {rule.rule_text[:40]}...",
-            )
+            if (rule.structure or {}).get("assertion"):
+                logger.warning(
+                    "规则 %s 的结构化断言不完整，回退按原文转换",
+                    rule.rule_code,
+                )
+                _report(
+                    "兼容转换规则",
+                    10 + int((idx - 1) / total * 70),
+                    f"规则 {rule.rule_code} 结构化断言不完整，已改为按原文转换",
+                )
+            else:
+                _report(
+                    "LLM 转换规则",
+                    10 + int((idx - 1) / total * 70),
+                    f"正在转换规则 {idx}/{total}：[{rule.doc_type}] {rule.rule_text[:40]}...",
+                )
             result = _convert_one_rule(rule, idx, db, tenant_id=tenant_id)
         if auto_confirm_all or result.confidence >= threshold:
             result.auto_confirmed = True

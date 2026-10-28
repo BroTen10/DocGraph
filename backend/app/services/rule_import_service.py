@@ -332,6 +332,22 @@ def _structure_signature(structure: dict | None) -> tuple | None:
     return sig if any(sig) else None
 
 
+def _missing_assertion_fields(structure: dict | None) -> list[str]:
+    """列出结构化断言中缺失的 source/target.field。"""
+    if not isinstance(structure, dict):
+        return []
+    assertion = structure.get("assertion")
+    if not isinstance(assertion, dict) or not assertion:
+        return []
+    missing: list[str] = []
+    for side in ("source", "target"):
+        value = assertion.get(side)
+        field = value.get("field") if isinstance(value, dict) else None
+        if not str(field or "").strip():
+            missing.append(side)
+    return missing
+
+
 def _find_similar_rule(
     new_text: str,
     new_normed: str,
@@ -954,6 +970,7 @@ def import_rules_from_text(
                 "assertion": structure_raw.get("assertion"),
                 "exceptions": structure_raw.get("exceptions") or [],
             }
+        missing_assertion_fields = _missing_assertion_fields(structure)
 
         # 规则自描述：scope + intents（批次 10）
         scope = _normalize_scope(item.get("scope"))
@@ -979,6 +996,14 @@ def import_rules_from_text(
             doc_type = _derive_doc_type(structure, scope)
         if not check_category and intents:
             check_category = intents[0]
+
+        # 不完整断言不能作为可执行结构自动确认；保留 condition/exceptions，
+        # 让规则文本走语义审查或旧版 LLM 转图兜底。
+        if missing_assertion_fields:
+            assert isinstance(structure, dict)
+            structure.pop("assertion", None)
+            if not structure.get("condition") and not structure.get("exceptions"):
+                structure = None
 
         # 批次 11：写时归一——文档类型/字段名映射到规范名（显式别名表，防双轨繁殖）。
         # 未命中规范名/别名的新名称原样保留，由下方"新类型检测"注册为 pending_review。
@@ -1037,6 +1062,16 @@ def import_rules_from_text(
                 "type": d.get("type", "unknown"),
                 "severity": d.get("severity", "info"),
                 "description": d.get("description", ""),
+            })
+        if missing_assertion_fields:
+            clean_defects.append({
+                "type": "incomplete_condition",
+                "severity": "warning",
+                "description": (
+                    "structure.assertion 缺少 "
+                    f"{'/'.join(missing_assertion_fields)} 字段，"
+                    "已退回按规则原文审查"
+                ),
             })
 
         # 来源追溯（批次 10 / 表格行级）
