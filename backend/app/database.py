@@ -331,71 +331,50 @@ def _migrate_defect_resolution() -> None:
 
 
 def _seed_builtin_skill() -> None:
-    """种子数据：如果不存在则创建内置默认 Skill。"""
+    """幂等同步仓库内置 Skill，首次创建或升级已有内置记录。"""
+    from .default_rule_parse_skill import (
+        DEFAULT_RULE_PARSE_SKILL_DESCRIPTION,
+        DEFAULT_RULE_PARSE_SKILL_NAME,
+        load_default_rule_parse_skill_content,
+    )
     from .models import RuleParseSkill
     from sqlalchemy import select
 
+    content = load_default_rule_parse_skill_content()
     with SessionLocal() as db:
         existing = db.execute(
             select(RuleParseSkill).where(RuleParseSkill.is_builtin.is_(True))
         ).scalars().first()
         if existing is not None:
+            changed = False
+            if existing.content != content:
+                existing.content = content
+                existing.version = max(int(existing.version or 1), 1) + 1
+                changed = True
+            if existing.name != DEFAULT_RULE_PARSE_SKILL_NAME:
+                existing.name = DEFAULT_RULE_PARSE_SKILL_NAME
+                changed = True
+            if existing.description != DEFAULT_RULE_PARSE_SKILL_DESCRIPTION:
+                existing.description = DEFAULT_RULE_PARSE_SKILL_DESCRIPTION
+                changed = True
+            if changed:
+                db.commit()
+                logger.info(
+                    "已同步内置默认 Skill: %s（v%s）",
+                    existing.name,
+                    existing.version,
+                )
             return
 
         skill = RuleParseSkill(
             rule_set_id=None,
-            name="默认规则解析配置",
-            description="适用于大多数贸易合同审查场景的基础规则解析配置，开箱即用",
+            name=DEFAULT_RULE_PARSE_SKILL_NAME,
+            description=DEFAULT_RULE_PARSE_SKILL_DESCRIPTION,
             is_builtin=True,
             enabled=True,
             priority=100,
             version=1,
-            content={
-                "prompt_instructions": [
-                    "rule_text 用简洁中文描述，如'报关单数量应不大于委托单数量'",
-                    "将自然语言规则拆分为单条规则时，保留原文的业务含义",
-                    "如果原始文档使用英文术语，保留英文术语并在括号内附中文翻译",
-                    "输入行带 [SOURCE_ROW=...] 时逐行解析并回填 source_ref；禁止因描述相似跨行合并",
-                    "表格的文件类型列写入 scope，业务条件列写入 structure.condition；合并单元格值已展开到每个数据行",
-                    "描述相似但 scope 或 condition 不同时必须拆成独立规则，禁止合并",
-                ],
-                "field_mappings": {},
-                "defaults": {
-                    "tolerance": {
-                        "amount_percent": 5.0,
-                        "weight_kg": 0.5,
-                    },
-                    "priority": {
-                        "齐套性": 10,
-                        "基础判断": 20,
-                        "信息准确性": 30,
-                        "时间逻辑": 40,
-                    },
-                },
-                "validations": [
-                    {
-                        "field": "tolerance.amount_percent",
-                        "rule": "值必须在 0-100 之间",
-                        "severity": "error",
-                        "message": "金额容差 '{value}' 超出 0-100 范围，请修正",
-                    },
-                    {
-                        "field": "tolerance.weight_kg",
-                        "rule": "值必须 >= 0",
-                        "severity": "error",
-                    },
-                ],
-                "text_preprocessing": [],
-                "term_normalization": {},
-                "domain_context": {
-                    "glossary": {},
-                    "common_patterns": [
-                        "金额对比类规则通常涉及报关单金额 vs 委托单金额",
-                        "数量对比类规则通常涉及报关单数量 vs 委托单数量",
-                        "日期逻辑类规则关注签订日期、报关日期、有效期的先后关系",
-                    ],
-                },
-            },
+            content=content,
         )
         db.add(skill)
         db.commit()
