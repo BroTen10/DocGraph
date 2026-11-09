@@ -193,6 +193,10 @@ bash deploy.sh
 部署入口必须是已完成 TLS 的域名，并把 `PUBLIC_BASE_URL` 配成该 HTTPS 地址。部署脚本会构建镜像、
 启动数据库、执行幂等安全迁移并完成健康检查。
 
+> 尚未完成 TLS 时，可临时设置 `ALLOW_INSECURE_HTTP=true`、`PUBLIC_BASE_URL=http://<IP>:<端口>`、
+> `SESSION_COOKIE_SECURE=false` 通过 HTTP 访问（也可保留 HTTPS 的 `PUBLIC_BASE_URL`，再用
+> `CSRF_ALLOWED_ORIGINS` 放行实际访问来源）。该组合仅限内网/临时环境，公网暴露前必须切回 HTTPS。
+
 ```bash
 bash deploy.sh check      # 部署后自检
 bash deploy.sh status     # 查看容器状态
@@ -232,6 +236,9 @@ docker compose --env-file backend/.env --profile deploy \
 | `LLM_API_KEY` | 空 | LLM/OCR 服务密钥，必填 |
 | `APP_SECRET_KEY` | 空 | 至少 32 字符的随机密钥；生产缺少时拒绝启动 |
 | `PUBLIC_BASE_URL` | `https://docs.example.com` | 邀请/验证/重置链接和 Origin 校验的对外地址 |
+| `CSRF_ALLOWED_ORIGINS` | 空 | 额外放行的写请求来源（逗号分隔，`scheme://host[:port]`） |
+| `ALLOW_INSECURE_HTTP` | `false` | 无 TLS 过渡开关：允许 HTTP 入口；仅限内网/临时 |
+| `SESSION_COOKIE_SECURE` | `true` | 仅 HTTPS 可保持 `true`；HTTP 过渡时必须为 `false` |
 | `EMAIL_BACKEND` | `smtp` | 开发可用 `console`/`outbox`；生产只允许 `smtp` |
 | `SMTP_HOST` / `MAIL_FROM` | 空 | 生产 SMTP 必填 |
 | `SESSION_IDLE_MINUTES` | `120` | 会话空闲超时 |

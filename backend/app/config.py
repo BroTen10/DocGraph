@@ -6,6 +6,8 @@ from pathlib import Path
 from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from .origin_utils import normalize_origin
+
 
 class Settings(BaseSettings):
     """应用配置。所有敏感字段（API key、DB 密码）从环境变量读取。"""
@@ -32,9 +34,27 @@ class Settings(BaseSettings):
     # 同源部署（前端由后端静态托管）时留空即可，无需跨域。
     cors_origins_raw: str = "http://localhost:5173,http://127.0.0.1:5173,http://localhost:3000,http://localhost:8800"
 
+    # 额外放行的写请求来源（逗号分隔，scheme://host[:port]），与
+    # PUBLIC_BASE_URL 同时生效。用于多入口，或暂未启用 TLS、需要通过
+    # http://IP:端口 访问的过渡期；正式启用 HTTPS 后应清空。
+    csrf_allowed_origins: str = ""
+
+    # 无 TLS 过渡开关：显式允许生产配置使用 HTTP 入口并关闭 Secure Cookie。
+    # 默认 false；仅供内网/临时部署，公网正式环境必须保持 false。
+    allow_insecure_http: bool = False
+
     @property
     def cors_origins(self) -> list[str]:
         return [o.strip() for o in self.cors_origins_raw.split(",") if o.strip()]
+
+    @property
+    def csrf_origin_allowlist(self) -> list[str]:
+        """归一化、去重后的额外写请求来源白名单。"""
+        normalized = (
+            normalize_origin(item)
+            for item in self.csrf_allowed_origins.split(",")
+        )
+        return list(dict.fromkeys(origin for origin in normalized if origin))
 
     # 启动时是否重建数据库（DROP SCHEMA + 清空 Neo4j）。
     # 默认 False：仅幂等 create_all，不丢数据。
@@ -87,6 +107,18 @@ class Settings(BaseSettings):
     def _abs_upload_root(cls, v: str) -> str:
         return str(Path(v).resolve())
 
+    @field_validator("csrf_allowed_origins")
+    @classmethod
+    def _validate_csrf_origins(cls, v: str) -> str:
+        for item in v.split(","):
+            item = item.strip()
+            if item and normalize_origin(item) is None:
+                raise ValueError(
+                    f"CSRF_ALLOWED_ORIGINS 含非法来源 {item!r}，"
+                    "应为 scheme://host[:port]"
+                )
+        return v
+
     @model_validator(mode="after")
     def _validate_security(self):
         if not self.app_debug and len(self.app_secret_key) < 32:
@@ -98,10 +130,22 @@ class Settings(BaseSettings):
             "your-secret-key",
         }:
             raise ValueError("生产环境 APP_SECRET_KEY 不能使用示例值")
-        if not self.app_debug and not self.session_cookie_secure:
-            raise ValueError("生产环境必须启用 Secure Cookie")
-        if not self.app_debug and not self.public_base_url.startswith("https://"):
-            raise ValueError("生产环境 PUBLIC_BASE_URL 必须使用 HTTPS")
+        if not self.app_debug and not self.allow_insecure_http:
+            if not self.session_cookie_secure:
+                raise ValueError("生产环境必须启用 Secure Cookie")
+            if not self.public_base_url.startswith("https://"):
+                raise ValueError("生产环境 PUBLIC_BASE_URL 必须使用 HTTPS")
+        if not self.app_debug and self.allow_insecure_http:
+            if not self.public_base_url.startswith(("http://", "https://")):
+                raise ValueError("PUBLIC_BASE_URL 必须是 http(s) 地址")
+            if (
+                self.public_base_url.startswith("http://")
+                and self.session_cookie_secure
+            ):
+                raise ValueError(
+                    "PUBLIC_BASE_URL 为 HTTP 时必须设置 "
+                    "SESSION_COOKIE_SECURE=false，否则浏览器不会保存登录会话"
+                )
         if not self.app_debug and self.email_backend != "smtp":
             raise ValueError("生产环境 EMAIL_BACKEND 必须为 smtp")
         if (

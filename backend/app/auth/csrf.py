@@ -4,11 +4,11 @@ from __future__ import annotations
 
 import hashlib
 import hmac
-from urllib.parse import urlparse
 
 from fastapi import Request
 
 from ..config import settings
+from ..origin_utils import normalize_origin, origin_of_url
 
 UNSAFE_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
 
@@ -30,14 +30,23 @@ def is_public_auth(request: Request) -> bool:
     return request.url.path in PUBLIC_AUTH_PATHS
 
 
+def allowed_origins() -> set[str]:
+    """写请求允许的来源：PUBLIC_BASE_URL 与显式白名单的并集。"""
+    allowed: set[str] = set()
+    base_origin = origin_of_url(settings.public_base_url)
+    if base_origin:
+        allowed.add(base_origin)
+    allowed.update(settings.csrf_origin_allowlist)
+    return allowed
+
+
 def origin_matches(request: Request) -> bool:
     """Accept a missing Origin and reject a present, mismatched Origin."""
     origin = request.headers.get("origin")
     if not origin:
         return True
-    base = urlparse(settings.public_base_url)
-    allowed = f"{base.scheme}://{base.netloc}".rstrip("/")
-    return origin.rstrip("/") == allowed
+    candidate = normalize_origin(origin)
+    return candidate is not None and candidate in allowed_origins()
 
 
 def csrf_header_matches_session(request: Request, session_csrf_hash: str) -> bool:

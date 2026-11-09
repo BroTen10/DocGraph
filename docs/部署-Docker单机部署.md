@@ -59,7 +59,7 @@
    FRONTEND_HOST_PORT=80 bash deploy.sh   # 想直接占 80
    ```
 
-   脚本会：校验 Docker → 检查 `.env`（密钥、HTTPS 地址、SMTP）→ 拦截 `DB_RESET_ON_STARTUP=true`
+   脚本会：校验 Docker → 检查 `.env`（密钥、入口地址与 TLS/过渡开关、SMTP）→ 拦截 `DB_RESET_ON_STARTUP=true`
    → 构建 → 启动 → 幂等租户迁移 → 轮询 `/api/health`。
 
    `backend`、`frontend` 两个服务挂在 compose 的 **`deploy` profile** 下，所以：
@@ -92,6 +92,51 @@
    ```
 
 6. 其它子命令：`bash deploy.sh check|status|logs [服务]|restart|down`。
+
+## 无 TLS 过渡模式（仅内网/临时）
+
+在 HTTPS 尚未就绪、但需要先通过 `http://IP:端口` 访问时，使用显式过渡开关。
+**该模式会让会话 Cookie 经明文 HTTP 传输，禁止作为公网正式入口。**
+
+```bash
+# backend/.env
+ALLOW_INSECURE_HTTP=true
+PUBLIC_BASE_URL=http://203.0.113.10:53267
+SESSION_COOKIE_SECURE=false
+```
+
+把 `203.0.113.10:53267` 换成服务器实际的外网地址。
+
+如果 `PUBLIC_BASE_URL` 要保留给未来的 HTTPS 域名（邀请/验证/重置邮件链接会用它），
+则保持 HTTPS 值不变，只把当前实际访问来源加入白名单：
+
+```bash
+ALLOW_INSECURE_HTTP=true
+PUBLIC_BASE_URL=https://docgraph.example.com
+SESSION_COOKIE_SECURE=false
+CSRF_ALLOWED_ORIGINS=http://203.0.113.10:53267
+```
+
+规则：
+
+- `PUBLIC_BASE_URL` 或白名单必须与实际访问地址的 `scheme://host:port` 一致；默认端口
+  80/443 可省略，其他端口不能省，路径不能写。
+- HTTP 入口下 `SESSION_COOKIE_SECURE` 必须为 `false`，否则浏览器不会保存登录会话。
+- `CSRF_ALLOWED_ORIGINS` 逗号分隔，只写来源；它只影响写请求的 Origin 校验。
+- 同源部署（nginx 同时托管前端并反代 `/api`）不需要额外配置 CORS。
+- `deploy.sh` 在 `PUBLIC_BASE_URL` 为 HTTP 时会强制检查 `ALLOW_INSECURE_HTTP=true` 与
+  `SESSION_COOKIE_SECURE=false`，缺失直接拒绝部署。
+
+完成 HTTPS 后改回：
+
+```bash
+ALLOW_INSECURE_HTTP=false
+SESSION_COOKIE_SECURE=true
+PUBLIC_BASE_URL=https://<域名>
+# 删除 CSRF_ALLOWED_ORIGINS
+```
+
+然后执行 `bash deploy.sh` 重建后端镜像。
 
 ## 升级（拉新代码后重新部署）
 

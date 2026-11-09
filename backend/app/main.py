@@ -73,6 +73,19 @@ async def lifespan(app: FastAPI):
     """应用生命周期：启动时初始化。"""
     logger.info("=== 启动文档审查智能体后端 ===")
     logger.info("版本：%s", collect_build_info()["label"])
+    if settings.allow_insecure_http:
+        logger.warning(
+            "无 TLS 过渡模式已启用（ALLOW_INSECURE_HTTP=true）：Cookie 将经明文 HTTP "
+            "传输，仅限内网/临时环境；启用 HTTPS 后请立即关闭"
+        )
+        if settings.session_cookie_secure:
+            logger.warning(
+                "SESSION_COOKIE_SECURE=true：浏览器经 HTTP 访问时不会保存会话，"
+                "请改为 false"
+            )
+    extra_origins = settings.csrf_origin_allowlist
+    if extra_origins:
+        logger.warning("写请求额外放行来源：%s", ", ".join(extra_origins))
     # 1. 创建缺失表并执行幂等、非破坏性的账号/租户迁移。
     init_db()
     logger.info("Postgres 表已就绪")

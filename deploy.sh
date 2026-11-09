@@ -166,14 +166,24 @@ preflight() {
             ;;
     esac
 
-    local public_url email_backend smtp_host mail_from
+    local public_url email_backend smtp_host mail_from allow_insecure cookie_secure
     public_url="$(read_env PUBLIC_BASE_URL)"
+    allow_insecure="$(read_env ALLOW_INSECURE_HTTP | tr 'A-Z' 'a-z')"
+    [ -n "$allow_insecure" ] || allow_insecure="false"
     case "$public_url" in
         https://*) ;;
-        *) die "PUBLIC_BASE_URL 必须是 HTTPS 地址，例如 https://docs.example.com" ;;
+        http://*)
+            [ "$allow_insecure" = "true" ] \
+                || die "PUBLIC_BASE_URL 是 HTTP；无 TLS 过渡请设置 ALLOW_INSECURE_HTTP=true（仅限内网/临时）"
+            cookie_secure="$(read_env SESSION_COOKIE_SECURE | tr 'A-Z' 'a-z')"
+            [ "$cookie_secure" = "false" ] \
+                || die "HTTP 入口必须设置 SESSION_COOKIE_SECURE=false，否则浏览器不会保存登录会话"
+            warn "PUBLIC_BASE_URL 使用 HTTP（ALLOW_INSECURE_HTTP=true）：仅限内网/临时，公网请尽快启用 HTTPS"
+            ;;
+        *) die "PUBLIC_BASE_URL 必须是 http(s) 地址，例如 https://docs.example.com" ;;
     esac
     case "$public_url" in
-        *example.com*) die "PUBLIC_BASE_URL 仍是示例域名，请改成真实 HTTPS 地址" ;;
+        *example.com*) die "PUBLIC_BASE_URL 仍是示例域名，请改成真实地址" ;;
     esac
     email_backend="$(read_env EMAIL_BACKEND)"
     [ -n "$email_backend" ] || email_backend="smtp"
