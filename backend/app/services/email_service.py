@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import smtplib
+import ssl
 from email.message import EmailMessage
 
 from ..config import settings
@@ -65,8 +66,21 @@ def _send_smtp(
     if html:
         message.add_alternative(html, subtype="html")
 
-    with smtplib.SMTP(settings.smtp_host, settings.smtp_port, timeout=15) as client:
-        if settings.smtp_use_tls:
+    # 465（SMTPS）需整连接加密，587 走 STARTTLS。优先读显式开关，
+    # 未配置时按端口兜底，避免换了端口忘了改开关导致明文连接被拒。
+    use_ssl = settings.smtp_use_ssl or settings.smtp_port == 465
+    if use_ssl:
+        client = smtplib.SMTP_SSL(
+            settings.smtp_host,
+            settings.smtp_port,
+            timeout=15,
+            context=ssl.create_default_context(),
+        )
+    else:
+        client = smtplib.SMTP(settings.smtp_host, settings.smtp_port, timeout=15)
+
+    with client:
+        if settings.smtp_use_tls and not use_ssl:
             client.starttls()
         if settings.smtp_username:
             client.login(settings.smtp_username, settings.smtp_password)

@@ -100,6 +100,8 @@ class Settings(BaseSettings):
     smtp_username: str = ""
     smtp_password: str = ""
     smtp_use_tls: bool = True
+    # 465 等隐式 SSL 端口需要整连接加密（SMTPS），与 587 的 STARTTLS 互斥
+    smtp_use_ssl: bool = False
     trust_proxy_headers: bool = False
 
     @field_validator("upload_root")
