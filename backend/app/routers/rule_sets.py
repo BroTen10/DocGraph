@@ -15,7 +15,12 @@ from sqlalchemy.orm import Session
 from ..auth.dependencies import AuthContext, require_permission
 from ..database import get_db
 from ..models import RuleSet
-from ..schemas.rule_set import RuleSetCreate, RuleSetOut, RuleSetUpdate
+from ..schemas.rule_set import (
+    RuleScenarioOption,
+    RuleSetCreate,
+    RuleSetOut,
+    RuleSetUpdate,
+)
 from ..services import audit_service
 from ..tenant_scope import tenant_get
 
@@ -71,12 +76,35 @@ def create_rule_set(
         doc_types=payload.doc_types,
         check_categories=payload.check_categories,
         use_default_skill=payload.use_default_skill,
+        scenario=payload.scenario,
         is_default=payload.is_default,
     )
     db.add(rs)
     db.commit()
     db.refresh(rs)
     return RuleSetOut.model_validate(rs)
+
+
+@router.get("/scenarios", response_model=list[RuleScenarioOption])
+def list_rule_scenarios(
+    ctx: AuthContext = Depends(require_permission("review.view")),
+) -> list[RuleScenarioOption]:
+    """列出可选的业务场景（内置场景知识包），供规则集默认场景与导入时选择。
+
+    注意：必须声明在 `/{rule_set_id}` 之前，否则会被路径参数吞掉。
+    """
+    from ..default_rule_parse_skill import load_builtin_skill_packs
+
+    return [
+        RuleScenarioOption(
+            key=pack.scenario,
+            name=pack.name,
+            description=pack.description,
+            priority=pack.priority,
+        )
+        for pack in load_builtin_skill_packs()
+        if pack.scenario
+    ]
 
 
 @router.get("/{rule_set_id}", response_model=RuleSetOut)

@@ -16,6 +16,10 @@ class RuleSetBase(BaseModel):
     doc_types: list[str] = Field(default_factory=list)
     check_categories: list[str] = Field(default_factory=list)
     use_default_skill: bool = True
+    scenario: str | None = Field(
+        default=None,
+        description="业务场景键（对应内置场景知识包，如 trade/expense/supplier）；NULL 表示未声明",
+    )
     is_default: bool = False
 
 
@@ -33,6 +37,7 @@ class RuleSetUpdate(BaseModel):
     doc_types: list[str] | None = None
     check_categories: list[str] | None = None
     use_default_skill: bool | None = None
+    scenario: str | None = None
     is_default: bool | None = None
 
 
@@ -44,3 +49,12 @@ class RuleSetOut(RuleSetBase):
     id: UUID
     created_at: datetime
     updated_at: datetime
+
+
+class RuleScenarioOption(BaseModel):
+    """可选业务场景（来自内置场景知识包，新增 YAML 包后自动出现）。"""
+
+    key: str
+    name: str
+    description: str = ""
+    priority: int = 100

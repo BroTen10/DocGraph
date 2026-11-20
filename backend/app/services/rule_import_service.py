@@ -49,107 +49,16 @@ logger = logging.getLogger(__name__)
 
 
 # ============ LLM 提示词 ============
-_SYSTEM_PROMPT = """你是单证审查规则解析助手。任务：把用户提供的自然语言规则清单，解析为结构化的规则列表，并抽象出规则涉及的文件类型、字段与检查意图（本体）。
-
-输出契约（严格 JSON，不要输出任何其他内容）：
-{
-  "rules": [
-    {
-      "doc_type": "主文件类型（可选派生标签，见规则1）",
-      "check_category": "主检查项（可选派生标签，见规则2）",
-      "scope": {"doc_types": ["涉及的多个文件类型"] 或 "ALL"（整批合同/全部文件）或 null, "intents": ["检查意图列表"]},
-      "rule_text": "规则文本（简洁、可执行的自然语言描述）",
-      "source_ref": "来源行引用（如 规则!2；仅当输入行带 [SOURCE_ROW=...] 时填写，否则省略）",
-      "structure": {
-        "condition": {"text": "触发条件原文或null", "field": "条件涉及字段名或null", "operator": "等于/包含于等或null", "value": "条件取值或null"},
-        "assertion": {
-          "source": {"doc_type": "源文件类型", "field": "源字段名", "aggregate": "SUM|ANY|ALL|null（多单汇总语义，分批付款场景用 SUM）", "role": "字段角色（委托方/收款方/收货方等或null）"},
-          "operator": "等于|不大于|不小于|时间早于|时间不晚于|总额等于|包含于",
-          "target": {"doc_type": "目标文件类型", "field": "目标字段名", "aggregate": "同上", "role": "同上"},
-          "currency": "币别（CNY/USD等，原文未涉及填null）",
-          "unit": "单位（件/吨/箱等，原文未涉及填null）"
-        },
-        "exceptions": [{"text": "例外条款原文", "reason": "例外原因或null",
-                        "field": "例外判据涉及的字段名或null（如金额/文件类型）",
-                        "operator": "等于/不等于/小于/大于/包含/包含于等或null",
-                        "value": "例外判据取值或null（如5000）"}]
-      },
-      "tolerance": {"amount_percent": 数字或null, "weight_kg": 数字或null, "time_days": 数字或null, "allow_same_day": 布尔或null},
-      "priority": 数字（越小越先，默认100）,
-      "confidence": 0-1之间的浮点数，代表你对这条规则理解的确定程度
-    }
-  ],
-  "ontology": {
-    "doc_types": [{"name": "新文件类型名", "description": "简要说明", "aliases": ["别名"]}],
-    "fields": [{"name": "字段名", "doc_type": "所属文件类型", "unit": "单位或null", "currency": "币别或null"}],
-    "check_intents": [{"name": "新检查意图名", "description": "简要说明"}]
-  },
-  "defects": [
-    {
-      "type": "缺陷类型",
-      "severity": "error|warning|info",
-      "description": "问题描述",
-      "rule_index": 该缺陷对应的规则在 rules 数组中的索引（若无对应规则则填null）
-    }
-  ]
-}
-
-规则：
-1. doc_type 是**可选派生标签**：仅当规则明确指向单一文件类型、且该类型与下方"已知文件类型"一致时填写；跨文件比对、整批规则不填 doc_type，改用 scope.doc_types（列表）或 "ALL"。**不要为满足枚举而臆造文件类型**
-2. check_category 同样是**可选派生标签**：仅当规则核心意图能明确归入下方"已知检查项"时填写；否则不填，改在 scope.intents 中给出准确的检查意图名
-3. scope 每个规则都尽量给出（doc_types 列表 / "ALL" / null，intents 至少 1 个）；规则涉及未注册的新文件类型时，**以原文表述为准**提出简洁、无歧义的新类型名，并登记到 ontology.doc_types；新字段登记到 ontology.fields（附所属文件类型）；无法归入已知检查项的新意图登记到 ontology.check_intents
-4. rule_text 用简洁中文描述，如"报关单数量应不大于委托单数量"
-5. tolerance 只在规则涉及金额/重量/时间比对时填写，否则字段留 null
-6. priority 默认 100；齐套性规则建议 10，基础判断建议 20，信息准确性建议 30，时间逻辑建议 40
-7. 一条自然语言描述拆为一条规则；若用户文本含多条规则，全部解析
-7.1 structure 为可选字段：规则文本包含"如果/若/除非"等条件表述时填入 condition；规则涉及跨文件字段比对时填入 assertion（source/target 必须来自规则文本，不能臆造）；包含"除…外/例外"表述时填入 exceptions；无法结构化时整个 structure 置 null。若例外条款可归结为"某字段满足某条件即豁免"（如"金额小于5000元时除外"），请在 exceptions 中补充 field/operator/value，执行引擎可程序化豁免；纯文本例外（无法归因到字段）则只填 text
-8. 忽略与单证审查无关的内容
-9. confidence 反映你对这条规则确信程度：规则描述非常清楚、无歧义则接近 1.0；含模糊表述（如"部分情况""一般""可能"）则适当降低；完全不确定或不合理则为 0.0
-10. 为减少输出体积，值为 null 的字段省略不输出（客户端自动补全），confidence 字段值为 1.0 时同理省略；defects 无缺陷时整个数组省略；ontology 无新概念时省略
-11. 紧凑输出（防止长清单被 max_tokens 截断）：rules 数组按"每行一条规则"输出、逗号分隔，不输出多余空行、注释或解释文字；structure/tolerance 仅在有内容时输出
-12. 输入行若带 `[SOURCE_ROW=...]`，该行是一个独立的规则候选：必须逐行解析，并在输出中原样回填 `source_ref`；禁止因为多行规则描述相似而把不同行合并成一条
-13. 表格行中的“文件类型/单据类型/适用单据”等列必须写入该规则的 scope；多行共享同一合并单元格时，该合并值已经展开到每个数据行，必须逐行继承
-14. 表格行中的“业务条件/场景/模式”等条件列必须写入 structure.condition；描述相似但 scope 或 condition 不同的规则必须分别输出，禁止合并
-
-### 缺陷检测指令
-对每条被解析的规则，执行以下检查，将结果填入 `defects` 数组：
-
-1. `ambiguous_reference`：规则中是否包含"相关""相应""有关""等"等模糊引用，导致执行者无法确定具体指代？
-2. `incomplete_condition`：规则的条件是否不完整？例如提到金额比对但没有说和什么比、缺少比较对象？
-3. `missing_value`：规则涉及金额/重量/时间的比对，但原文没有给出任何容差或阈值？
-4. `contradiction`：这条规则是否和同一批次中已解析的其他规则存在明显的语义矛盾？
-5. `uncertainty`：你对这条规则的理解是否有任何不确定的地方？比如术语含义模糊、多种可能的解读？
-
-缺陷类型说明：
-- ambiguous_reference：涉及模糊引用，让用户确认具体指代
-- incomplete_condition：条件不完整，需要用户补充信息
-- missing_value：缺少关键数值参数
-- contradiction：规则间存在矛盾
-- uncertainty：存在理解上的不确定
-- description 禁止写“规则0/规则1”等数组序号；如需引用其他规则，请引用规则原文。系统入库后会补充规则流水号。
-
-severity 说明：
-- error：大概率有问题的规则，需要用户处理
-- warning：可能存在问题的规则，建议用户检查
-- info：仅供参考，不影响规则执行"""
-
-_USER_PROMPT_TEMPLATE = """已知文件类型（建议复用，不强制；规则出现新类型时以原文为准并提出新名称）：{doc_types}
-
-已知检查项（建议复用，不强制；规则出现新意图时以原文为准并提出新名称）：{check_categories}
-
-请解析以下规则清单：
-
----
-{raw_text}
----
-
-若输入行带 `[SOURCE_ROW=...]`，请逐行解析并原样回填 source_ref。请输出 JSON。"""
-
+# 生效提示词统一由 prompt_templates.py 的 RULE_IMPORT_SYSTEM / RULE_IMPORT_USER 提供，
+# 经 settings_service.get_prompt 读取（租户可在设置页覆盖）。此处不再内联重复维护。
 
 _TABLE_ROW_SYSTEM_ADDITION = """### 表格行解析约束（系统注入，优先于其他提示词）
 - 输入中每行 `[SOURCE_ROW=...]` 代表一个独立的规则候选，必须逐行解析并原样回填 `source_ref`。
 - 禁止因为多行规则描述相似而把不同行合并成一条规则。
-- 行内的文件类型/单据类型/适用单据字段写入 scope；业务条件/场景/模式字段写入 structure.condition。
+- 行内的文件类型/单据类型/适用单据/适用对象字段写入 scope；业务条件/场景/模式/触发条件字段写入 structure.condition。
+- 结构化模板列按语义直接映射：规则正文/规则描述→rule_text；适用单据或适用对象→scope.doc_types；触发条件→structure.condition；比较关系→structure.assertion；容差→tolerance；例外→structure.exceptions；模板已填的值不得改写或丢弃。
+- 列名尾部的（必填）（建议填）（可留空）等档位标注只给填写人看，映射时忽略标注、按标注前的主名判断。
+- 留空的列表示交由你从规则正文推断，不是信息缺失；不得因某列留空而报缺陷或降低 confidence。
 - 合并单元格的值已经展开到每个数据行；描述相似但 scope、condition 或 exceptions 不同的规则必须分别输出。"""
 
 
@@ -295,6 +204,32 @@ def _scope_key(scope: dict | None) -> tuple:
     return ("__EMPTY__",)
 
 
+_MISSING_SCOPE_KEYS = {("__MISSING__",), ("__EMPTY__",)}
+
+
+def _is_missing_scope(scope_key: tuple) -> bool:
+    """scope 未填写（模板里「适用单据」列留空）。"""
+    return scope_key in _MISSING_SCOPE_KEYS
+
+
+def _context_compatible(new_context: tuple, old_context: tuple) -> tuple[bool, bool]:
+    """判断两条规则的语义边界是否可比。
+
+    返回 (是否可比, scope 是否严格相等)。
+    scope 一方未填写时视为"填充不一致"而非"业务边界不同"：只要 condition 与
+    exceptions 完全一致，仍允许在极高文本相似度下合并，避免"同一规则一次填了
+    适用单据、一次留空"被重复入库。
+    """
+    if new_context[1:] != old_context[1:]:
+        return False, False
+    same_scope = new_context[0] == old_context[0]
+    if same_scope:
+        return True, True
+    if _is_missing_scope(new_context[0]) or _is_missing_scope(old_context[0]):
+        return True, False
+    return False, False
+
+
 def _semantic_context_signature(
     structure: dict | None,
     scope: dict | None,
@@ -332,6 +267,19 @@ def _structure_signature(structure: dict | None) -> tuple | None:
     return sig if any(sig) else None
 
 
+def _assertion_subject(structure: dict | None) -> tuple | None:
+    """断言主体签名：源/目标的对象类型与字段（不含 operator）。
+
+    两条规则的主体不同（如"数量"与"金额"），即使句式高度相似也是不同规则，
+    不允许被文本相似度合并掉。operator 不参与，避免同一约束的不同措辞被拆散。
+    """
+    sig = _structure_signature(structure)
+    if not sig:
+        return None
+    subject = sig[1:]
+    return subject if any(subject) else None
+
+
 def _missing_assertion_fields(structure: dict | None) -> list[str]:
     """列出结构化断言中缺失的 source/target.field。"""
     if not isinstance(structure, dict):
@@ -358,19 +306,28 @@ def _find_similar_rule(
 ):
     """在规则集内查找与新规则高度相似的规则（批次 10：不再按格子分组）。
     匹配策略：
-    0. 先要求 scope + condition + exceptions 的语义边界一致；
+    0. 先要求 condition + exceptions 的语义边界一致；scope 一方留空时按"填充不一致"
+       处理，但需要极高的文本相似度（0.95）才允许合并；
+    0.1 双方都有结构化断言且断言主体（对象类型/字段）不同 → 直接判定为不同规则，
+        避免"数量不大于"与"金额不大于"这类同句式异字段规则被相似度误合并；
     1. 文本相似度 >= threshold 直接命中；
     2. 结构化断言签名一致（operator + 源/目标类型与字段）且文本相似度 >= 0.6 也命中。
     """
     new_sig = _structure_signature(new_structure)
+    new_subject = _assertion_subject(new_structure)
     new_context = _semantic_context_signature(new_structure, new_scope)
     for rule in existing_rules:
         old_context = _semantic_context_signature(rule.structure, rule.scope)
-        if old_context != new_context:
+        compatible, same_scope = _context_compatible(new_context, old_context)
+        if not compatible:
+            continue
+        old_subject = _assertion_subject(rule.structure)
+        if new_subject and old_subject and new_subject != old_subject:
             continue
         existing_normed = _normalize_text(rule.rule_text)
         sim = _text_similarity(new_normed, existing_normed)
-        if sim >= threshold:
+        effective_threshold = threshold if same_scope else 0.95
+        if sim >= effective_threshold:
             return rule
         if new_sig:
             old_sig = _structure_signature(rule.structure)
@@ -427,6 +384,26 @@ def _extract_intents(item: dict, scope: dict | None) -> list[str]:
     if item_cat and item_cat not in intents:
         intents.insert(0, item_cat)
     return intents
+
+
+def _assertion_field_refs(structure: dict | None) -> list[tuple[str, str]]:
+    """提取结构化断言引用的 (doc_type, field) 对（source / target）。"""
+    if not isinstance(structure, dict):
+        return []
+    assertion = structure.get("assertion")
+    if not isinstance(assertion, dict):
+        return []
+    refs: list[tuple[str, str]] = []
+    for side in ("source", "target"):
+        node = assertion.get(side)
+        if isinstance(node, dict):
+            refs.append(
+                (
+                    str(node.get("doc_type") or "").strip(),
+                    str(node.get("field") or "").strip(),
+                )
+            )
+    return refs
 
 
 def _derive_doc_type(structure: dict | None, scope: dict | None) -> str:
@@ -679,27 +656,15 @@ def _known_check_categories(
 ) -> list[str]:
     """构造规则导入提示词中的"已知检查项"清单。
 
-    与 _known_doc_types 对称：当前规则集已累积的检查项/意图
-    （rule_set.check_categories，保持声明顺序）优先，再补充内置常量，
-    两者去重；注册表为空时回退到常量清单。
+    与 _known_doc_types 对称，但**只喂已确认（active）的检查项**：
+    未确认的新检查项如果回灌进提示词，会让大模型反复复用同一个自造名称，
+    形成"自我强化"的双轨繁殖。注册表为空时回退到内置四类常量。
     """
+    from .check_intent_service import active_intent_names
+
     names: list[str] = []
     seen: set[str] = set()
-
-    rs = db.execute(
-        select(RuleSet).where(
-            RuleSet.id == rule_set_id,
-            RuleSet.tenant_id == tenant_id,
-        )
-    ).scalar_one_or_none()
-    if rs is not None:
-        for name in rs.check_categories or []:
-            name = str(name).strip()
-            if name and name not in seen:
-                seen.add(name)
-                names.append(name)
-
-    for name in CHECK_CATEGORIES:
+    for name in active_intent_names(db, tenant_id):
         name = str(name).strip()
         if name and name not in seen:
             seen.add(name)
@@ -787,6 +752,8 @@ def import_rules_from_text(
     progress: ImportProgress | None = None,
     source_rows: list[dict[str, Any]] | None = None,
     source_meta: dict[str, Any] | None = None,
+    import_context: str | None = None,
+    scenario: str | None = None,
 ) -> dict[str, Any]:
     """从自然语言规则清单文本批量导入规则。
 
@@ -797,6 +764,9 @@ def import_rules_from_text(
         directive: Skill 编译后的解析指令（可选），指定后应用预处理/字段映射/默认值等
         source_rows: 结构化来源行（Excel 等表格格式），用于来源追溯与覆盖率校验
         source_meta: 来源文件元数据（文件名、提取器信息等）
+        import_context: 文档级声明（业务场景、术语与别名等），注入用户提示词头部
+        scenario: 本次实际使用的业务场景键，写入每条规则的 scenario 标签
+            （自定义场景通道为 None）
 
     Returns:
         {"total": 解析总数, "imported": 入库成功数, "skipped": 跳过数, "rules": [入库的规则],
@@ -849,11 +819,22 @@ def import_rules_from_text(
     ontology: dict[str, list] = {"doc_types": [], "fields": [], "check_intents": []}
     for idx, chunk in enumerate(chunks, start=1):
         chunk_source_refs = _source_refs_in_text(chunk)
-        user_prompt = get_prompt(db, tenant_id, "rule_import.user").format(
-            doc_types=doc_types_str,
-            check_categories=check_categories_str,
-            raw_text=chunk,
-        )
+        try:
+            user_prompt = get_prompt(db, tenant_id, "rule_import.user").format(
+                doc_types=doc_types_str,
+                check_categories=check_categories_str,
+                raw_text=chunk,
+                import_context=import_context or "",
+            )
+        except KeyError:
+            # 租户自定义模板使用了未知占位符：退化为只填充基础占位符
+            user_prompt = get_prompt(db, tenant_id, "rule_import.user").format(
+                doc_types=doc_types_str,
+                check_categories=check_categories_str,
+                raw_text=chunk,
+            )
+            if import_context:
+                user_prompt = f"{import_context}\n\n{user_prompt}"
         # 构建动态 System Prompt（附加 Skill 指令 + 领域上下文）
         system_content = get_prompt(db, tenant_id, "rule_import.system")
         if source_rows:
@@ -948,6 +929,66 @@ def import_rules_from_text(
     # 收集新发现的类型，用于后续更新 rule_set.doc_types / check_categories
     new_doc_types: set[str] = set()
     new_check_categories: set[str] = set()
+    # ② 检查项写时归一：别名索引在循环前建一次；未命中规范名的新名称登记为待确认
+    from .check_intent_service import (
+        build_intent_alias_index,
+        resolve_or_register as register_check_intent,
+    )
+
+    intent_alias_index = build_intent_alias_index(db, tenant_id)
+    # 惰性读取：只在真的发现未登记检查项时才查设置，避免无谓的额外查询
+    _auto_confirm_cache: bool | None = None
+
+    def _intent_auto_confirm() -> bool:
+        nonlocal _auto_confirm_cache
+        if _auto_confirm_cache is None:
+            try:
+                _auto_confirm_cache = bool(
+                    get_setting(db, tenant_id, "rules.auto_confirm_new_check_intents")
+                )
+            except Exception:
+                logger.warning(
+                    "读取 rules.auto_confirm_new_check_intents 失败，按未开启处理",
+                    exc_info=True,
+                )
+                _auto_confirm_cache = False
+        return _auto_confirm_cache
+    unknown_field_refs: dict[str, set[str]] = {}
+    rule_unknown_fields: dict[int, list[str]] = {}
+
+    # ③ 候选字段集：内置模板 + 租户登记类型的 key_fields + 本次 ontology 声明
+    # 只有"类型已登记且字段不在候选集里"才判为未登记字段（新类型本次无法判断，故跳过）
+    candidate_fields: dict[str, set[str]] = {}
+
+    def _add_candidate(doc_type_name: str, fields) -> None:
+        doc_type_name = str(doc_type_name or "").strip()
+        if not doc_type_name:
+            return
+        bucket = candidate_fields.setdefault(doc_type_name, set())
+        for field_name in fields or []:
+            field_name = str(field_name or "").strip()
+            if field_name:
+                bucket.add(field_name)
+
+    from ..constants import FIELD_TEMPLATES as _FIELD_TEMPLATES
+
+    for _dt, _fields in _FIELD_TEMPLATES.items():
+        _add_candidate(_dt, _fields)
+    for _row in db.execute(
+        select(DocumentType.name, DocumentType.key_fields).where(
+            DocumentType.tenant_id == tenant_id
+        )
+    ).all():
+        _add_candidate(_row[0], _row[1])
+    for _f in ontology.get("fields") or []:
+        if isinstance(_f, dict):
+            _fdt = _norm_doc_type(
+                db, str(_f.get("doc_type") or "").strip(), tenant_id=tenant_id
+            )
+            _fname, _ = _norm_field(
+                db, _fdt, str(_f.get("name") or "").strip(), tenant_id=tenant_id
+            )
+            _add_candidate(_fdt, [_fname])
 
     for i, item in enumerate(raw_rules, start=1):
         if not isinstance(item, dict):
@@ -1002,7 +1043,11 @@ def import_rules_from_text(
         if missing_assertion_fields:
             assert isinstance(structure, dict)
             structure.pop("assertion", None)
-            if not structure.get("condition") and not structure.get("exceptions"):
+            if (
+                not structure.get("condition")
+                and not structure.get("exceptions")
+                and not structure.get("requirement")
+            ):
                 structure = None
 
         # 批次 11：写时归一——文档类型/字段名映射到规范名（显式别名表，防双轨繁殖）。
@@ -1018,6 +1063,27 @@ def import_rules_from_text(
                 doc_type or None,
                 tenant_id=tenant_id,
             )
+
+        # ② 检查项写时归一：先按别名表映射到规范名，未登记的交给下方登记流程
+        if check_category:
+            check_category = intent_alias_index.get(check_category, check_category)
+        if intents:
+            intents = [intent_alias_index.get(x, x) for x in intents]
+        if scope and isinstance(scope.get("intents"), list):
+            scope = dict(scope)
+            scope["intents"] = [intent_alias_index.get(x, x) for x in scope["intents"]]
+
+        # ③ 未登记字段检测：结构化断言引用的字段若不在该类型的抽取模板里，
+        # 审查时必然得不到值 → 导入期就提示，而不是等审查时给一句"无法核验"
+        for ref_doc_type, ref_field in _assertion_field_refs(structure):
+            if not ref_doc_type or not ref_field:
+                continue
+            if ref_doc_type not in candidate_fields:
+                continue  # 类型本身没登记（例如本次新发现），无从判断字段
+            if ref_field not in candidate_fields[ref_doc_type]:
+                ref_key = f"{ref_doc_type}.{ref_field}"
+                unknown_field_refs.setdefault(ref_key, set()).add(str(i))
+                rule_unknown_fields.setdefault(i, []).append(ref_key)
 
         # 收集新发现的类型/意图（含 scope 声明；ontology 声明在循环后并入）
         if doc_type:
@@ -1063,6 +1129,15 @@ def import_rules_from_text(
                 "severity": d.get("severity", "info"),
                 "description": d.get("description", ""),
             })
+        for ref_key in rule_unknown_fields.get(i, []):
+            clean_defects.append({
+                "type": "unknown_field",
+                "severity": "info",
+                "description": (
+                    f"规则引用了未登记字段 {ref_key}，该字段不在其文件类型的抽取模板中，"
+                    "审查时可能无法核验；可在「文档类型」页补充字段或改由语义审查处理"
+                ),
+            })
         if missing_assertion_fields:
             clean_defects.append({
                 "type": "incomplete_condition",
@@ -1072,6 +1147,27 @@ def import_rules_from_text(
                     f"{'/'.join(missing_assertion_fields)} 字段，"
                     "已退回按规则原文审查"
                 ),
+            })
+        # 判定架构 P3：契约体检——把"规则形状装不进结构契约"的问题在导入期显性化，
+        # 而不是等审查时由引擎猜（历史上这类静默丢弃导致"金额与签字比大小"的错误建图）。
+        from .review_intent import model_warnings as _model_warnings
+
+        _st = structure if isinstance(structure, dict) else {}
+        _cond = _st.get("condition") if isinstance(_st.get("condition"), dict) else None
+        _assertion = _st.get("assertion") if isinstance(_st.get("assertion"), dict) else {}
+        _src = (_assertion.get("source") or {}).get("field") if isinstance(_assertion.get("source"), dict) else None
+        _tgt = (_assertion.get("target") or {}).get("field") if isinstance(_assertion.get("target"), dict) else None
+        for _warn in _model_warnings(
+            rule_text,
+            _cond,
+            str(_assertion.get("operator") or ""),
+            str(_src or ""),
+            str(_tgt or ""),
+        ):
+            clean_defects.append({
+                "type": "modeling_risk",
+                "severity": "warning",
+                "description": _warn + "；请核对 structure.condition / structure.requirement",
             })
 
         # 来源追溯（批次 10 / 表格行级）
@@ -1158,6 +1254,7 @@ def import_rules_from_text(
             payload = RuleCreate(
                 doc_type=doc_type or None,
                 check_category=check_category or None,
+                scenario=scenario,
                 rule_text=rule_text,
                 tolerance=tolerance,
                 structure=structure,
@@ -1202,7 +1299,8 @@ def import_rules_from_text(
             )
     for x in ontology.get("check_intents") or []:
         if isinstance(x, dict) and str(x.get("name") or "").strip():
-            new_check_categories.add(str(x["name"]).strip())
+            raw_intent = str(x["name"]).strip()
+            new_check_categories.add(intent_alias_index.get(raw_intent, raw_intent))
 
     # 更新 rule_set.doc_types / check_categories，合并新发现的类型
     if imported:
@@ -1228,6 +1326,24 @@ def import_rules_from_text(
                     )
         except Exception:
             logger.warning("更新规则集类型失败（不影响已入库规则）", exc_info=True)
+
+    # ② 新检查项登记：pending_review（人工确认后才参与矩阵分列与执行分派）
+    registered_intents: list[str] = []
+    if new_check_categories:
+        for name in sorted(new_check_categories):
+            canonical, is_new = register_check_intent(
+                db, tenant_id, name, auto_confirm=_intent_auto_confirm()
+            )
+            if is_new and canonical:
+                registered_intents.append(canonical)
+        if registered_intents:
+            db.commit()
+            logger.info(
+                "规则导入发现 %d 个新检查项（%s）: %s",
+                len(registered_intents),
+                "已自动确认" if _intent_auto_confirm() else "待确认",
+                "、".join(registered_intents),
+            )
 
     # 从 ontology.fields 建立 类型→字段 映射，用于预填新类型的 key_fields（批次 10）
     field_map: dict[str, list[str]] = {}
@@ -1256,7 +1372,6 @@ def import_rules_from_text(
     new_doc_type_names = set()
     if new_doc_types:
         try:
-            from ..models import DocumentType
             # 查询已有活跃类型名称
             existing = db.execute(
                 select(DocumentType.name).where(
@@ -1338,6 +1453,20 @@ def import_rules_from_text(
     )
     import_warnings = list(dict.fromkeys(source_warnings + coverage_warnings))
 
+    # ③ 未登记字段：汇总为导入告警（明细已作为 info 缺陷挂在对应规则上）
+    if unknown_field_refs:
+        detail = "；".join(
+            f"{ref}（第 {'/'.join(sorted(rows, key=int))} 条）"
+            for ref, rows in sorted(unknown_field_refs.items())
+        )
+        import_warnings = list(dict.fromkeys(
+            import_warnings
+            + [
+                f"以下字段未登记在对应文件类型的抽取模板中，审查时可能无法核验：{detail}。"
+                "可在「文档类型」页补充字段，或把该判定交给语义审查"
+            ]
+        ))
+
     return {
         "total": len(raw_rules),
         "imported": len(imported),
@@ -1346,6 +1475,7 @@ def import_rules_from_text(
         "errors": errors,
         "conflict_report": conflict_report.model_dump(mode="json") if conflict_report.total_defects > 0 else None,
         "new_doc_types": list(new_doc_types),
+        "new_check_categories": registered_intents,
         "import_warnings": import_warnings,
         "source_coverage": source_coverage,
     }
@@ -1360,6 +1490,8 @@ def import_rules_with_skills(
     progress: ImportProgress | None = None,
     source_rows: list[dict[str, Any]] | None = None,
     source_meta: dict[str, Any] | None = None,
+    scenario: str | None = None,
+    import_context: str | None = None,
 ) -> dict[str, Any]:
     """从文本导入规则，自动加载并应用 Skill。
 
@@ -1369,9 +1501,13 @@ def import_rules_with_skills(
         db: 数据库会话
         rule_set_id: 规则集 ID
         raw_text: 规则文本
-        skill_ids: 指定应用的 Skill ID，不传则使用该规则集所有已启用的 Skill
+        skill_ids: 「自定义场景」通道：勾选的 Skill（与基线之上的叠加）。传了就**不再加载
+            场景知识包**，生效 = 系统预设（通用契约包）+ 勾选的 Skill；不传则走「出厂场景」
+            通道（通用契约 + 场景包 + 规则集自定义 Skill）
         source_rows: 结构化来源行（Excel 等表格格式）
         source_meta: 来源文件元数据
+        scenario: 本次导入声明的业务场景键（优先级高于规则集默认场景）
+        import_context: 文档级声明（场景、术语与别名），注入用户提示词头部
 
     Returns:
         同 import_rules_from_text 的返回
@@ -1385,9 +1521,29 @@ def import_rules_with_skills(
     if rule_set is None:
         raise ValueError("规则集不存在")
 
+    # 两条互斥通道（与导入弹窗的两个下拉一一对应）：
+    #   A. 出厂场景（未勾选 Skill）：通用契约 + 本次场景的场景包 + 规则集自定义 Skill，
+    #      场景优先级 = 导入参数 > 文件声明 > 规则集默认 > 兜底 trade；
+    #   B. 自定义场景（勾选了 Skill）：系统预设（通用契约）+ 勾选的 Skill；
+    #      此时不加载任何场景包，避免出厂领域知识与客户自定义场景混用。
+    from .rule_parse_engine import _merge_content, compile_directive_with_skills
+
     if skill_ids:
-        # 指定了具体的 Skill 列表，只加载这些（批次 3-6：停用/不存在的 Skill 显式报错，杜绝静默丢弃）
+        directive, preset_skills = compile_directive_with_skills(
+            db, tenant_id, rule_set_id, preset_only=True
+        )
+    else:
+        directive, preset_skills = compile_directive_with_skills(
+            db, tenant_id, rule_set_id, scenario=scenario
+        )
+    baseline_ids = {s.id for s in preset_skills}
+    applied_skills = [s.name for s in preset_skills]
+
+    if skill_ids:
+        # 自定义场景通道：勾选的 Skill 叠加在系统预设之上（后写覆盖先写）。
+        # 停用/不存在的 Skill 仍显式报错，杜绝静默丢弃。
         from ..models import RuleParseSkill
+
         requested = list(dict.fromkeys(skill_ids))
         skills = db.execute(
             select(RuleParseSkill).where(
@@ -1402,9 +1558,14 @@ def import_rules_with_skills(
                         & RuleParseSkill.tenant_id.is_(None)
                     )
                 ),
+            ).order_by(
+                # 固定合并顺序，避免同名键覆盖关系随查询计划漂移（与 compile_directive 一致）
+                RuleParseSkill.is_builtin.desc(),
+                RuleParseSkill.priority,
+                RuleParseSkill.name,
             )
         ).scalars().all()
-        by_id = {s.id: s for s in skills}
+        by_id = {s.id for s in skills}
         missing = [sid for sid in requested if sid not in by_id]
         if missing:
             raise ValueError(f"指定的 Skill 不存在: {missing}")
@@ -1412,14 +1573,23 @@ def import_rules_with_skills(
         if disabled:
             raise ValueError(f"以下 Skill 已停用，无法用于本次导入: {'、'.join(disabled)}")
 
-        directive = RuleParseDirective()
-        from .rule_parse_engine import _merge_content
         for s in skills:
+            if s.id in baseline_ids:
+                # 系统预设已包含（例如通用解析契约），不重复合并
+                continue
             _merge_content(directive, s.content or {})
+            applied_skills.append(s.name)
+            logger.info("本次导入应用自定义 Skill: %s（priority=%s）", s.name, s.priority)
+
+    # 场景解析（先算出来，供每条规则的 scenario 标签使用）
+    from .rule_parse_engine import resolve_scenario
+
+    if skill_ids:
+        # 自定义场景通道：本次没有加载任何场景包，回显空场景
+        # （前端据此不再显示场景标签，改为显示实际应用的 Skill 清单）
+        resolved_scenario = None
     else:
-        # 未指定，从数据库编译（内置默认 + 自定义）
-        from .rule_parse_engine import compile_directive
-        directive = compile_directive(db, tenant_id, rule_set_id)
+        resolved_scenario = resolve_scenario(rule_set, scenario)
 
     result = import_rules_from_text(
         db,
@@ -1430,7 +1600,24 @@ def import_rules_with_skills(
         progress=progress,
         source_rows=source_rows,
         source_meta=source_meta,
+        import_context=import_context,
+        scenario=resolved_scenario,
     )
+
+    if not skill_ids:
+        from ..default_rule_parse_skill import known_scenarios
+
+        if rule_set.use_default_skill and resolved_scenario not in known_scenarios():
+            result["import_warnings"] = list(dict.fromkeys(
+                list(result.get("import_warnings") or [])
+                + [
+                    f"业务场景「{resolved_scenario}」未登记场景知识包，"
+                    "本次仅使用通用解析契约；如需领域口径请在导入文件声明已登记的场景键，"
+                    "或由管理员新增场景知识包"
+                ]
+            ))
+    result["scenario"] = resolved_scenario
+    result["applied_skills"] = applied_skills
 
     # 导入完成后自动触发冲突检测
     if result.get("imported", 0) > 0:
@@ -1446,6 +1633,18 @@ def import_rules_with_skills(
             )
             if progress is not None:
                 update_task(progress, conflict_found=conflict_result.get("total_conflicts", 0))
+            if conflict_result.get("detection_incomplete"):
+                # 检测未跑完：不能把"没检出冲突"当成"冲突已消除"，明确告知用户
+                logger.warning(
+                    "导入后冲突检测未完成: %s 组失败 / 共 %s 组",
+                    conflict_result.get("failed_groups"),
+                    conflict_result.get("total_groups"),
+                )
+                result["import_warnings"] = list(dict.fromkeys(
+                    list(result.get("import_warnings") or [])
+                    + list(conflict_result.get("warnings") or [])
+                    + ["冲突检测未完整完成，相关规则的既有冲突与状态保持不变，请稍后重试检测"]
+                ))
             if conflict_result.get("total_conflicts", 0) > 0:
                 logger.info(
                     "导入后冲突检测: %d 个冲突, %d 条规则受影响",

@@ -40,7 +40,9 @@ class ImportSkillScopeTests(unittest.TestCase):
     def test_default_skill_selection_resolves_ruleset_before_compile(self) -> None:
         tenant_id = uuid.uuid4()
         rule_set_id = uuid.uuid4()
-        rule_set = SimpleNamespace(id=rule_set_id)
+        rule_set = SimpleNamespace(
+            id=rule_set_id, scenario=None, use_default_skill=True
+        )
         expected = {
             "total": 0,
             "imported": 0,
@@ -59,10 +61,12 @@ class ImportSkillScopeTests(unittest.TestCase):
 
         db = FakeSession()
         directive = SimpleNamespace()
+        # 基线编译（通用契约 + 场景包 + 自定义 Skill）由 compile_directive_with_skills 负责，
+        # 未指定 skill_ids 时它就是唯一的装配入口。
         with (
             patch(
-                "app.services.rule_parse_engine.compile_directive",
-                return_value=directive,
+                "app.services.rule_parse_engine.compile_directive_with_skills",
+                return_value=(directive, []),
             ) as compile_directive,
             patch(
                 "app.services.rule_import_service.import_rules_from_text",
@@ -78,7 +82,9 @@ class ImportSkillScopeTests(unittest.TestCase):
 
         self.assertIs(result, expected)
         self.assertEqual(len(db.statements), 1)
-        compile_directive.assert_called_once_with(db, tenant_id, rule_set_id)
+        compile_directive.assert_called_once_with(
+            db, tenant_id, rule_set_id, scenario=None
+        )
         import_rules.assert_called_once_with(
             db,
             tenant_id,
@@ -88,6 +94,78 @@ class ImportSkillScopeTests(unittest.TestCase):
             progress=None,
             source_rows=None,
             source_meta=None,
+            import_context=None,
+            scenario="trade",
+        )
+
+    def test_explicit_skill_ids_use_preset_only_assembly(self) -> None:
+        """显式 skill_ids = 自定义场景通道：只装配系统预设 + 勾选的 Skill。"""
+        tenant_id = uuid.uuid4()
+        rule_set_id = uuid.uuid4()
+        rule_set = SimpleNamespace(
+            id=rule_set_id, scenario="trade", use_default_skill=True
+        )
+        baseline_skill = SimpleNamespace(id=uuid.uuid4(), name="通用规则解析契约", enabled=True)
+        extra_skill = SimpleNamespace(
+            id=uuid.uuid4(),
+            name="客户纠偏",
+            enabled=True,
+            priority=100,
+            is_builtin=False,
+            content={"prompt_instructions": ["本规则集的金额一律以合同币别为准。"]},
+        )
+
+        class FakeSession:
+            def execute(self, statement):
+                text = str(statement)
+                if "rule_sets" in text:
+                    return SimpleNamespace(scalar_one_or_none=lambda: rule_set)
+                return SimpleNamespace(
+                    scalar_one_or_none=lambda: None,
+                    scalars=lambda: SimpleNamespace(
+                        all=lambda: [baseline_skill, extra_skill]
+                    ),
+                )
+
+        directive = SimpleNamespace(prompt_additions=[])
+        merged: list[str] = []
+        with (
+            patch(
+                "app.services.rule_parse_engine.compile_directive_with_skills",
+                return_value=(directive, [baseline_skill]),
+            ) as compile_directive,
+            patch(
+                "app.services.rule_parse_engine._merge_content",
+                side_effect=lambda _d, content: merged.extend(
+                    content.get("prompt_instructions") or []
+                ),
+            ),
+            patch(
+                "app.services.rule_import_service.import_rules_from_text",
+                return_value={
+                    "total": 0,
+                    "imported": 0,
+                    "skipped": 0,
+                    "rules": [],
+                    "errors": [],
+                },
+            ),
+        ):
+            result = import_rules_with_skills(
+                FakeSession(),
+                tenant_id,
+                rule_set_id,
+                "报关单申报金额应与合同金额一致",
+                skill_ids=[baseline_skill.id, extra_skill.id],
+            )
+
+        compile_directive.assert_called_once()
+        # 预设里的 Skill 不重复合并，只有勾选的那个被叠加
+        self.assertEqual(merged, ["本规则集的金额一律以合同币别为准。"])
+        # 自定义场景通道不加载场景包，因此不回显场景
+        self.assertIsNone(result["scenario"])
+        self.assertEqual(
+            result["applied_skills"], ["通用规则解析契约", "客户纠偏"]
         )
 
 
@@ -181,6 +259,60 @@ class DedupSemanticBoundaryTests(unittest.TestCase):
 
         self.assertIs(matched, existing)
 
+    def test_missing_scope_is_tolerated_for_identical_text(self) -> None:
+        """同一规则一次填了适用单据、一次留空（极简填写）时不应重复入库。"""
+        text = "发票价税合计应与报销单报销金额一致"
+        existing = self._rule(text, scope={"doc_types": ["发票", "报销单"]})
+
+        matched = _find_similar_rule(
+            text,
+            _normalize_text(text),
+            [existing],
+            new_scope=None,
+        )
+
+        self.assertIs(matched, existing)
+
+    def test_missing_scope_does_not_merge_different_rules(self) -> None:
+        """scope 留空只在文本几乎一致时才容忍，不能变成"什么都合并"。"""
+        existing = self._rule(
+            "发票价税合计应与报销单报销金额一致",
+            scope={"doc_types": ["发票", "报销单"]},
+        )
+
+        text = "发票购买方名称应与报销单所属公司名称一致"
+        matched = _find_similar_rule(
+            text,
+            _normalize_text(text),
+            [existing],
+            new_scope=None,
+        )
+
+        self.assertIsNone(matched)
+
+    def test_missing_scope_does_not_merge_across_conditions(self) -> None:
+        """condition 或 exceptions 不同时，即使 scope 留空也不合并。"""
+        text = "报销单应具备双签"
+        existing = self._rule(
+            text,
+            scope={"doc_types": ["报销单"]},
+            structure={
+                "condition": {"field": "金额", "operator": "大于等于", "value": 5000}
+            },
+        )
+
+        matched = _find_similar_rule(
+            text,
+            _normalize_text(text),
+            [existing],
+            new_scope=None,
+            new_structure={
+                "condition": {"field": "金额", "operator": "大于等于", "value": 10000}
+            },
+        )
+
+        self.assertIsNone(matched)
+
     def test_same_text_different_condition_is_not_merged(self) -> None:
         text = "金额应一致"
         scope = {"doc_types": ["报关单"]}
@@ -241,6 +373,68 @@ class DedupSemanticBoundaryTests(unittest.TestCase):
         )
 
         self.assertIsNone(matched)
+
+    def test_same_scope_different_assertion_field_is_not_merged(self) -> None:
+        """同句式异字段（数量 vs 金额）不得被文本相似度误合并。"""
+        scope = {"doc_types": ["报关单", "委托出口确认单"]}
+        existing = self._rule(
+            "报关单数量应不大于委托出口确认单数量",
+            scope=scope,
+            structure={
+                "assertion": {
+                    "source": {"doc_type": "报关单", "field": "数量"},
+                    "operator": "不大于",
+                    "target": {"doc_type": "委托出口确认单", "field": "数量"},
+                }
+            },
+        )
+
+        matched = _find_similar_rule(
+            "报关单金额应不大于委托出口确认单金额",
+            _normalize_text("报关单金额应不大于委托出口确认单金额"),
+            [existing],
+            new_scope=scope,
+            new_structure={
+                "assertion": {
+                    "source": {"doc_type": "报关单", "field": "金额"},
+                    "operator": "不大于",
+                    "target": {"doc_type": "委托出口确认单", "field": "金额"},
+                }
+            },
+        )
+
+        self.assertIsNone(matched)
+
+    def test_same_assertion_subject_with_loose_wording_is_merged(self) -> None:
+        """断言主体一致时，措辞不同仍视为同一规则（允许合并）。"""
+        scope = {"doc_types": ["发票"]}
+        existing = self._rule(
+            "发票金额应与报销单金额一致",
+            scope=scope,
+            structure={
+                "assertion": {
+                    "source": {"doc_type": "发票", "field": "金额"},
+                    "operator": "等于",
+                    "target": {"doc_type": "报销单", "field": "金额"},
+                }
+            },
+        )
+
+        matched = _find_similar_rule(
+            "发票金额应等于报销单金额",
+            _normalize_text("发票金额应等于报销单金额"),
+            [existing],
+            new_scope=scope,
+            new_structure={
+                "assertion": {
+                    "source": {"doc_type": "发票", "field": "金额"},
+                    "operator": "等于",
+                    "target": {"doc_type": "报销单", "field": "金额"},
+                }
+            },
+        )
+
+        self.assertIs(matched, existing)
 
 
 class SourceCoverageTests(unittest.TestCase):

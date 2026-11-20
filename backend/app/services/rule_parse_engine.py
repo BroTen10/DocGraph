@@ -1,9 +1,11 @@
 """规则解析引擎：将多个 Skill 编译为解析指令，驱动 LLM 解析规则。
 
 流程：
-1. 从数据库加载已启用的 Skill（内置默认 + 自定义）
-2. 按优先级排序，按能力逐 key 合并（自定义覆盖内置）
-3. 生成 RuleParseDirective → 注入到 LLM 调用
+1. 解析本次导入的业务场景（导入参数 > 导入文件声明 > 规则集默认 > 兼容默认）
+2. 从数据库加载已启用的 Skill：通用契约包（scenario IS NULL，始终生效）
+   + 该场景知识包（scenario = 场景键）+ 该规则集自定义 Skill
+3. 按优先级排序，按能力逐 key 合并（自定义覆盖内置，场景包覆盖通用契约）
+4. 生成 RuleParseDirective → 注入到 LLM 调用
 """
 
 from __future__ import annotations
@@ -52,16 +54,60 @@ class RuleParseDirective:
     domain_context: dict[str, Any] = field(default_factory=dict)
 
 
+def resolve_scenario(
+    rule_set: Any,
+    scenario: str | None = None,
+) -> str:
+    """解析本次解析应使用的场景键。
+
+    优先级：调用方显式指定（导入请求/文件声明） > 规则集自身配置 > 兼容默认。
+    """
+    from ..default_rule_parse_skill import DEFAULT_SCENARIO
+
+    for candidate in (scenario, getattr(rule_set, "scenario", None)):
+        value = str(candidate).strip() if candidate not in (None, "") else ""
+        if value:
+            return value
+    return DEFAULT_SCENARIO
+
+
 def compile_directive(
     db: Session,
     tenant_id: uuid.UUID,
     rule_set_id: Any,
+    scenario: str | None = None,
 ) -> RuleParseDirective:
     """从数据库加载并编译指定规则集的所有已启用 Skill。
 
-    1. 加载内置默认 Skill（始终生效）
-    2. 加载该规则集的自定义 Skill（可覆盖内置）
-    3. 按能力逐 key 合并
+    1. 加载内置通用契约包（scenario IS NULL，始终生效）
+    2. 加载本次场景的知识包（scenario = 解析出的场景键）
+    3. 加载该规则集的自定义 Skill（可覆盖内置）
+    4. 按能力逐 key 合并
+    """
+    directive, _ = compile_directive_with_skills(
+        db, tenant_id, rule_set_id, scenario=scenario
+    )
+    return directive
+
+
+def compile_directive_with_skills(
+    db: Session,
+    tenant_id: uuid.UUID,
+    rule_set_id: Any,
+    scenario: str | None = None,
+    *,
+    preset_only: bool = False,
+) -> tuple[RuleParseDirective, list[RuleParseSkill]]:
+    """同 compile_directive，但同时返回参与合并的 Skill（按合并顺序）。
+
+    Args:
+        preset_only: 只装配「系统预设」——通用解析契约包（scenario IS NULL）。
+            用于「自定义场景」通道：此时**不加载任何场景知识包**，也**不自动带上
+            规则集自定义 Skill**（它们由调用方按用户勾选显式叠加），避免出厂领域
+            知识与客户自定义场景混用。
+
+    调用方需要知道"哪些 Skill 已经在基线里"时使用（例如导入弹窗额外指定的
+    Skill 要叠加在基线之上，而不是重复合并）。
     """
     from .rule_service import get_rule_set
 
@@ -69,44 +115,57 @@ def compile_directive(
     if rs is None:
         raise ValueError("规则集不存在")
     use_default_skill = rs.use_default_skill
+    resolved_scenario = resolve_scenario(rs, scenario)
     overridden_builtin_ids = select(RuleParseSkill.parent_id).where(
         RuleParseSkill.tenant_id == tenant_id,
         RuleParseSkill.rule_set_id == rule_set_id,
         RuleParseSkill.parent_id.is_not(None),
     )
 
+    custom_scoped = (
+        (RuleParseSkill.tenant_id == tenant_id)
+        & (RuleParseSkill.rule_set_id == rule_set_id)
+    )
+
     conditions = [RuleParseSkill.enabled.is_(True)]
-    if use_default_skill:
-        # 未被租户副本覆盖的内置模板 + 该规则集自定义 Skill
+    if preset_only:
+        # 系统预设：仅通用契约包；场景包与自定义 Skill 都不自动生效
+        conditions.append(
+            RuleParseSkill.is_builtin.is_(True)
+            & RuleParseSkill.tenant_id.is_(None)
+            & RuleParseSkill.id.not_in(overridden_builtin_ids)
+            & RuleParseSkill.scenario.is_(None)
+        )
+    elif use_default_skill:
+        # 未被租户副本覆盖的内置模板（通用契约 + 本次场景） + 该规则集自定义 Skill
         conditions.append(
             (
                 RuleParseSkill.is_builtin.is_(True)
                 & RuleParseSkill.tenant_id.is_(None)
                 & RuleParseSkill.id.not_in(overridden_builtin_ids)
+                & (
+                    RuleParseSkill.scenario.is_(None)
+                    | (RuleParseSkill.scenario == resolved_scenario)
+                )
             )
-            | (
-                (RuleParseSkill.tenant_id == tenant_id)
-                & (RuleParseSkill.rule_set_id == rule_set_id)
-            )
+            | custom_scoped
         )
     else:
         # 规则集关闭了内置默认 Skill 领域知识：仅使用该规则集自定义 Skill
-        conditions.append(
-            (RuleParseSkill.tenant_id == tenant_id)
-            & (RuleParseSkill.rule_set_id == rule_set_id)
-        )
+        conditions.append(custom_scoped)
 
     # 合并顺序：内置默认先合并，自定义后合并（后写覆盖先写）→ 自定义纠偏生效
     skills = db.execute(
         select(RuleParseSkill).where(*conditions).order_by(
             RuleParseSkill.is_builtin.desc(),
             RuleParseSkill.priority,
+            RuleParseSkill.name,
         )
     ).scalars().all()
 
     if not skills:
         logger.warning("规则集 %s 无可用 Skill，使用空指令", rule_set_id)
-        return RuleParseDirective()
+        return RuleParseDirective(), []
 
     directive = RuleParseDirective()
     for skill in skills:
@@ -114,7 +173,8 @@ def compile_directive(
         _merge_content(directive, content)
 
     logger.info(
-        "Skill 编译完成: %d 个 Skill（指令=%d, 映射=%d, 默认值=%d, 校验=%d, 预处理=%d, 术语=%d, 领域=%d）",
+        "Skill 编译完成（场景=%s）: %d 个 Skill（指令=%d, 映射=%d, 默认值=%d, 校验=%d, 预处理=%d, 术语=%d, 领域=%d）",
+        resolved_scenario,
         len(skills),
         len(directive.prompt_additions),
         len(directive.field_mappings),
@@ -124,7 +184,40 @@ def compile_directive(
         len(directive.term_normalization),
         len(directive.domain_context),
     )
-    return directive
+    return directive, list(skills)
+
+
+def directive_to_content(directive: RuleParseDirective) -> dict:
+    """把编译后的指令还原为 Skill content 结构（文档镜像、自检与快照使用）。"""
+    steps = []
+    for step in directive.text_preprocessing:
+        item: dict[str, Any] = {"type": step.type}
+        if step.pattern:
+            item["pattern"] = step.pattern
+        if step.replacement:
+            item["replacement"] = step.replacement
+        if step.extraction:
+            item["extraction"] = step.extraction
+        if step.description:
+            item["description"] = step.description
+        steps.append(item)
+
+    validations = []
+    for rule in directive.validations:
+        item = {"field": rule.field, "rule": rule.rule, "severity": rule.severity}
+        if rule.message:
+            item["message"] = rule.message
+        validations.append(item)
+
+    return {
+        "prompt_instructions": list(directive.prompt_additions),
+        "field_mappings": copy.deepcopy(directive.field_mappings),
+        "defaults": copy.deepcopy(directive.defaults),
+        "validations": validations,
+        "text_preprocessing": steps,
+        "term_normalization": copy.deepcopy(directive.term_normalization),
+        "domain_context": copy.deepcopy(directive.domain_context),
+    }
 
 
 def _merge_content(directive: RuleParseDirective, content: dict) -> None:

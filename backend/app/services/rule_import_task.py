@@ -121,6 +121,7 @@ def run_import_task(
     file_path: str,
     filename: str,
     skill_ids: list | None = None,
+    scenario: str | None = None,
 ) -> None:
     """后台线程入口：执行完整导入流程并更新任务进度。
 
@@ -128,7 +129,10 @@ def run_import_task(
     """
     from ..database import SessionLocal
     from ..tenant_scope import bind_tenant
-    from .rule_document_import_service import extract_document_from_file
+    from .rule_document_import_service import (
+        build_import_context,
+        extract_document_from_file,
+    )
     from .rule_import_service import import_rules_with_skills
 
     db = SessionLocal()
@@ -138,8 +142,17 @@ def run_import_task(
         update_task(task, status="extracting", message="正在提取文档文本…")
         document = extract_document_from_file(file_path, filename)
         if not document.text or not document.text.strip():
-            update_task(task, status="error", error="文件内容为空，无法提取规则文本")
+            detail = "；".join(document.warnings) if document.warnings else ""
+            update_task(
+                task,
+                status="error",
+                error="文件内容为空，无法提取规则文本" + (f"（{detail}）" if detail else ""),
+            )
             return
+
+        metadata = document.metadata or {}
+        declared_scenario = metadata.get("scenario")
+        effective_scenario = scenario or declared_scenario
 
         # 阶段 2+3：解析 → 入库 → 冲突检测（带进度）
         update_task(task, status="parsing", message="正在调用大模型解析规则…")
@@ -151,12 +164,20 @@ def run_import_task(
             skill_ids=skill_ids,
             progress=task,
             source_rows=document.source_rows,
-            source_meta={"filename": filename, **document.metadata},
+            source_meta={"filename": filename, **metadata},
+            scenario=effective_scenario,
+            import_context=build_import_context(metadata),
         )
-        if document.warnings:
-            result["import_warnings"] = list(dict.fromkeys(
-                list(result.get("import_warnings") or []) + document.warnings
-            ))
+        result["scenario"] = result.get("scenario") or effective_scenario
+        warnings = list(result.get("import_warnings") or [])
+        if declared_scenario and scenario and str(declared_scenario) != str(scenario):
+            warnings.append(
+                f"文档声明的场景 {declared_scenario} 与本次指定的场景 {scenario} 不一致，"
+                f"已按 {scenario} 处理"
+            )
+        if metadata.get("skipped_sheets"):
+            warnings.append("已跳过非规则工作表：" + "、".join(metadata["skipped_sheets"]))
+        result["import_warnings"] = list(dict.fromkeys(warnings + document.warnings))
         update_task(
             task,
             status="done",

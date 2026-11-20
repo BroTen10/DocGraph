@@ -52,6 +52,9 @@ class RuleSet(TenantOwnedMixin, Base):
     use_default_skill: Mapped[bool] = mapped_column(
         Boolean, default=True, nullable=False
     )
+    # 本规则集默认业务场景键（对应内置场景知识包 pack.scenario）。
+    # NULL = 未声明，导入时回落到兼容默认场景；导入文件声明的场景优先于本字段。
+    scenario: Mapped[str | None] = mapped_column(String(64), nullable=True)
     # 是否默认规则集（同一时刻只能有一个默认）
     is_default: Mapped[bool] = mapped_column(
         Boolean, default=False, nullable=False, index=True

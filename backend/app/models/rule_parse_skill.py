@@ -49,6 +49,8 @@ class RuleParseSkill(Base):
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
     is_builtin: Mapped[bool] = mapped_column(Boolean, default=False)
     """True = 系统内置默认，不可删除（但可编辑产生副本）"""
+    scenario: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    """场景键：NULL = 通用契约（所有场景生效）；非 NULL = 仅该场景生效"""
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     priority: Mapped[int] = mapped_column(Integer, default=100)
 

@@ -79,7 +79,11 @@ def import_rules_batch(
 ) -> RuleImportResponse:
     """批量导入自然语言规则清单（LLM 解析后入库），归到指定规则集下。
 
-    可选的 skill_ids 参数指定应用的 Skill；不传则使用该规则集已启用的所有 Skill。
+    两条互斥通道：
+    - **出厂场景**（不传 skill_ids）：通用契约包 + scenario 指定的场景知识包 +
+      规则集自定义 Skill；scenario 优先级 = 导入参数 > 导入文件声明 > 规则集默认 > 兜底 trade。
+    - **自定义场景**（传了 skill_ids）：系统预设（通用契约包）+ 勾选的 Skill，
+      **不加载场景包**，避免出厂领域知识与客户自定义场景混用（导入弹窗会禁用场景下拉）。
     """
     if rule_service.get_rule_set(db, ctx.tenant.id, rule_set_id) is None:
         raise HTTPException(status_code=404, detail="规则集不存在")
@@ -90,6 +94,7 @@ def import_rules_batch(
             rule_set_id,
             payload.raw_text,
             skill_ids=payload.skill_ids,
+            scenario=payload.scenario,
         )
         return RuleImportResponse(**result)
     except ValueError as e:
@@ -242,8 +247,10 @@ def detect_conflicts(
 ) -> ConflictDetectionResponse:
     """检测指定规则集内所有规则的语义冲突。
 
-    按 (doc_type, check_category) 分组后逐组用 LLM 检测矛盾关系，
-    结果写入各规则的 defects 字段，并将受影响规则回落到待确认/禁用，返回冲突报告。
+    按适用范围（业务对象）分组后逐组用 LLM 检测矛盾关系，结果写入各规则的
+    defects 字段，并将受影响规则回落到待确认/禁用，返回冲突报告。
+    若部分分组检测失败，响应中的 detection_incomplete 为 true，且这些分组的
+    既有冲突与规则状态保持不变（不会因"没检出"而被误清除或误启用）。
     """
     try:
         result = rule_conflict_detector.run_conflict_detection(

@@ -32,6 +32,8 @@ class RuleBase(BaseModel):
     # 批次 10 起为可选派生标签：明确指向单一文件类型/检查项时填写，跨文件或整批规则可为空
     doc_type: str | None = None
     check_category: str | None = None
+    # 业务场景标签（导入时写入的场景知识包键）
+    scenario: str | None = None
     rule_text: str
     tolerance: dict[str, Any] = Field(default_factory=dict)
     enabled: bool = True
@@ -61,6 +63,7 @@ class RuleCreate(RuleBase):
 class RuleUpdate(BaseModel):
     doc_type: str | None = None
     check_category: str | None = None
+    scenario: str | None = None
     rule_text: str | None = None
     tolerance: dict[str, Any] | None = None
     enabled: bool | None = None
@@ -77,7 +80,16 @@ class RuleUpdate(BaseModel):
 class RuleImportRequest(BaseModel):
     """规则批量导入请求。"""
     raw_text: str
-    skill_ids: list[uuid.UUID] | None = Field(default=None, description="指定应用的 Skill ID，不传则使用默认")
+    skill_ids: list[uuid.UUID] | None = Field(
+        default=None,
+        description="自定义场景通道：勾选的 Skill。传了则不加载场景知识包，"
+        "生效 = 系统预设（通用契约包）+ 勾选的 Skill",
+    )
+    scenario: str | None = Field(
+        default=None,
+        description="出厂场景通道的业务场景键（对应内置场景知识包，如 trade/expense/supplier）；"
+        "不传则用导入文件声明或规则集默认场景。仅在未指定 skill_ids 时生效",
+    )
 
 
 class ConflictReport(BaseModel):
@@ -97,9 +109,15 @@ class RuleImportResponse(BaseModel):
     conflict_report: ConflictReport | None = None
     # 批次 10：本次导入新发现的文件类型（前端据此提示用户做样本分析）
     new_doc_types: list[str] = Field(default_factory=list)
+    # 本次导入新登记的检查项（默认 pending_review，需在「检查项」页确认）
+    new_check_categories: list[str] = Field(default_factory=list)
     # 表格行覆盖率与导入告警（合并单元格展开/漏行/来源行校验）
     import_warnings: list[str] = Field(default_factory=list)
     source_coverage: dict[str, Any] | None = None
+    # 本次解析实际使用的业务场景键（选择场景知识包）；自定义场景通道下为 None
+    scenario: str | None = None
+    # 本次实际参与解析的 Skill 名称（按合并顺序，含系统预设）
+    applied_skills: list[str] | None = None
 
 
 class RuleOut(RuleBase):
@@ -143,3 +161,9 @@ class ConflictDetectionResponse(BaseModel):
     total_conflicts: int = 0
     affected_rules: int = 0
     conflicts: list[ConflictItem] = Field(default_factory=list)
+    # 检测完成度：只要有一组失败，就不把"没检出冲突"当成"冲突已消除"
+    total_groups: int = 0
+    failed_groups: int = 0
+    detection_incomplete: bool = False
+    cleared_rules: int = 0
+    warnings: list[str] = Field(default_factory=list)

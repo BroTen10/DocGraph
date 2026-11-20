@@ -107,6 +107,8 @@ class RuleParseSkillOut(RuleParseSkillBase):
     rule_set_id: uuid.UUID | None = None
     parent_id: uuid.UUID | None = None
     is_builtin: bool = False
+    scenario: str | None = None
+    """场景键：NULL = 通用契约（所有场景生效）；非 NULL = 仅该场景生效"""
     content: RuleParseSkillContent
     version: int = 1
     created_at: datetime

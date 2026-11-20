@@ -59,6 +59,10 @@ class Rule(TenantOwnedMixin, Base):
     # 检查项类别（批次 10 起为可选派生标签）：齐套性 / 基础判断 / 信息准确性 / 时间逻辑 / ...
     # 规则核心意图无法归入已知类别时可为空（用 intents 表达）
     check_category: Mapped[str | None] = mapped_column(String(32), index=True, nullable=True)
+    # 业务场景标签：本次导入实际使用的场景知识包键（trade/expense/...）；
+    # NULL = 未声明场景（自定义场景通道或人工新建规则）。
+    # 用于按场景筛选规则、按场景重建图谱，避免多场景规则混在同一张矩阵里。
+    scenario: Mapped[str | None] = mapped_column(String(64), index=True, nullable=True)
     # 自然语言规则文本
     rule_text: Mapped[str] = mapped_column(Text, nullable=False)
     # 容差参数：{"amount_percent":5,"weight_kg":0.5,"time_days":0,"allow_same_day":true}
