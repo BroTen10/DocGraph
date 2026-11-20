@@ -735,6 +735,13 @@ export interface SkillLearnResponse {
   added_instructions: string[]
 }
 
+export interface SkillConsolidateResponse {
+  success: boolean
+  skill: RuleParseSkill
+  /** 归并摘要：before=归并前条数、after=归并后条数、ledger_used=用到的修正条数、note=模型说明 */
+  summary: { before: number; after: number; ledger_used: number; note: string }
+}
+
 // ============ 文档类型管理 ============
 
 export interface DocTypeItem {

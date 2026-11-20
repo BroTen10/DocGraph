@@ -129,3 +129,12 @@ class SkillLearnRequest(BaseModel):
     after: dict[str, Any] = Field(default_factory=dict)
     note: str | None = None
     """用户补充说明（可选）"""
+
+
+class SkillConsolidateRequest(BaseModel):
+    """让 LLM 归并经验指令与人工修正账本（指令由模型维护，人只做修正）。"""
+
+    skill_id: uuid.UUID | None = None
+    """目标 Skill；不传则归并规则集下的『经验修正（自动累积）』Skill"""
+    max_instructions: int = Field(default=20, ge=1, le=100)
+    max_instruction_chars: int = Field(default=200, ge=20, le=1000)

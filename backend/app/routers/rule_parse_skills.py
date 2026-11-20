@@ -13,6 +13,7 @@ from ..schemas.rule_parse_skill import (
     RuleParseSkillCreate,
     RuleParseSkillOut,
     RuleParseSkillUpdate,
+    SkillConsolidateRequest,
     SkillLearnRequest,
 )
 from ..services import rule_parse_skill_service, rule_service
@@ -86,6 +87,35 @@ def learn_from_correction(
         "skill": skill.model_dump(mode="json"),
         "added_instructions": added,
     }
+
+
+@router.post("/consolidate")
+def consolidate_experience(
+    rule_set_id: uuid.UUID,
+    payload: SkillConsolidateRequest,
+    db: Session = Depends(get_db),
+    ctx: AuthContext = Depends(require_permission("rules.manage")),
+) -> dict:
+    """由 LLM 把累积的经验指令与人工修正账本归并成一份稳定清单。
+
+    经验指令只增不减会让解析提示词越来越长、互相矛盾；归并交给模型做，
+    人只负责修正。模型不可用或输出不可用时经验保持原样（返回 400 说明原因）。
+
+    注意：必须注册在 /{skill_id} 之前，否则会被路径参数路由截获。
+    """
+    _require_rule_set(db, ctx.tenant.id, rule_set_id)
+    try:
+        skill, summary = rule_parse_skill_service.consolidate_experience_skill(
+            db,
+            ctx.tenant.id,
+            rule_set_id,
+            skill_id=payload.skill_id,
+            max_instructions=payload.max_instructions,
+            max_instruction_chars=payload.max_instruction_chars,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"success": True, "skill": skill.model_dump(mode="json"), "summary": summary}
 
 
 @router.get("/{skill_id}", response_model=RuleParseSkillOut)

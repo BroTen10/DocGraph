@@ -8,6 +8,7 @@ import {
   getApiErrorCode,
   graphApi,
   reviewsApi,
+  skillsApi,
   setCsrfToken,
 } from './client'
 
@@ -181,5 +182,30 @@ describe('API authentication plumbing', () => {
     expect(captured.method).toBe('patch')
     expect(captured.url).toBe('/reviews/results/result-1/status')
     expect(captured.body).toEqual({ result: 'pass', note: '两值在容差内' })
+  })
+
+  it('POSTs an experience consolidation request for the rule set', async () => {
+    let captured: { url?: string; method?: string; body?: unknown } = {}
+    apiHttp.defaults.adapter = async (config) => {
+      const raw = config.data
+      captured = {
+        url: config.url,
+        method: config.method,
+        body: typeof raw === 'string' ? JSON.parse(raw) : raw,
+      }
+      return {
+        data: { success: true, skill: { id: 's1' }, summary: { before: 5, after: 2 } },
+        status: 200,
+        statusText: 'OK',
+        headers: new AxiosHeaders(),
+        config,
+      }
+    }
+
+    await skillsApi.consolidate('ruleset-1', { max_instructions: 10 })
+
+    expect(captured.method).toBe('post')
+    expect(captured.url).toBe('/rule-sets/ruleset-1/skills/consolidate')
+    expect(captured.body).toEqual({ max_instructions: 10 })
   })
 })

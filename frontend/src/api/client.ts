@@ -58,6 +58,7 @@ import type {
   RuleSetUpdate,
   RuleSnapshot,
   SettingsResponse,
+  SkillConsolidateResponse,
   SkillLearnRequest,
   SkillLearnResponse,
   TenantListResponse,
@@ -617,4 +618,12 @@ export const skillsApi = {
   /** 将人工修正规则的经验写回 Skill */
   learn: (ruleSetId: string, data: SkillLearnRequest) =>
     http.post<SkillLearnResponse>(`/rule-sets/${ruleSetId}/skills/learn`, data).then((r) => r.data),
+  /** 由 LLM 把累积的经验指令与人工修正账本归并成一份稳定清单（指令由模型维护） */
+  consolidate: (
+    ruleSetId: string,
+    data?: { skill_id?: string; max_instructions?: number; max_instruction_chars?: number },
+  ) =>
+    http
+      .post<SkillConsolidateResponse>(`/rule-sets/${ruleSetId}/skills/consolidate`, data ?? {})
+      .then((r) => r.data),
 }

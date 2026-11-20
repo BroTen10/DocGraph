@@ -18,6 +18,7 @@ from typing import Optional
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from ..llm_client import get_llm_client
 from ..models import RuleParseSkill
 from ..schemas.rule_parse_skill import (
     RuleParseSkillCreate,
@@ -26,6 +27,7 @@ from ..schemas.rule_parse_skill import (
     SkillLearnRequest,
 )
 from .rule_service import get_rule_set
+from .settings_service import get_prompt
 
 LEARN_SKILL_NAME = "经验修正（自动累积）"
 
@@ -337,3 +339,122 @@ def learn_from_correction(
     db.commit()
     db.refresh(target)
     return RuleParseSkillOut.model_validate(target), added
+
+
+# ============ 经验归并（由 LLM 维护指令，人只做修正） ============
+# 经验指令是"只增不减"的：修正越多，提示词越长、越容易自相矛盾。
+# 这里让模型把「现有指令 + 人工修正账本」归并成一份稳定清单，替代人工整理。
+DEFAULT_MAX_INSTRUCTIONS = 20
+DEFAULT_MAX_INSTRUCTION_CHARS = 200
+
+
+def _ledger_lines_for_consolidation(
+    db: Session, tenant_id: uuid.UUID, rule_set_id: uuid.UUID, *, limit: int = 30
+) -> list[str]:
+    """把人工修正账本转成归并输入（含命中次数与适用示例）。"""
+    from .correction_ledger import corrections_digest
+
+    digest = corrections_digest(
+        db,
+        tenant_id,
+        rule_set_id,
+        limit=limit,
+        max_chars=4000,
+    )
+    return [line for line in digest.splitlines() if line.strip()]
+
+
+def consolidate_experience_skill(
+    db: Session,
+    tenant_id: uuid.UUID,
+    rule_set_id: uuid.UUID,
+    *,
+    skill_id: uuid.UUID | None = None,
+    max_instructions: int = DEFAULT_MAX_INSTRUCTIONS,
+    max_instruction_chars: int = DEFAULT_MAX_INSTRUCTION_CHARS,
+) -> tuple[RuleParseSkillOut, dict]:
+    """让 LLM 归并经验指令与人工修正账本，返回 (Skill, 归并摘要)。
+
+    - 只替换 ``prompt_instructions``，不动 field_mappings/defaults 等结构化内容；
+    - 模型不可用或输出不可用时**保持原样**（不破坏已有经验），由调用方决定是否重试；
+    """
+    target: RuleParseSkill | None = None
+    if skill_id is not None:
+        target = get_skill(db, tenant_id, rule_set_id, skill_id, include_builtin=False)
+        if target is None:
+            raise ValueError("目标 Skill 不存在")
+        if target.is_builtin:
+            raise ValueError("经验不能写入内置 Skill，请选择自定义 Skill")
+    else:
+        target = db.execute(
+            select(RuleParseSkill).where(
+                RuleParseSkill.tenant_id == tenant_id,
+                RuleParseSkill.rule_set_id == rule_set_id,
+                RuleParseSkill.name == LEARN_SKILL_NAME,
+            )
+        ).scalars().first()
+        if target is None:
+            raise ValueError("该规则集还没有可归并的经验指令")
+
+    content = dict(target.content or {})
+    current = [str(i).strip() for i in (content.get("prompt_instructions") or []) if str(i).strip()]
+    ledger = _ledger_lines_for_consolidation(db, tenant_id, rule_set_id)
+    if not current and not ledger:
+        raise ValueError("没有可归并的经验：既无经验指令，也无人工修正")
+
+    # 提示词里含 JSON 示例（花括号），不能用 str.format：显式占位符替换
+    system_prompt = (
+        get_prompt(db, tenant_id, "rule_skill.consolidate")
+        .replace("{max_instructions}", str(max_instructions))
+        .replace("{max_instruction_chars}", str(max_instruction_chars))
+    )
+    user_prompt = (
+        "现有解析经验指令：\n"
+        + ("\n".join(f"- {i}" for i in current) if current else "（无）")
+        + "\n\n最近的人工修正账本：\n"
+        + ("\n".join(ledger) if ledger else "（无）")
+        + "\n\n请输出归并后的 JSON。"
+    )
+    try:
+        resp = get_llm_client().chat_json(
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            temperature=0.1,
+            max_tokens=2048,
+            disable_thinking=True,
+        )
+    except Exception as e:  # LLM 客户端异常一律视为"本次归并没做成"，经验保持原样
+        raise ValueError(f"归并调用失败（经验保持原样）: {e}") from e
+
+    raw = resp.get("instructions") if isinstance(resp, dict) else None
+    if not isinstance(raw, list):
+        raise ValueError("归并结果不是指令清单（经验保持原样）")
+
+    merged: list[str] = []
+    for item in raw:
+        text = str(item or "").strip()
+        if not text:
+            continue
+        text = text[:max_instruction_chars]
+        if text not in merged:
+            merged.append(text)
+        if len(merged) >= max_instructions:
+            break
+    if not merged:
+        raise ValueError("归并结果为空（经验保持原样）")
+
+    content["prompt_instructions"] = merged
+    target.content = content
+    target.version += 1
+    target.updated_at = datetime.now()
+    db.commit()
+    db.refresh(target)
+    summary = {
+        "before": len(current),
+        "after": len(merged),
+        "ledger_used": len(ledger),
+        "note": str(resp.get("note") or "")[:200],
+    }
+    return RuleParseSkillOut.model_validate(target), summary

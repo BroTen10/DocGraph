@@ -243,6 +243,27 @@ LLM_JUDGE_SYSTEM = """你是文档审查判定助手。你会收到两样东西�
    unverifiable 交人工——所以"没把握就别硬判"。
 8. 判定要克制：只依据证据包与条款，不臆造单据、字段或值；措辞简洁中文。"""
 
+# ============ 规则解析经验归并（LLM 维护规则） ============
+# 人工修正与经验指令会不断累积；由模型定期把它们归并成一份稳定、去重、有上限的
+# 指令清单——人只做修正，指令由 LLM 维护（见 docs/项目基线-智能优先原则.md）。
+RULE_SKILL_CONSOLIDATE_SYSTEM = """你是规则解析经验的维护者。你会收到两样东西：
+1. 现有的解析经验指令清单（历史累积，可能重复、近义、过时或互相冲突）；
+2. 最近的人工修正账本（人把 LLM 的解析结果改成了什么，含命中次数与适用示例）。
+
+任务：把它们归并成一份**稳定、可执行、无冗余**的解析指令清单，供下次解析规则文档时使用。
+要求：
+- 合并同类项：语义相同的指令只保留一条，取更准确、更通用的表述；
+- 保留适用范围：涉及具体文件类型/字段名/口径的，写清适用条件（可用"当…时"表述）；
+- 人工修正优先：与修正账本冲突的历史指令按修正后的口径改写；
+- 删掉过时或互相矛盾的指令，不要保留"曾经…后来改成…"的叙事；
+- 每条指令独立可执行、不超过 {max_instruction_chars} 字；
+- 最多输出 {max_instructions} 条，按重要性排序（越常用越靠前）；
+- 不要臆造账本与指令里没有的口径。
+
+严格输出 JSON（不要输出其它内容）：
+{"instructions": ["指令1", "指令2"], "note": "本次归并做了什么（一句话）"}"""
+
+
 # ============ 文档类型样例分析 ============
 DOC_ANALYZE_SYSTEM = """你是一个单证分析专家。分析用户上传的文档样例，输出以下 JSON：
 
@@ -361,6 +382,7 @@ PROMPT_TEMPLATES: dict[str, str] = {
     "ocr.text.user_template": OCR_TEXT_USER_TEMPLATE,
     "rule_import.system": RULE_IMPORT_SYSTEM,
     "rule_import.user": RULE_IMPORT_USER,
+    "rule_skill.consolidate": RULE_SKILL_CONSOLIDATE_SYSTEM,
     "suggestion.system": SUGGESTION_SYSTEM,
     "review.judge_system": LLM_JUDGE_SYSTEM,
     "doc_analyze.system": DOC_ANALYZE_SYSTEM,
@@ -383,6 +405,7 @@ PROMPT_META: dict[str, dict] = {
     "ocr.text.user_template": {"label": "OCR 文本提取 · 模板模式用户提示词", "group": "OCR 识别", "description": "占位符：{doc_type} 文件类型、{field_list} 字段清单、{text} 文档文本。"},
     "rule_import.system": {"label": "规则解析 · 系统提示词", "group": "规则解析", "description": "把自然语言规则清单解析为结构化规则 + 本体 + 缺陷检测。修改前请先备份，格式契约请保持 JSON schema。"},
     "rule_import.user": {"label": "规则解析 · 用户提示词模板", "group": "规则解析", "description": "占位符：{doc_types} 已知类型、{check_categories} 已知检查项、{raw_text} 规则原文。"},
+    "rule_skill.consolidate": {"label": "规则解析经验归并 · 系统提示词", "group": "规则解析", "description": "由 LLM 把累积的经验指令与人工修正账本归并成一份稳定清单（指令由模型维护，人只做修正）。占位符：{max_instructions} {max_instruction_chars}。"},
     "suggestion.system": {"label": "修正建议 · 系统提示词", "group": "审查与建议", "description": "根据审查问题与证据生成人工可执行的修正建议。"},
     "review.judge_system": {"label": "统一判定 · 系统提示词", "group": "审查与建议", "description": "证据包 + 带引用判定 + 机器验证（review.judge_enabled）。模型必须引用证据包事实、声明做过的比较，Python 验证门逐条核对/重算。"},
     "doc_analyze.system": {"label": "文档类型分析 · 系统提示词", "group": "文档类型", "description": "上传样例文档由 AI 分析类型/字段/用印/业务含义。"},

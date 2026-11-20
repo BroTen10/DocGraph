@@ -4,7 +4,7 @@ import {
   Table, Tag, Button, Modal, Form, Input, Space, message, Typography, Tooltip,
   Popconfirm, Switch, Alert, Radio,
 } from 'antd'
-import { PlusOutlined, EditOutlined, DeleteOutlined, ReloadOutlined, WarningOutlined, BulbOutlined } from '@ant-design/icons'
+import { PlusOutlined, EditOutlined, DeleteOutlined, ReloadOutlined, WarningOutlined, BulbOutlined, ThunderboltOutlined } from '@ant-design/icons'
 import { skillsApi, getErrorDetail, getErrorMessage } from '../api/client'
 import type { RuleParseSkill, RuleParseSkillCreate, RuleParseSkillUpdate } from '../types'
 
@@ -147,6 +147,7 @@ domain_context:
 export default function SkillTab({ ruleSetId, readOnly = false }: Props) {
   const [skills, setSkills] = useState<RuleParseSkill[]>([])
   const [loading, setLoading] = useState(false)
+  const [consolidating, setConsolidating] = useState(false)
   const [modalOpen, setModalOpen] = useState(false)
   const [editing, setEditing] = useState<RuleParseSkill | null>(null)
   const [saving, setSaving] = useState(false)
@@ -212,6 +213,24 @@ export default function SkillTab({ ruleSetId, readOnly = false }: Props) {
     setYamlError('')
     setWizardOpen(false)
     setModalOpen(true)
+  }
+
+  /** LLM 归并经验指令与人工修正账本（指令由模型维护，人只做修正） */
+  const handleConsolidate = async () => {
+    if (!ruleSetId) return
+    setConsolidating(true)
+    try {
+      const resp = await skillsApi.consolidate(ruleSetId)
+      message.success(
+        `已归并「${resp.skill.name}」：${resp.summary.before} 条 → ${resp.summary.after} 条` +
+          (resp.summary.note ? `（${resp.summary.note}）` : ''),
+      )
+      await load()
+    } catch (e) {
+      message.error('归并失败: ' + getErrorMessage(e))
+    } finally {
+      setConsolidating(false)
+    }
   }
 
   const load = async () => {
@@ -408,6 +427,11 @@ export default function SkillTab({ ruleSetId, readOnly = false }: Props) {
             <>
               <Button type="primary" icon={<PlusOutlined />} onClick={openCreate}>新建 Skill</Button>
               <Button icon={<BulbOutlined />} onClick={openWizard}>纠偏引导</Button>
+              <Tooltip title="由大模型把累积的经验指令与人工修正账本归并成一份稳定清单（替代人工整理；失败时经验保持原样）">
+                <Button icon={<ThunderboltOutlined />} loading={consolidating} onClick={handleConsolidate}>
+                  AI 归并经验
+                </Button>
+              </Tooltip>
             </>
           )}
           <Button icon={<ReloadOutlined />} onClick={load}>刷新</Button>
