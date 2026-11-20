@@ -105,6 +105,55 @@ flowchart TB
 
 ## 快速开始
 
+### 本地开发一键启停（macOS / Linux）
+
+仓库根目录的 `dev.sh` 管理本机开发环境的启停（Windows 见下方 PowerShell 步骤或 `start_services.bat`）。
+
+**两种用法，任选一种：**
+
+1. 双击（Finder 里）：`启动开发环境.command` / `停止开发环境.command`
+   —— macOS 会自动开终端执行；执行完按回车关窗，服务继续在后台运行。
+   （注意：双击 `dev.sh` 不会执行，macOS 默认用编辑器打开 `.sh`，所以提供 `.command` 入口。）
+2. 命令行：`cd` 到仓库根目录后执行下面的命令（也可用绝对路径在任意目录执行）。
+
+```bash
+cp backend/.env.example backend/.env     # 首次：填 LLM_API_KEY / PG_PASSWORD / APP_SECRET_KEY
+./dev.sh doctor                          # 体检：依赖、配置、端口、Docker
+./dev.sh start                           # 拉起数据库容器（如未运行）+ 后端 8800 + 前端 5173
+./dev.sh status                          # 进程 / 端口 / 健康检查 / 容器状态
+./dev.sh logs backend                    # 跟踪日志（frontend 同理）
+./dev.sh stop                            # 停止前后端（数据库容器保持运行）
+./dev.sh stop --with-deps                # 连数据库容器一起停
+./dev.sh restart                         # 重启前后端
+```
+
+`start_services.sh` / `stop_services.sh` 是 `./dev.sh start` / `./dev.sh stop` 的同义入口，
+与 Windows 的 `start_services.bat` / `stop_services.bat` 对应。PID 与日志位于 `.dev/`（不入库）。
+
+### 首次登录：初始化管理员账号（macOS / Linux）
+
+数据库里没有账号时无法登录（登录方式为**邮箱 + 密码**）。管理员初始化是一次性入口：
+
+```bash
+cd backend
+BOOTSTRAP_TENANT_ADMIN_EMAIL='admin@example.com' \
+BOOTSTRAP_TENANT_ADMIN_PHONE='13800138000' \
+BOOTSTRAP_TENANT_ADMIN_PASSWORD='DocGraph2026' \
+.venv/bin/python -m app.bootstrap default-tenant-admin
+```
+
+日常排障用 `./dev.sh admin`（仅当 `APP_DEBUG=true` 可用）：
+
+```bash
+./dev.sh admin list                                   # 查看账号、角色、锁定状态
+./dev.sh admin set-password admin@example.com         # 重置为随机密码并解锁（会打印新密码）
+./dev.sh admin set-password admin@example.com --password 'DocGraph2026'
+./dev.sh admin unlock admin@example.com               # 只解锁，不改密码
+```
+
+> `python -m app.bootstrap` 是**创建**入口：账号已存在时会校验密码，不匹配直接失败，
+> 因此找回密码请用上面的 `set-password`。连续登录失败会临时锁定账号，用 `unlock` 清除。
+
 ### 环境要求
 
 - Python 3.12
@@ -176,7 +225,8 @@ $env:BOOTSTRAP_TENANT_ADMIN_PASSWORD="ReplaceWithAStrongPassword1"
 
 该命令可安全重复执行：同一账号会恢复为有效租户管理员，不会自动把平台管理员提升为租户用户。
 
-> 完成首次依赖安装后，也可以在仓库根目录运行 `start_services.bat` 同时启动前后端。
+> 完成首次依赖安装后，也可以在仓库根目录运行 `start_services.bat` 同时启动前后端（Windows）。
+> macOS / Linux 使用 `./dev.sh start`，见上文「本地开发一键启停」。
 
 ## Docker 部署
 
@@ -289,9 +339,15 @@ DocGraph/
 ├── frontend/                React 管理界面
 ├── docs/                    架构、部署与版本管理文档
 ├── tests/                   图谱、规则导入、版本和三态结果测试
+├── templates/               规则描述文档模板（交付客户填写）
 ├── docgraph-brand/          项目图标与品牌素材
 ├── docker-compose.yml       本地数据库及生产服务编排
-├── deploy.sh                Linux 单机部署脚本
+├── deploy.sh                Linux 单机部署脚本（Docker）
+├── dev.sh                   本地开发环境启停（macOS/Linux）
+├── 启动开发环境.command       macOS 双击启动（dev.sh 包装）
+├── 停止开发环境.command       macOS 双击停止（dev.sh 包装）
+├── start_services.bat       Windows 本地开发启动
+├── start_services.sh        macOS/Linux 本地开发启动（dev.sh 包装）
 ├── LICENSE                  MIT License
 └── THIRD-PARTY-NOTICES.md   第三方组件许可声明
 ```
@@ -364,6 +420,7 @@ DocGraph 仓库自身采用 [MIT License](LICENSE)，允许使用、修改、分
 - [登录权限与多租户隔离验收记录](docs/登录权限与多租户隔离-验收记录.md)
 - [版本管理](docs/版本管理.md)
 - [规则解析控制架构设计](docs/规则解析控制架构设计.md)
+- [规则描述模板与场景化解析方案](docs/规则描述模板与场景化解析方案.md)（客户模板见 [templates/](templates/)）
 - [泛化规则体系重构设计](docs/泛化规则体系重构设计.md)
 - [第三方组件声明](THIRD-PARTY-NOTICES.md)
 
