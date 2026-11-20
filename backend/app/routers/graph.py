@@ -122,6 +122,10 @@ async def import_rules_from_document(
     rule_set_id: uuid.UUID = Query(..., description="所属规则集 ID"),
     file: UploadFile = File(...),
     skill_ids: str | None = Query(None, description="逗号分隔的 Skill ID 列表"),
+    scenario: str | None = Query(
+        None,
+        description="业务场景键（如 trade/expense/supplier）；不传则用文档声明或规则集默认场景",
+    ),
     db: Session = Depends(get_db),
     ctx: AuthContext = Depends(require_permission("rules.manage")),
 ) -> dict:
@@ -130,6 +134,7 @@ async def import_rules_from_document(
     该流程（提取文本 → LLM 解析 → 入库 → 冲突检测）较长，故改为异步任务：
     立即落盘文件并返回 task_id，前端通过 GET /import-tasks/{task_id} 轮询进度。
     skill_ids 参数传逗号分隔的 Skill UUID，不传则使用该规则集默认配置。
+    业务场景优先取 scenario 参数，其次取文档内声明，最后取规则集默认场景。
     """
     if rule_service.get_rule_set(db, ctx.tenant.id, rule_set_id) is None:
         raise HTTPException(status_code=404, detail="规则集不存在")
@@ -171,7 +176,7 @@ async def import_rules_from_document(
 
         t = threading.Thread(
             target=rule_import_task.run_import_task,
-            args=(task, tmp_path, file.filename, parsed_skill_ids),
+            args=(task, tmp_path, file.filename, parsed_skill_ids, scenario),
             daemon=True,
         )
         t.start()

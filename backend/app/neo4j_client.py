@@ -178,6 +178,7 @@ class Neo4jClient:
             "COMPARE_TO",
             "REQUIRED",
             "MUST_STAMP",
+            "MUST_EXIST",  # P3：存在性/齐备要求（签字、盖章、必备材料）
             "APPLIES_TO",
             "CHECKS",
             "INVOLVES",
@@ -187,8 +188,13 @@ class Neo4jClient:
             attrs = rel.get("attributes", {}) or {}
             attrs = {**attrs, "graph_id": graph_id, "tenant_id": tenant}
             rel_type = rel.get("type", "COMPARE_TO")
-            # 白名单校验，防止注入
+            # 白名单校验，防止注入。未知类型不再静默改成 COMPARE_TO（那会把
+            # "存在性要求"变成"字段比对"），而是记警告后降级，日志可追。
             if rel_type not in _ALLOWED_REL_TYPES:
+                logger.warning(
+                    "图谱关系类型 %s 不在白名单，已降级为 COMPARE_TO（rule_id=%s）",
+                    rel_type, attrs.get("rule_id"),
+                )
                 rel_type = "COMPARE_TO"
             # 带 rule_id 的关系按 (起点, 类型, 终点, rule_id) 幂等：不同规则即使
             # 引用同一字段对（如 物流/承运人 与 代收方（C/O）都归一为 代收方），
@@ -285,6 +291,27 @@ class Neo4jClient:
         """
         records = self.execute_read(
             "MATCH (a:RuleEntity)-[r:MUST_STAMP]->(b:RuleEntity) "
+            "WHERE a.graph_id = $graph_id AND b.graph_id = $graph_id "
+            "AND a.tenant_id = $tenant_id AND b.tenant_id = $tenant_id "
+            "AND r.tenant_id = $tenant_id "
+            "RETURN a.name AS source, b.name AS target, "
+            "a.type AS source_type, b.type AS target_type, "
+            "properties(r) AS rel_props, properties(a) AS source_props, "
+            "properties(b) AS target_props",
+            {"graph_id": graph_id, "tenant_id": str(tenant_id)},
+        )
+        return records
+
+    def get_exist_requirements(
+        self, graph_id: str, tenant_id: uuid.UUID | str
+    ) -> list[dict]:
+        """查所有存在性/齐备要求（MUST_EXIST 关系，P3）。
+
+        返回: [{"source": "存在性检查", "target": "报销单.部门负责人签字",
+               "rel_props": {"rule_id": "R0016", "must": "signed", "condition": {...}}, ...}]
+        """
+        records = self.execute_read(
+            "MATCH (a:RuleEntity)-[r:MUST_EXIST]->(b:RuleEntity) "
             "WHERE a.graph_id = $graph_id AND b.graph_id = $graph_id "
             "AND a.tenant_id = $tenant_id AND b.tenant_id = $tenant_id "
             "AND r.tenant_id = $tenant_id "

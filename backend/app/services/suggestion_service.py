@@ -50,6 +50,7 @@ def build_suggestion_llm(
             ],
             temperature=0.2,
             max_tokens=512,
+            disable_thinking=True,
         )
         suggestion = str(resp.get("suggestion") or "").strip()
         if suggestion:

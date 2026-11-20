@@ -494,6 +494,7 @@ async def analyze_sample_document(
                 ],
                 temperature=0.1,
                 max_tokens=4096,
+                disable_thinking=True,
             )
         except (LLMError, ValueError) as e:
             logger.error("样例文档分析失败: %s", e)

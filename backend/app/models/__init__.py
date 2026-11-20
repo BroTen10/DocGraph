@@ -2,6 +2,7 @@
 
 from .audit_log import AuditLog
 from .auth_session import AuthSession, AuthToken
+from .check_intent import CheckIntent
 from .contract import Contract
 from .document import Document
 from .ocr_task import OcrTask
@@ -12,6 +13,7 @@ from .rule_parse_skill import RuleParseSkill
 from .rule_set import RuleSet
 from .rule_snapshot import RuleSnapshot
 from .document_type import DocumentType
+from .field_binding import FieldBinding
 from .identity import (
     Tenant,
     TenantInvitation,
@@ -25,9 +27,11 @@ __all__ = [
     "AuditLog",
     "AuthSession",
     "AuthToken",
+    "CheckIntent",
     "Contract",
     "Document",
     "DocumentType",
+    "FieldBinding",
     "OcrTask",
     "ReviewResult",
     "ReviewTask",

@@ -290,8 +290,10 @@ def approve_registration(
     )
     db.add(membership)
     from .settings_service import seed_tenant_defaults
+    from .check_intent_service import seed_builtin_intents
 
     seed_tenant_defaults(db, tenant.id)
+    seed_builtin_intents(db, tenant.id)
 
     tenant.approved_by = actor_id
     tenant.approved_at = now

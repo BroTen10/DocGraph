@@ -9,6 +9,12 @@
 - JSON 提取容错：markdown 围栏、JSON 前后夹带文本、字符串里含括号
 - max_tokens 截断导致 JSON 不完整时降级修复，保留已经完整的部分
 - 进程内单例工厂 ``get_llm_client()``
+
+关于 ``disable_thinking``：本项目所有结构化（JSON）调用都应显式传 ``disable_thinking=True``。
+标普云 hub 在请求不带 ``thinking`` 字段时**默认开启思考**，推理 token 计入 ``max_tokens``
+预算且显著变慢（实测同一批 12 条规则审查：默认思考 22.9s，关思考 3.2s），
+小预算调用（如建议生成 512 tokens）可能被推理耗尽后只剩空 content。
+只有需要模型"多想一会儿"的场景才保留思考。
 """
 
 from __future__ import annotations

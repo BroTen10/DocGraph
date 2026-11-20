@@ -146,6 +146,73 @@ class MissingDataTriStateTests(unittest.TestCase):
         self.assertEqual(verdict, "unverifiable")
         self.assertEqual(detail["reason"], "unsupported_operator")
 
+    # ---- 批次 13：日期间隔容差（time_days）此前只落库不生效 ----
+    def test_date_tolerance_allows_gap_within_limit(self) -> None:
+        """提交日期比费用发生日期晚 4 天，容差 30 天 → 通过（BX-2026-0312 误判回归）。"""
+        docs = [
+            doc("报销单", {"提交日期": "2026-03-09", "费用发生日期": "2026-03-05"}, "bx.docx"),
+        ]
+        verdict, _, detail = _dispatch_compare(
+            "时间不晚于",
+            "报销单",
+            "提交日期",
+            "报销单",
+            "费用发生日期",
+            docs,
+            tolerance=0,
+            tolerance_params={"time_days": 30},
+        )
+        self.assertEqual(verdict, "pass")
+        self.assertEqual(detail["gap_days"], 4)
+        self.assertEqual(detail["tolerance_days"], 30)
+
+    def test_date_tolerance_fails_beyond_limit(self) -> None:
+        """提交日期比费用发生日期晚 46 天，容差 30 天 → 不通过。"""
+        docs = [
+            doc("报销单", {"提交日期": "2026-04-20", "费用发生日期": "2026-03-05"}, "bx.docx"),
+        ]
+        verdict, issue, detail = _dispatch_compare(
+            "时间不晚于",
+            "报销单",
+            "提交日期",
+            "报销单",
+            "费用发生日期",
+            docs,
+            tolerance=0,
+            tolerance_params={"time_days": 30},
+        )
+        self.assertEqual(verdict, "fail")
+        self.assertIn("超过容差 30 天", issue)
+        self.assertEqual(detail["gap_days"], 46)
+
+    def test_date_without_tolerance_keeps_strict_semantics(self) -> None:
+        """time_days=0 时保持原有严格语义（同日不允许 → fail）。"""
+        docs = [
+            doc("发票", {"开票日期": "2026-03-06"}, "inv.docx"),
+            doc("报销单", {"提交日期": "2026-03-06"}, "bx.docx"),
+        ]
+        verdict, _, _ = _dispatch_compare(
+            "时间早于",
+            "发票",
+            "开票日期",
+            "报销单",
+            "提交日期",
+            docs,
+            tolerance=0,
+        )
+        self.assertEqual(verdict, "fail")
+        verdict, _, _ = _dispatch_compare(
+            "时间早于",
+            "发票",
+            "开票日期",
+            "报销单",
+            "提交日期",
+            docs,
+            tolerance=0,
+            tolerance_params={"time_days": 1},
+        )
+        self.assertEqual(verdict, "pass")
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

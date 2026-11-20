@@ -64,6 +64,7 @@ def init_db() -> None:
     from .models import (
         audit_log,      # noqa: F401
         auth_session,   # noqa: F401
+        check_intent,   # noqa: F401
         contract,       # noqa: F401
         document,       # noqa: F401
         document_type,  # noqa: F401
@@ -105,6 +106,7 @@ def init_db() -> None:
     # 种子数据：内置默认 Skill + 文档类型
     _seed_builtin_skill()
     _seed_doc_types(default_tenant)
+    _seed_check_intents(default_tenant)
     # 批次 11：规范名/别名单源 + 存量清洗（幂等）
     _migrate_canonical_types(default_tenant)
 
@@ -133,10 +135,42 @@ def _run_migrations(engine) -> None:
         "ALTER TABLE review_results ADD COLUMN IF NOT EXISTS confidence FLOAT;",
         # 规则集级开关：禁用内置默认 Skill 领域知识（仅保留系统解析契约）
         "ALTER TABLE rule_sets ADD COLUMN IF NOT EXISTS use_default_skill BOOLEAN NOT NULL DEFAULT TRUE;",
+        # 场景化解析：场景知识包（scenario=NULL 为通用契约；非 NULL 为该场景专属）
+        "ALTER TABLE rule_parse_skills ADD COLUMN IF NOT EXISTS scenario VARCHAR(64);",
+        "CREATE INDEX IF NOT EXISTS ix_rule_parse_skills_scenario ON rule_parse_skills (scenario);",
+        # 规则集默认业务场景（NULL = 未声明，导入时回落兼容默认场景）
+        "ALTER TABLE rule_sets ADD COLUMN IF NOT EXISTS scenario VARCHAR(64);",
         # 存量 pass 结果回填为 closed（无需跟进）
         "UPDATE review_results SET status = 'closed' WHERE result = 'pass' AND status = 'open';",
         # 批次 11：文档类型显式别名（写时归一）
         "ALTER TABLE document_types ADD COLUMN IF NOT EXISTS aliases JSONB NOT NULL DEFAULT '[]'::jsonb;",
+        # 判定架构 P2：字段绑定沉淀（规则侧字段名 ↔ 单据侧字段名的历史绑定，供本体自校准）
+        """
+        CREATE TABLE IF NOT EXISTS field_bindings (
+            id UUID PRIMARY KEY,
+            tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE RESTRICT,
+            doc_type VARCHAR(64) NOT NULL,
+            rule_field VARCHAR(128) NOT NULL,
+            doc_key VARCHAR(128) NOT NULL,
+            kind VARCHAR(24) NOT NULL DEFAULT 'alias',
+            evidence_count INTEGER NOT NULL DEFAULT 1,
+            status VARCHAR(16) NOT NULL DEFAULT 'observed',
+            sample_doc VARCHAR(512),
+            sample_value TEXT,
+            rule_ids JSONB NOT NULL DEFAULT '[]'::jsonb,
+            promoted_at TIMESTAMP WITHOUT TIME ZONE,
+            first_seen TIMESTAMP WITHOUT TIME ZONE NOT NULL DEFAULT now(),
+            last_seen TIMESTAMP WITHOUT TIME ZONE NOT NULL DEFAULT now()
+        );
+        """,
+        "CREATE UNIQUE INDEX IF NOT EXISTS uq_field_bindings_key ON field_bindings (tenant_id, doc_type, rule_field, doc_key, kind);",
+        "CREATE INDEX IF NOT EXISTS ix_field_bindings_doc_type ON field_bindings (doc_type);",
+        "CREATE INDEX IF NOT EXISTS ix_field_bindings_status ON field_bindings (status);",
+        "CREATE INDEX IF NOT EXISTS ix_field_bindings_tenant_id ON field_bindings (tenant_id);",
+        # 检查项注册表：规则级场景标签
+        "CREATE INDEX IF NOT EXISTS ix_check_intents_status ON check_intents (status);",
+        "ALTER TABLE rules ADD COLUMN IF NOT EXISTS scenario VARCHAR(64);",
+        "CREATE INDEX IF NOT EXISTS ix_rules_scenario ON rules (scenario);",
         "ALTER TABLE document_types ADD COLUMN IF NOT EXISTS field_aliases JSONB NOT NULL DEFAULT '{}'::jsonb;",
         # 一期 OCR 增强点：类型专属抽取指令 + 备注类补充字段清单
         "ALTER TABLE document_types ADD COLUMN IF NOT EXISTS ocr_extract_instructions TEXT;",
@@ -331,54 +365,92 @@ def _migrate_defect_resolution() -> None:
 
 
 def _seed_builtin_skill() -> None:
-    """幂等同步仓库内置 Skill，首次创建或升级已有内置记录。"""
+    """幂等同步仓库内置场景知识包，首次创建或升级已有内置记录。
+
+    每个包对应一条内置 Skill（tenant_id 为 NULL）：
+    - 通用契约包 scenario 为 NULL，所有场景都生效；
+    - 场景包按 pack.scenario 区分，导入时按解析出的场景键加载。
+    """
     from .default_rule_parse_skill import (
-        DEFAULT_RULE_PARSE_SKILL_DESCRIPTION,
-        DEFAULT_RULE_PARSE_SKILL_NAME,
-        load_default_rule_parse_skill_content,
+        load_builtin_skill_packs,
+        legacy_skill_name,
     )
     from .models import RuleParseSkill
     from sqlalchemy import select
 
-    content = load_default_rule_parse_skill_content()
-    with SessionLocal() as db:
-        existing = db.execute(
-            select(RuleParseSkill).where(RuleParseSkill.is_builtin.is_(True))
-        ).scalars().first()
-        if existing is not None:
-            changed = False
-            if existing.content != content:
-                existing.content = content
-                existing.version = max(int(existing.version or 1), 1) + 1
-                changed = True
-            if existing.name != DEFAULT_RULE_PARSE_SKILL_NAME:
-                existing.name = DEFAULT_RULE_PARSE_SKILL_NAME
-                changed = True
-            if existing.description != DEFAULT_RULE_PARSE_SKILL_DESCRIPTION:
-                existing.description = DEFAULT_RULE_PARSE_SKILL_DESCRIPTION
-                changed = True
-            if changed:
-                db.commit()
-                logger.info(
-                    "已同步内置默认 Skill: %s（v%s）",
-                    existing.name,
-                    existing.version,
-                )
-            return
+    packs = load_builtin_skill_packs()
+    if not packs:
+        logger.warning("未找到任何内置场景知识包，跳过内置 Skill 同步")
+        return
 
-        skill = RuleParseSkill(
-            rule_set_id=None,
-            name=DEFAULT_RULE_PARSE_SKILL_NAME,
-            description=DEFAULT_RULE_PARSE_SKILL_DESCRIPTION,
-            is_builtin=True,
-            enabled=True,
-            priority=100,
-            version=1,
-            content=content,
-        )
-        db.add(skill)
-        db.commit()
-        logger.info("已 seed 内置默认 Skill: %s", skill.name)
+    legacy_name = legacy_skill_name()
+    with SessionLocal() as db:
+        existing_rows = db.execute(
+            select(RuleParseSkill).where(RuleParseSkill.is_builtin.is_(True))
+        ).scalars().all()
+        by_scenario: dict[str | None, RuleParseSkill] = {}
+        for row in existing_rows:
+            scenario = getattr(row, "scenario", None)
+            if scenario not in by_scenario:
+                by_scenario[scenario] = row
+        # 存量升级：旧的单一内置记录 scenario 为 NULL 且名称是贸易默认名，
+        # 它会被通用契约包接管，同时为 trade 场景新建一条记录。
+        if None in by_scenario and by_scenario[None].name == legacy_name:
+            logger.info("检测到存量内置 Skill，升级为「通用契约 + 场景包」双层结构")
+
+        for pack in packs:
+            row = by_scenario.get(pack.scenario)
+            if row is not None:
+                changed = False
+                if row.content != pack.content:
+                    row.content = pack.content
+                    row.version = max(int(row.version or 1), 1) + 1
+                    changed = True
+                if row.name != pack.name:
+                    row.name = pack.name
+                    changed = True
+                if (row.description or "") != pack.description:
+                    row.description = pack.description
+                    changed = True
+                if getattr(row, "scenario", None) != pack.scenario:
+                    row.scenario = pack.scenario
+                    changed = True
+                # priority 决定合并顺序（数值小的先合并 = 被后合并的同名键覆盖）。
+                # 全局内置行的 priority 不会被用户修改（编辑内置会派生 is_builtin=False
+                # 的租户副本），因此这里可以安全回写，保证 YAML 与运行序一致。
+                if int(row.priority or 0) != int(pack.priority):
+                    logger.info(
+                        "内置知识包 %s 优先级同步: %s → %s",
+                        row.name,
+                        row.priority,
+                        pack.priority,
+                    )
+                    row.priority = pack.priority
+                    changed = True
+                if changed:
+                    db.commit()
+                    logger.info(
+                        "已同步内置知识包: %s（场景=%s, v%s）",
+                        row.name,
+                        pack.scenario,
+                        row.version,
+                    )
+                continue
+
+            skill = RuleParseSkill(
+                rule_set_id=None,
+                name=pack.name,
+                description=pack.description,
+                is_builtin=True,
+                scenario=pack.scenario,
+                enabled=True,
+                priority=pack.priority,
+                version=1,
+                content=pack.content,
+            )
+            db.add(skill)
+            db.commit()
+            logger.info("已 seed 内置知识包: %s（场景=%s）", skill.name, pack.scenario)
 
 
 def _seed_doc_types(tenant_id: uuid.UUID) -> None:
@@ -391,6 +463,19 @@ def _seed_doc_types(tenant_id: uuid.UUID) -> None:
         added = seed_tenant_defaults(db, tenant_id)
         db.commit()
         logger.info("已为租户 %s seed %d 个内置文档类型", tenant_id, added)
+
+
+def _seed_check_intents(tenant_id: uuid.UUID) -> None:
+    """种子数据：把 constants.CHECK_CATEGORIES 的内置四类检查项写入注册表。
+
+    幂等：已存在的检查项不覆盖（用户改名/别名不会被冲掉）。
+    """
+    from .services.check_intent_service import seed_builtin_intents
+    with SessionLocal() as db:
+        added = seed_builtin_intents(db, tenant_id)
+        db.commit()
+        if added:
+            logger.info("已为租户 %s seed %d 个内置检查项", tenant_id, added)
 
 
 def _migrate_canonical_types(tenant_id: uuid.UUID) -> None:

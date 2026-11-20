@@ -172,15 +172,21 @@ def assert_scenario_results(scenario, results) -> list[str]:
     for r in results:
         by_cat.setdefault(r.check_category, []).append(r)
 
-    if len(results) != len(expected):
+    # expected[cat] is None 表示"该场景下该类规则不应产出结果"（如单据类型缺失）
+    counted = {cat for cat, exp in expected.items() if exp is not None}
+    if len(results) != len(counted):
         failures.append(
-            f"结果条数 {len(results)} != 期望 {len(expected)} "
+            f"结果条数 {len(results)} != 期望 {len(counted)} "
             f"(实际类别: {sorted(by_cat)})"
         )
 
     rule_text_by_cat = {spec["check_category"]: spec["rule_text"] for spec in RULES}
     for cat, exp in expected.items():
         items = by_cat.get(cat, [])
+        if exp is None:
+            if items:
+                failures.append(f"[{cat}] 期望无结果，实际 {len(items)} 条")
+            continue
         if len(items) != 1:
             failures.append(f"[{cat}] 图谱规则结果条数 {len(items)} != 1")
             continue
@@ -247,7 +253,7 @@ def run_pipeline_integration(
     """走 review_service.start_review（含 snapshot）验证链路确实调用图谱规则。"""
     print(f"\n=== {scenario['id']} {scenario['name']} ===")
     from app.services import review_service
-    import app.services.llm_review_service as llm_mod
+    import app.services.review_judge as judge_mod
 
     contract, docs = create_contract_with_docs(
         db,
@@ -257,13 +263,11 @@ def run_pipeline_integration(
         contract_no=f"TEST-{scenario['id']}",
     )
 
-    # 测试规则全部有 structure.assertion，LLM 语义审查本身即为空；
-    # 此处再显式屏蔽 LLM/建议依赖，保证测试确定性。
-    orig_unstructured = llm_mod.review_unstructured_rules
-    orig_semantic = llm_mod.semantic_equivalence_fallback
+    # 测试规则全部有 structure.assertion，统一判定本身不产生新结论；
+    # 此处显式屏蔽 LLM 判定与建议生成，保证测试确定性（零 LLM）。
+    orig_judge = judge_mod.run_unified_judgement
     orig_suggest = review_service.build_suggestion_llm
-    llm_mod.review_unstructured_rules = lambda *a, **k: []
-    llm_mod.semantic_equivalence_fallback = lambda *a, **k: 0
+    judge_mod.run_unified_judgement = lambda *a, **k: judge_mod.JudgeReport()
     review_service.build_suggestion_llm = lambda *a, **k: "（自动化测试生成建议）"
     try:
         task = review_service.start_review(
@@ -315,8 +319,7 @@ def run_pipeline_integration(
             for f in failures:
                 print(f"      ! {f}")
     finally:
-        llm_mod.review_unstructured_rules = orig_unstructured
-        llm_mod.semantic_equivalence_fallback = orig_semantic
+        judge_mod.run_unified_judgement = orig_judge
         review_service.build_suggestion_llm = orig_suggest
 
 

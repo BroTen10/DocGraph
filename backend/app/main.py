@@ -40,6 +40,7 @@ from .observability import (
 )
 from .routers import (
     auth,
+    check_intents,
     contracts,
     doc_types,
     graph,
@@ -252,6 +253,7 @@ app.include_router(reviews.router)
 app.include_router(ocr.router)
 app.include_router(rule_parse_skills.router)
 app.include_router(doc_types.router)
+app.include_router(check_intents.router)
 app.include_router(settings_router.router)
 
 

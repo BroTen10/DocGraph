@@ -29,8 +29,7 @@ from .contract_normalizer import (
     normalize_contract_no,
 )
 from .file_classifier import classify_file, get_file_type
-from .doc_normalizer import normalize_doc_type, resolve_field_aliases
-from .field_extraction_service import normalize_fields
+from .doc_normalizer import normalize_doc_type, normalize_document_fields
 
 logger = logging.getLogger(__name__)
 
@@ -292,10 +291,8 @@ def update_doc_ocr_fields(
         if prev:
             fields["__inferred_doc_type__"] = prev
 
-    doc.extracted_fields = normalize_fields(
-        doc.doc_type,
-        fields,
-        aliases=resolve_field_aliases(db, doc.doc_type, tenant_id=tenant_id),
+    doc.extracted_fields = normalize_document_fields(
+        db, doc.doc_type, fields, tenant_id=tenant_id
     )
     if update_has_stamp:
         doc.has_stamp = has_stamp

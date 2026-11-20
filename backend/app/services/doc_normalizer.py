@@ -277,6 +277,143 @@ def _strip_aggregate_words(field: str) -> str:
     return base.strip()
 
 
+# ============ 字段名限定后缀归一（批次 13） ============
+# 背景（验收 BX-2026-0312）：文档类型注册表/OCR 提取到的字段名常带单位限定，
+# 如「报销金额（元）」；规则侧只写「报销金额」。两者字面不等，确定性引擎记
+# field_missing → 规则停在「无法核验」，LLM 也因"字段不同名"不敢下结论。
+# 处理原则与别名一致（写时归一、可审计），并额外收紧两条：
+# 1. 只剥离**单位类**限定词（元/美元/%/吨/件…），不剥离「含税」「税前」等语义限定词，
+#    避免把「单价（不含税）」错误并到「单价」；
+# 2. 剥离后必须能被该文件类型的规范字段集接住，且该规范名不歧义（两个规范字段
+#    只差单位时不猜），否则原样保留。
+_FIELD_SPACE_RE = re.compile(r"[\s\u3000]+")
+_FIELD_QUALIFIER_RE = re.compile(r"[（(\[【]\s*([^）)\]】]{1,12}?)\s*[）)\]】]\s*$")
+
+_UNIT_QUALIFIERS: frozenset[str] = frozenset(
+    q.upper()
+    for q in (
+        # 金额/币别
+        "元", "万元", "亿元", "千元", "元整", "人民币", "人民币元",
+        "美元", "美金", "港元", "港币", "欧元", "日元", "英镑", "澳元",
+        "加元", "台币", "韩元",
+        "CNY", "RMB", "USD", "US$", "HKD", "EUR", "JPY", "GBP",
+        "AUD", "CAD", "TWD", "KRW",
+        # 比例
+        "%", "％", "百分比", "千分比",
+        # 重量/体积
+        "吨", "千克", "公斤", "KG", "克", "G", "斤", "立方米", "平方米",
+        "升", "L", "毫升", "ML",
+        # 数量/包装/计量
+        "件", "个", "只", "箱", "包", "台", "套", "米", "M", "厘米", "MM",
+        "张", "份", "批", "车", "桶", "袋", "卷", "盘",
+        # 时间/人次
+        "天", "日", "次", "人", "人天", "小时", "H", "月", "年", "周",
+    )
+)
+
+
+def normalize_field_name(field: Any) -> str:
+    """字段名外壳归一：去首尾/中间空白（含全角空格）。"""
+    return _FIELD_SPACE_RE.sub("", str(field if field is not None else "")).strip()
+
+
+def split_field_qualifier(field: Any) -> tuple[str, Optional[str]]:
+    """拆出字段名尾部的括号限定词。报销金额（元）→ ("报销金额", "元")；无则返回 (原名, None)。"""
+    s = normalize_field_name(field)
+    m = _FIELD_QUALIFIER_RE.search(s)
+    if not m:
+        return s, None
+    return s[: m.start()].strip(), m.group(1).strip()
+
+
+def is_unit_qualifier(qualifier: Any) -> bool:
+    """括号限定词是否为"单位类"（可安全剥离）。"""
+    q = normalize_field_name(qualifier).upper()
+    return bool(q) and q in _UNIT_QUALIFIERS
+
+
+def strip_unit_qualifier(field: Any) -> str:
+    """剥离单位类限定后缀；非单位限定（如「单价（不含税）」）原样返回。"""
+    s = normalize_field_name(field)
+    base, qualifier = split_field_qualifier(s)
+    if qualifier and base and is_unit_qualifier(qualifier):
+        return base
+    return s
+
+
+class _FieldNameIndex:
+    """字段名归一索引：规范名集合 + 歧义 base + 别名词表（一次构建，逐键复用）。"""
+
+    __slots__ = ("canonical", "ambiguous", "aliases")
+
+    def __init__(self, canonical_fields, aliases: dict | None):
+        raw = [normalize_field_name(f) for f in (canonical_fields or [])]
+        raw = [f for f in raw if f]
+        base_index: dict[str, set[str]] = {}
+        for f in raw:
+            base_index.setdefault(strip_unit_qualifier(f), set()).add(f)
+        self.canonical = set(base_index)
+        # 同一 base 对应多个不同规范字段（如 金额（元）/金额（美元））→ 不猜
+        self.ambiguous = {b for b, group in base_index.items() if len(group) > 1}
+        self.aliases = {
+            normalize_field_name(k): v for k, v in (aliases or {}).items()
+        }
+
+
+def _alias_target(entry: Any, fallback: str) -> str:
+    target = entry.get("field") if isinstance(entry, dict) else entry
+    return normalize_field_name(target) or fallback
+
+
+def _canonicalize_with_index(key: Any, index: _FieldNameIndex) -> str:
+    """按索引把单个字段键映射到规范名；未命中任何规则时原样返回（归一后外壳）。"""
+    raw = normalize_field_name(key)
+    if not raw:
+        return raw
+    if raw in index.aliases:
+        return _alias_target(index.aliases[raw], raw)
+    if raw in index.canonical:
+        return raw  # 已是规范字段名：即使存在同 base 歧义也保持原样
+    base = strip_unit_qualifier(raw)
+    if base != raw and base:
+        if base in index.aliases:
+            return _alias_target(index.aliases[base], raw)
+        if base in index.canonical and base not in index.ambiguous:
+            return base
+    return raw
+
+
+def canonicalize_field_key(
+    db: Optional[Session],
+    doc_type: Any,
+    key: Any,
+    tenant_id: uuid.UUID | None = None,
+    *,
+    canonical_fields: Any = None,
+    aliases: Optional[dict] = None,
+) -> str:
+    """单个字段键 → 规范字段名（别名 + 单位限定后缀）。
+
+    canonical_fields / aliases 显式传入时不查库（供批量调用与测试复用）。
+    """
+    index = _build_field_name_index(db, doc_type, tenant_id, canonical_fields, aliases)
+    return _canonicalize_with_index(key, index)
+
+
+def _build_field_name_index(
+    db: Optional[Session],
+    doc_type: Any,
+    tenant_id: uuid.UUID | None = None,
+    canonical_fields: Any = None,
+    aliases: Optional[dict] = None,
+) -> _FieldNameIndex:
+    if aliases is None:
+        aliases = resolve_field_aliases(db, doc_type, tenant_id=tenant_id)
+    if canonical_fields is None:
+        canonical_fields = _canonical_fields(db, doc_type, tenant_id=tenant_id)
+    return _FieldNameIndex(canonical_fields, aliases)
+
+
 def normalize_field(
     db: Optional[Session],
     doc_type: Any,
@@ -415,6 +552,38 @@ def normalize_structure(
                 ex2.append(e)
         out["exceptions"] = ex2
 
+    # requirement（P3：存在性/齐备要求）：字段名与文件类型同样归一，
+    # 让"部门负责人签字"这类要求能与文档类型注册表/学习到的别名对齐。
+    requirement = out.get("requirement")
+    if isinstance(requirement, dict):
+        req = dict(requirement)
+        items = req.get("items") or req.get("all_of")
+        if isinstance(items, list):
+            norm_items = []
+            for item in items:
+                if not isinstance(item, dict) or not item.get("field"):
+                    norm_items.append(item)
+                    continue
+                i2 = dict(item)
+                item_doc_type = i2.get("doc_type") or rule_doc_type
+                i2["doc_type"] = (
+                    normalize_doc_type(db, item_doc_type, tenant_id=tenant_id)
+                    or item_doc_type
+                )
+                fld, _ = normalize_field(
+                    db,
+                    i2["doc_type"],
+                    i2.get("field"),
+                    None,
+                    tenant_id=tenant_id,
+                )
+                i2["field"] = fld
+                i2.setdefault("must", "present")
+                norm_items.append(i2)
+            req["items"] = norm_items
+            req.pop("all_of", None)
+        out["requirement"] = req
+
     return out
 
 
@@ -423,21 +592,60 @@ def normalize_extracted_keys(
     doc_type: Any,
     fields: Any,
     tenant_id: uuid.UUID | None = None,
+    *,
+    canonical_fields: Any = None,
+    aliases: Optional[dict] = None,
 ) -> Any:
-    """存量文档 extracted_fields 的字段键归一（按该类型字段别名表重命名）。
+    """存量文档 extracted_fields 的字段键归一。
 
-    规范键已存在时保留规范键值，丢弃别名键；未命中别名的键原样保留。
+    两类映射（批次 11 别名 + 批次 13 单位限定后缀）：
+    1. 别名表：按该类型 field_aliases / 内置别名重命名；
+    2. 单位限定后缀：报销金额（元）→ 该类型规范字段「报销金额」（仅单位类限定、无歧义时）。
+
+    规范键已存在时保留规范键值，丢弃别名键；未命中任何规则的键原样保留；
+    备注类字段（「备注-」前缀）一律不归一，备注原文语义不稳定（FR-3）。
     """
     if not isinstance(fields, dict):
         return fields
-    aliases = resolve_field_aliases(db, doc_type, tenant_id=tenant_id)
-    if not aliases:
+    index = _build_field_name_index(db, doc_type, tenant_id, canonical_fields, aliases)
+    if not index.canonical and not index.aliases:
         return fields
+    preferred = index.canonical | set(index.aliases)
+
+    def _rank(item: tuple) -> int:
+        name = normalize_field_name(item[0])
+        if name in index.canonical:
+            return 0  # 已是规范名：最可信
+        return 1 if name in preferred else 2
+
     out: dict[str, Any] = {}
-    for k, v in fields.items():
-        m = aliases.get(k)
-        target = m.get("field") if isinstance(m, dict) else (m or k)
+    # 规范名先处理：同一目标出现多次时保留"更规范"的那个值，避免结果依赖 OCR 返回的
+    # 键顺序（如 金额=100 与 总价=200 同时出现时保留 总价=200）。
+    for k, v in sorted(fields.items(), key=_rank):
+        target = k if C.is_remark_field(k) else _canonicalize_with_index(k, index)
         if target in out:
             continue  # 规范键已存在，保留规范值
         out[target] = v
     return out
+
+
+def normalize_document_fields(
+    db: Optional[Session],
+    doc_type: Any,
+    fields: Any,
+    tenant_id: uuid.UUID | None = None,
+) -> Any:
+    """文档字段写入侧统一入口：值归一（金额/日期/币别…）+ 字段键归一（别名/单位后缀）。
+
+    OCR 提取、合同样例分析等所有落库路径都应走这里，保证库里只存规范字段名，
+    审查匹配保持精确等值、可预期、可审计（批次 11 设计原则 + 批次 13）。
+    """
+    if not isinstance(fields, dict):
+        return fields
+    from .field_extraction_service import normalize_fields  # 延迟导入：避免模块循环
+
+    aliases = resolve_field_aliases(db, doc_type, tenant_id=tenant_id)
+    valued = normalize_fields(doc_type, fields, aliases=aliases)
+    return normalize_extracted_keys(
+        db, doc_type, valued, tenant_id=tenant_id, aliases=aliases
+    )

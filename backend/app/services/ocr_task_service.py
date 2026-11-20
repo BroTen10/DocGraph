@@ -23,8 +23,7 @@ from ..constants import DOC_OTHER
 from ..database import SessionLocal, bind_tenant
 from ..models import Contract, Document, DocumentType, OcrTask, RuleSet
 from ..tenant_scope import tenant_get
-from .doc_normalizer import normalize_doc_type, resolve_field_aliases
-from .field_extraction_service import normalize_fields
+from .doc_normalizer import normalize_doc_type, normalize_document_fields
 from .ocr_service import (
     OCR_PROFILE_TYPE,
     build_applied_config,
@@ -313,10 +312,8 @@ def _run_single_doc(
             doc.has_stamp = r.get("has_stamp")
             doc.ocr_confidence = r.get("confidence", 0.0)
             doc.ocr_layout = r.get("layout", {}) or {}
-            doc.extracted_fields = normalize_fields(
-                doc.doc_type,
-                r.get("fields", {}),
-                aliases=resolve_field_aliases(db, doc.doc_type, tenant_id=tenant_id),
+            doc.extracted_fields = normalize_document_fields(
+                db, doc.doc_type, r.get("fields", {}), tenant_id=tenant_id
             )
             doc.extracted_at = datetime.now()
             task.success_count = 1
@@ -411,10 +408,8 @@ def _run_batch(
                     doc.has_stamp = r.get("has_stamp")
                     doc.ocr_confidence = r.get("confidence", 0.0)
                     doc.ocr_layout = r.get("layout", {}) or {}
-                    doc.extracted_fields = normalize_fields(
-                        doc.doc_type,
-                        r.get("fields", {}),
-                        aliases=resolve_field_aliases(db, doc.doc_type, tenant_id=tenant_id),
+                    doc.extracted_fields = normalize_document_fields(
+                        db, doc.doc_type, r.get("fields", {}), tenant_id=tenant_id
                     )
                     doc.extracted_at = datetime.now()
                     success += 1

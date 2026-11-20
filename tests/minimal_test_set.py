@@ -55,6 +55,27 @@ RULES: list[dict[str, Any]] = [
     },
     {
         "doc_type": "出口报关单",
+        "check_category": "审批层级",
+        "rule_text": "报关金额达到10000元及以上的出口报关单，应同时具备申报单位与报关员签字。",
+        "tolerance": {},
+        "priority": 50,
+        # P3：存在性/齐备要求（不再被硬塞成 A op B 比对）
+        "structure": {
+            "condition": {
+                "text": "报关金额达到10000元及以上",
+                "field": "总价",
+                "operator": "不小于",
+                "value": 10000,
+            },
+            "requirement": {
+                "items": [
+                    {"doc_type": "出口报关单", "field": "申报日期", "must": "present"}
+                ]
+            },
+        },
+    },
+    {
+        "doc_type": "出口报关单",
         "check_category": "时间逻辑",
         "rule_text": "委托出口确认单签订日期应不晚于出口报关单申报日期。",
         "tolerance": {},
@@ -103,6 +124,7 @@ SCENARIOS: list[dict[str, Any]] = [
             "基础判断": "pass",
             "信息准确性": "pass",
             "时间逻辑": "pass",
+            "审批层级": "pass",
         },
     },
     {
@@ -118,6 +140,7 @@ SCENARIOS: list[dict[str, Any]] = [
             "基础判断": "pass",
             "信息准确性": "unverifiable",
             "时间逻辑": "unverifiable",
+            "审批层级": None,  # 该类型单据缺失：由齐套性负责，存在性检查不产出结果
         },
     },
     {
@@ -133,6 +156,7 @@ SCENARIOS: list[dict[str, Any]] = [
             "基础判断": "fail",
             "信息准确性": "pass",
             "时间逻辑": "pass",
+            "审批层级": "pass",
         },
     },
     {
@@ -148,6 +172,7 @@ SCENARIOS: list[dict[str, Any]] = [
             "基础判断": "pass",
             "信息准确性": "fail",
             "时间逻辑": "pass",
+            "审批层级": "pass",
         },
     },
     {
@@ -163,6 +188,7 @@ SCENARIOS: list[dict[str, Any]] = [
             "基础判断": "pass",
             "信息准确性": "pass",
             "时间逻辑": "fail",
+            "审批层级": "pass",
         },
     },
     {
@@ -178,6 +204,39 @@ SCENARIOS: list[dict[str, Any]] = [
             "基础判断": "pass",
             "信息准确性": "unverifiable",
             "时间逻辑": "pass",
+            "审批层级": "pass",
+        },
+    },
+    {
+        "id": "TC-09",
+        "name": "报关单缺申报日期：存在性要求（审批层级）fail",
+        "docs": [
+            doc("代理协议", {"协议方": "甲公司"}, has_stamp=True),
+            doc("委托出口确认单", {"金额": 10000, "签订日期": "2026-01-01"}),
+            doc("出口报关单", {"总价": 10000}),  # 申报日期缺失
+        ],
+        "expected": {
+            "齐套性": "pass",
+            "基础判断": "pass",
+            "信息准确性": "pass",
+            "时间逻辑": "unverifiable",
+            "审批层级": "fail",
+        },
+    },
+    {
+        "id": "TC-10",
+        "name": "报关金额未达门槛：存在性要求不适用（pass + 条件证据）",
+        "docs": [
+            doc("代理协议", {"协议方": "甲公司"}, has_stamp=True),
+            doc("委托出口确认单", {"金额": 5000, "签订日期": "2026-01-01"}),
+            doc("出口报关单", {"总价": 5000}),  # 未达 10000 门槛，且无申报日期
+        ],
+        "expected": {
+            "齐套性": "pass",
+            "基础判断": "pass",
+            "信息准确性": "pass",
+            "时间逻辑": "unverifiable",
+            "审批层级": "pass",
         },
     },
 ]
@@ -195,6 +254,7 @@ PIPELINE_SCENARIO = {
         "基础判断": "pass",
         "信息准确性": "pass",
         "时间逻辑": "pass",
+        "审批层级": "pass",
     },
 }
 

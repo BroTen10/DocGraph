@@ -30,7 +30,6 @@ from app.services.graph_review_service import (  # noqa: E402
     _split_field_expr,
     _to_number,
 )
-from app.services.llm_review_service import _is_adjudication_candidate  # noqa: E402
 
 
 def check(name: str, cond: bool, detail: str = "") -> None:
@@ -101,47 +100,6 @@ def main() -> None:
     total, agg_missing = _aggregate_field([customs], "出口报关单", "件数*数量")
     check("合计 990", total == 990.0, f"got {total}")
     check("无缺失", agg_missing == [], str(agg_missing))
-
-    print("B：兜底裁决准入放宽")
-    check(
-        "两侧 doc 采集为空但文档存在（field_missing）→ 进裁决",
-        _is_adjudication_candidate(SimpleNamespace(
-            source="graph", result="unverifiable",
-            detail={
-                "reason": "field_data_missing",
-                "evidence": {
-                    "source": {"docs": [], "missing_fields": [{"field": "件数*数量", "reason": "field_missing", "doc_files": ["报关单.pdf"]}]},
-                    "target": {"docs": [], "missing_fields": [{"field": "数量*箱数", "reason": "field_missing", "doc_files": ["送货单.pdf"]}]},
-                },
-            },
-        )) is True,
-    )
-    check(
-        "该类型单据本身不存在（no_docs_of_type）→ 不进裁决",
-        _is_adjudication_candidate(SimpleNamespace(
-            source="graph", result="unverifiable",
-            detail={
-                "reason": "field_data_missing",
-                "evidence": {
-                    "source": {"docs": [], "missing_fields": [{"field": "数量", "reason": "no_docs_of_type", "doc_files": []}]},
-                    "target": {"docs": [], "missing_fields": [{"field": "数量", "reason": "no_docs_of_type", "doc_files": []}]},
-                },
-            },
-        )) is False,
-    )
-    check(
-        "某侧已采集到值 → 仍进裁决（原行为不回退）",
-        _is_adjudication_candidate(SimpleNamespace(
-            source="graph", result="unverifiable",
-            detail={
-                "reason": "field_data_missing",
-                "evidence": {
-                    "source": {"docs": [], "missing_fields": [{"field": "件数*数量", "reason": "field_missing", "doc_files": ["报关单.pdf"]}]},
-                    "target": {"docs": [{"value": 990.0}], "missing_fields": []},
-                },
-            },
-        )) is True,
-    )
 
     print("\n全部通过")
 

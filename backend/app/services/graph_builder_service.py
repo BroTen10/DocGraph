@@ -167,6 +167,7 @@ def _convert_one_rule(
             ],
             temperature=0.1,
             max_tokens=2048,
+            disable_thinking=True,
         )
     except LLMError as e:
         logger.warning("规则 %s 转换失败: %s", rule_id_str, e)
@@ -331,6 +332,86 @@ def _convert_structured_rule(rule: Rule, rule_index: int) -> RuleGraphConvertRes
             EdgeData(source=src_name, target=tgt_name, type="COMPARE_TO", attributes=rel_attrs),
         ],
         confidence=1.0,  # 程序化生成，置信度满分
+        auto_confirmed=False,
+    )
+
+
+def _requirement_items(rule: Rule) -> list[dict]:
+    """结构化存在性要求（P3）：structure.requirement.items，如"应同时具备两种签字"。"""
+    req = (rule.structure or {}).get("requirement")
+    if not isinstance(req, dict):
+        return []
+    items = req.get("items") or req.get("all_of") or []
+    return [x for x in items if isinstance(x, dict) and x.get("field")]
+
+
+# 虚拟节点：表示"存在性/齐备要求"这一动作，作为 MUST_EXIST 关系的 source
+_EXIST_ROOT = "存在性检查"
+
+
+def _convert_requirement_rule(rule: Rule, rule_index: int) -> RuleGraphConvertResult:
+    """存在性要求规则程序化转换：生成 Value 节点 + MUST_EXIST 关系（确定性，不调 LLM）。
+
+    规则形如"报销金额达到5000元及以上的报销单，应同时具备部门负责人与财务负责人签字审批"：
+    - 触发条件挂在关系上（condition），审查时先做条件预检；
+    - 每个要求落成一条 MUST_EXIST 边：source=存在性检查, target=文件类型.字段。
+    """
+    rule_id_str = rule.rule_code
+    structure = rule.structure or {}
+    condition = structure.get("condition") or None
+    items = _requirement_items(rule)
+    doc_type_default = rule.doc_type
+    entities: list[EntityData] = [
+        EntityData(
+            name=_EXIST_ROOT,
+            type="CheckRoot",
+            attributes={"rule_id": rule_id_str, "layer": "execution"},
+        )
+    ]
+    rels: list[EdgeData] = []
+    for item in items:
+        doc_type = str(item.get("doc_type") or doc_type_default or "").strip()
+        field = str(item.get("field") or "").strip()
+        if not doc_type or not field:
+            continue
+        node = _node_name(doc_type, field)
+        entities.append(
+            EntityData(
+                name=node,
+                type="Field",
+                attributes={
+                    "doc_type": doc_type,
+                    "field": field,
+                    "must": str(item.get("must") or "present"),
+                    "rule_id": rule_id_str,
+                    "layer": "ontology",
+                },
+            )
+        )
+        rels.append(
+            EdgeData(
+                source=_EXIST_ROOT,
+                target=node,
+                type="MUST_EXIST",
+                attributes={
+                    "rule_id": rule_id_str,
+                    "rule_text": rule.rule_text,
+                    "doc_type": doc_type,
+                    "check_category": rule.check_category,
+                    "must": str(item.get("must") or "present"),
+                    "condition": condition,
+                    "exceptions": structure.get("exceptions") or [],
+                    "tolerance_params": rule.tolerance or {},
+                    "layer": "execution",
+                },
+            )
+        )
+    if not rels:
+        raise ValueError(f"规则 {rule_id_str} structure.requirement 无有效条目")
+    return RuleGraphConvertResult(
+        entities=entities,
+        relationships=rels,
+        confidence=1.0,
         auto_confirmed=False,
     )
 
@@ -628,6 +709,14 @@ def build_graph(
             result = _convert_completeness_rule(rule, idx)
         elif rule.check_category == CHECK_STAMP:
             result = _convert_stamp_rule(rule, idx)
+        elif _requirement_items(rule):
+            # P3：存在性/齐备要求（"应同时具备…签字/盖章"）程序化转 MUST_EXIST，不调 LLM
+            _report(
+                "存在性要求转换",
+                10 + int((idx - 1) / total * 70),
+                f"正在转换规则 {idx}/{total}：[{rule.doc_type}] {rule.rule_text[:40]}...",
+            )
+            result = _convert_requirement_rule(rule, idx)
         elif _has_complete_assertion(rule):
             # 批次 7：有结构化断言的规则程序化转图谱（确定性，不调 LLM）
             _report(

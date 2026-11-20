@@ -39,9 +39,14 @@ def initialized_database() -> None:
 
     from app.database import engine, init_db
 
+    # 重建 schema 是 DDL：必须先丢弃连接池中的旧连接。
+    # 否则池中仍持有 DROP 之前元数据快照的连接会被 create_all 的"表已存在"检查复用，
+    # 建表被整体跳过，表现为后续迁移报 relation "..." does not exist。
+    engine.dispose()
     with engine.begin() as conn:
         conn.execute(text("DROP SCHEMA public CASCADE"))
         conn.execute(text("CREATE SCHEMA public"))
+    engine.dispose()
     init_db()
 
 

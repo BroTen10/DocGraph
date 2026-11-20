@@ -47,7 +47,6 @@ from .contract_normalizer import extract_contract_numbers, normalize_contract_no
 from .field_extraction_service import (
     aggregate_amount,
     cross_validate_contract_no,
-    normalize_fields,
     parse_date,
 )
 from .ocr_service import (
@@ -57,7 +56,7 @@ from .ocr_service import (
     resolve_field_template,
     resolve_ocr_profile,
 )
-from .doc_normalizer import normalize_party_name, resolve_field_aliases
+from .doc_normalizer import normalize_document_fields, normalize_party_name
 from .settings_service import get_setting
 from .suggestion_service import build_suggestion_llm
 from . import result_meta
@@ -303,17 +302,15 @@ def _run_review_pipeline(
             doc.has_stamp = r.get("has_stamp")
             doc.ocr_confidence = r.get("confidence", 0.0)
             doc.ocr_layout = r.get("layout", {}) or {}
-            # 规范化字段 + 文件名 ground truth 交叉校验（防 OCR 合同号末位误识假阳性）
+            # 规范化字段（值 + 字段键：别名/单位限定后缀）+ 文件名 ground truth 交叉校验
+            # （防 OCR 合同号末位误识假阳性）
             doc.extracted_fields = cross_validate_contract_no(
                 doc.file_name,
-                normalize_fields(
+                normalize_document_fields(
+                    db,
                     doc.doc_type,
                     r.get("fields", {}),
-                    aliases=resolve_field_aliases(
-                        db,
-                        doc.doc_type,
-                        tenant_id=tenant_id,
-                    ),
+                    tenant_id=tenant_id,
                 ),
             )
             doc.extracted_at = datetime.now()
@@ -377,89 +374,34 @@ def _run_review_pipeline(
             _check_time_logic(db, tenant_id, docs, rules_by_key, contract)
         )
 
-    # ============ 阶段2.5：LLM 语义审查（引擎 B，批次 10 Phase C） ============
-    # 覆盖确定性引擎表达不了的定性规则，并对字符串相等失败做语义复核；
-    # 任何异常都不影响确定性结果（护栏）。
+    # ============ 阶段2.5：统一判定（证据包 + 大模型判定 + 机器验证） ============
+    # 一条判定路径：意图编译 → 大模型带引用判定 → Python 验证门 → 绑定沉淀。
+    # 判定失败/验证不通过 → 显性标「需人工确认」；任何异常都不影响确定性结果（护栏）。
+    judge_metrics: dict = {}
     try:
-        from .llm_review_service import (
-            review_unstructured_rules,
-            semantic_equivalence_fallback,
-            semantic_adjudication_fallback,
-        )
+        from .review_judge import run_unified_judgement
+
         enabled_rules = _load_enabled_rules(db, contract.rule_set_id)
-        llm_results = review_unstructured_rules(
-            db,
-            contract,
-            docs,
-            enabled_rules,
-            tenant_id=tenant_id,
-        )
-        for lr in llm_results:
-            results.append(_make_result_from_llm(lr, docs))
-        semantic_changed = semantic_equivalence_fallback(
-            db,
-            contract,
-            docs,
-            results,
-            tenant_id=tenant_id,
-        )
-        adjudication_changed = 0
-        if get_setting(
+        graph_data = _load_graph_data(db, tenant_id, contract, snapshot_id)
+        report = run_unified_judgement(
             db,
             tenant_id,
-            "review.semantic_adjudication_enabled",
-            True,
-        ):
-            adjudication_changed = semantic_adjudication_fallback(
-                db,
-                contract,
-                docs,
-                results,
-                tenant_id=tenant_id,
-            )
-        if llm_results or semantic_changed or adjudication_changed:
-            logger.info(
-                "审查任务 %s: LLM 语义审查新增 %d 条结果，语义复核调整 %d 条，语义裁决调整 %d 条",
-                task.id, len(llm_results), semantic_changed, adjudication_changed,
-            )
-    except Exception as e:
-        logger.warning("审查任务 %s: LLM 语义审查失败（不影响确定性结果）: %s", task.id, e, exc_info=True)
-
-    # ============ 阶段2.6：LLM 全量复核（可选开关，只提异议不改判） ============
-    # 默认关闭。开启后确定性结论逐条交给 LLM 复核，但 LLM 只能把存疑项标成
-    # 「需人工复核」，不会改写引擎结论（结论可复现、可拿原始单据复核）。
-    if get_setting(db, tenant_id, "review.llm_full_review_enabled", False):
-        try:
-            from .llm_review_service import semantic_challenge_review
-
-            challenged = semantic_challenge_review(
-                db,
-                contract,
-                docs,
-                results,
-                tenant_id=tenant_id,
-            )
-            if challenged:
-                logger.info("审查任务 %s: LLM 全量复核标记 %d 条需人工复核", task.id, challenged)
-        except Exception as e:
-            logger.warning("审查任务 %s: LLM 全量复核失败（不影响确定性结果）: %s", task.id, e, exc_info=True)
-
-    # ============ 阶段2.7：兜底强制收口 ============
-    # 引擎判不了的结果必须留下兜底痕迹或显性「需人工确认」，不允许静默停在无法核验。
-    try:
-        from .llm_review_service import ensure_fallback_coverage
-
-        covered = ensure_fallback_coverage(
-            db,
-            contract,
             docs,
+            enabled_rules,
             results,
-            tenant_id=tenant_id,
+            graph_data=graph_data,
         )
-        if covered:
-            logger.warning("审查任务 %s: %d 条结果缺少兜底痕迹，已标记需人工确认", task.id, covered)
+        judge_metrics = report.as_dict()
+        if report.enabled:
+            logger.info(
+                "审查任务 %s: 统一判定 送审 %d/%d 项，验证通过 %d，覆盖确定性结论 %d，"
+                "重试 %d，交人工 %d，新增 %d，绑定沉淀 %d（升级 %d）",
+                task.id, report.items_sent, report.items_total, report.verified,
+                report.overrides, report.retried, report.escalated, report.created,
+                report.bindings_recorded, report.bindings_promoted,
+            )
     except Exception as e:
-        logger.warning("审查任务 %s: 兜底强制收口失败: %s", task.id, e, exc_info=True)
+        logger.warning("审查任务 %s: 统一判定失败（不影响确定性结果）: %s", task.id, e, exc_info=True)
 
     # ============ 阶段3：生成建议 + 持久化 ============
     task.stage = "生成报告中"
@@ -487,12 +429,46 @@ def _run_review_pipeline(
         "fail": sum(1 for r in results if r.result == "fail"),
         "unverifiable": sum(1 for r in results if r.result == "unverifiable"),
     }
+    if judge_metrics:
+        summary["judge"] = judge_metrics
     task.summary = summary
     task.status = "completed"
     task.progress = 100
     task.stage = "完成"
     task.end_time = datetime.now()
     db.commit()
+
+
+def _load_graph_data(
+    db: Session,
+    tenant_id: uuid.UUID,
+    contract: Contract,
+    snapshot_id: Optional[uuid.UUID],
+) -> Optional[dict]:
+    """读取本次审查所用图谱的节点与边，供意图编译使用（失败返回 None，不阻塞审查）。"""
+    try:
+        from sqlalchemy import select
+
+        from ..neo4j_client import get_neo4j_client
+
+        if snapshot_id is not None:
+            snapshot = tenant_get(db, RuleSnapshot, snapshot_id, tenant_id)
+        else:
+            snapshot = db.execute(
+                select(RuleSnapshot)
+                .where(
+                    RuleSnapshot.tenant_id == tenant_id,
+                    RuleSnapshot.rule_set_id == contract.rule_set_id,
+                )
+                .order_by(RuleSnapshot.snapshot_time.desc())
+                .limit(1)
+            ).scalars().first()
+        if snapshot is None or not snapshot.graph_id:
+            return None
+        return get_neo4j_client().get_graph_data(snapshot.graph_id, tenant_id)
+    except Exception as e:
+        logger.info("图谱数据读取失败（意图编译将退化到规则结构/条款）: %s", e)
+        return None
 
 
 def _load_enabled_rules(db: Session, rule_set_id: uuid.UUID) -> list[Rule]:
@@ -563,40 +539,6 @@ def _primary_doc_for_rule(rule: Rule, docs: list[Document]) -> Optional[Document
         return None
     typed = _docs_by_type(docs, doc_type)
     return typed[0] if typed else None
-
-
-def _make_result_from_llm(lr: dict, docs: Optional[list[Document]] = None) -> ReviewResult:
-    """LLM 语义审查结果 → ReviewResult（source=llm，携带置信度）。"""
-    rule: Rule = lr["rule"]
-    primary_doc = _primary_doc_for_rule(rule, docs or [])
-    status = result_meta.default_status(lr["result"])
-    severity, deviation = result_meta.compute_severity(
-        lr["result"], rule.check_category, lr.get("detail") or {}
-    )
-    return ReviewResult(
-        rule_id=rule.id,
-        rule_text=rule.rule_text,
-        doc_type=rule.doc_type,
-        check_category=rule.check_category,
-        doc_id=primary_doc.id if primary_doc else None,
-        result=lr["result"],
-        status=status,
-        status_history=[
-            {
-                "status": status,
-                "at": datetime.now().isoformat(timespec="seconds"),
-                "by": "system",
-                "note": "LLM 语义审查",
-            }
-        ],
-        severity=severity,
-        deviation=deviation,
-        source="llm",
-        confidence=lr.get("confidence"),
-        issue_desc=lr.get("issue_desc") or None,
-        detail=lr.get("detail") or {},
-        suggestion=lr.get("suggestion") or None,
-    )
 
 
 def _find_rule(

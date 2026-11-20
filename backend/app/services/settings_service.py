@@ -61,26 +61,33 @@ KNOBS: dict[str, dict] = {
         "kind": "boolean",
         "default": bool(app_settings.allow_same_day_receive_pay),
     },
-    "review.semantic_adjudication_enabled": {
-        "label": "LLM 语义裁决（条件/不可核验复核）",
+    "review.judge_enabled": {
+        "label": "统一判定（证据包 + 大模型判定 + 机器验证）",
         "group": "运行参数",
-        "description": "开启后，条件预检无法确定或疑似误判、断言不可核验的规则，由 LLM 结合合同上下文与关联单据复核；无法确认时降级为待人工确认。",
+        "description": "开启（默认）：每条规则的结论由大模型在证据包上判定，判定必须带引用与比较声明，由 Python 验证门逐条核对/重算；验证不通过则带原因重试一次，仍不通过交人工。关闭则只保留确定性引擎结论。",
         "kind": "boolean",
         "default": True,
     },
-    "review.llm_full_review_enabled": {
-        "label": "LLM 全量复核（只提异议，不改判）",
+    "review.judge_override_deterministic": {
+        "label": "统一判定可覆盖确定性结论",
         "group": "运行参数",
-        "description": "开启后，确定性引擎的每条结论都会再交给 LLM 复核；LLM 只能提出异议并把该条标注为「需人工复核」，不会改写引擎结论（避免审查结论不可复现）。",
+        "description": "开启（默认）：确定性引擎的结论也送大模型复核，验证通过的判定可以覆盖引擎结论（覆盖原因写入结果证据链，字段名 judge_override）。关闭：只判定引擎未结案（无法核验）的条目。",
+        "kind": "boolean",
+        "default": True,
+    },
+    "review.binding_promote_threshold": {
+        "label": "字段绑定自动升级阈值",
+        "group": "运行参数",
+        "description": "同一「规则字段名 ↔ 单据字段名」绑定被验证通过的次数达到该阈值后，自动升级为该文档类型的别名（写入文档类型配置），下次遇到同种说法无需再靠模型现场发现。存在冲突的绑定不自动升级。",
+        "kind": "number",
+        "default": 3,
+    },
+    "rules.auto_confirm_new_check_intents": {
+        "label": "规则导入新检查项自动确认",
+        "group": "运行参数",
+        "description": "关闭（默认）：规则导入发现的检查项登记为「待确认」，人工确认后才参与规则矩阵分列与执行分派；开启则直接生效。",
         "kind": "boolean",
         "default": False,
-    },
-    "review.llm_challenge_min_confidence": {
-        "label": "LLM 异议最低置信度",
-        "group": "运行参数",
-        "description": "LLM 全量复核与引擎结论不一致、且置信度 ≥ 该阈值时，才把该条标注为「需人工复核」；低于阈值的异议仅记入证据，不打扰人工。",
-        "kind": "number",
-        "default": 0.7,
     },
     "rules.auto_confirm_new_types": {
         "label": "规则导入新类型自动激活",
@@ -303,6 +310,7 @@ def optimize_prompt(
             ],
             temperature=0.3,
             max_tokens=8192,
+            disable_thinking=True,
         )
         suggested = str(resp.get("suggested") or "").strip()
         if not suggested:

@@ -36,11 +36,30 @@ from .doc_normalizer import (
     is_currency_field,
     is_party_field,
     normalize_currency_value,
+    normalize_field_name,
     normalize_party_name,
+    strip_unit_qualifier,
 )
 from . import result_meta
 
 logger = logging.getLogger(__name__)
+
+# 签字/用印类字段标识词（P1：角色签字解析）
+_SIGNATURE_FIELD_HINTS: tuple[str, ...] = (
+    "签字", "签名", "签署", "签批", "盖章", "用印", "审批", "审核", "核准", "批准",
+)
+# 角色后缀：从「部门负责人签字」里取出角色词「部门负责人」
+_SIGNATURE_ROLE_SUFFIXES: tuple[str, ...] = (
+    "签字", "签名", "签署", "签批", "盖章", "用印", "审批", "审核", "核准",
+)
+# 签字栏里的否定表述：命中即视为"该角色未签字"，不得当作已具备
+_SIGNATURE_NEGATIVE_HINTS: tuple[str, ...] = (
+    "未签字", "无签字", "未签署", "未签", "缺签字", "待签",
+    "未审批", "未审核", "未核准", "未批准",
+    "未盖章", "无盖章", "未用印", "无印章", "未盖章", "缺章",
+)
+# 一个签字栏里可能并列多个角色（如「部门负责人 李强；财务负责人 未签字」）
+_SIGNATURE_SEGMENT_RE = re.compile(r"[；;，,、\n\r]+")
 
 
 # ============ 辅助：复用 review_service 的工具函数（避免循环依赖，就地实现） ============
@@ -57,14 +76,175 @@ def _first_doc_for_type(docs: list[Document], doc_type: str | None) -> Optional[
     return typed[0] if typed else None
 
 
+def _is_signature_field(field: str) -> bool:
+    return any(h in field for h in _SIGNATURE_FIELD_HINTS)
+
+
+def _signature_role(field: str) -> Optional[str]:
+    """从签字类字段名提取角色词：部门负责人签字 → 部门负责人；财务负责人审批 → 财务负责人。"""
+    s = normalize_field_name(field)
+    for suffix in _SIGNATURE_ROLE_SUFFIXES:
+        if s.endswith(suffix) and len(s) > len(suffix):
+            return s[: -len(suffix)]
+    return s if _is_signature_field(s) and len(s) > 2 else None
+
+
+def _role_segment(text: str, role: str) -> Optional[str]:
+    """在签字栏原文里定位该角色所在的片段。
+
+    「部门负责人 李强；财务负责人 未签字」+「财务负责人」→「财务负责人 未签字」
+    """
+    for seg in _SIGNATURE_SEGMENT_RE.split(text):
+        if role in seg:
+            return seg.strip()
+    return None
+
+
+def _segment_negative(seg: str) -> bool:
+    """片段是否明确表述"未签字/未审批"（否定表述不得当作已具备）。"""
+    return any(h in seg for h in _SIGNATURE_NEGATIVE_HINTS)
+
+
+def iter_signature_roles(fields: dict) -> list[tuple[str, str]]:
+    """从单据字段里解析"签字角色 → 签字原文"（忽略否定表述，如"财务负责人 未签字"）。
+
+    与 _resolve_role_signature 共用同一套角色/片段/否定判定，保证"引擎认定已签"
+    与"给大模型看的证据"永远一致。
+    """
+    out: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for key, value in (fields or {}).items():
+        name = normalize_field_name(key)
+        if not name or name.startswith("__"):
+            continue
+        text = str(value or "").strip()
+        if not text:
+            continue
+        if not _is_signature_field(name):
+            continue
+        # 先看值里写明的角色（"部门负责人 李强；财务负责人 未签字" 才是真实签字角色），
+        # 只有值里没写角色时才退回"从字段名推角色"（如「财务负责人签字」= 王芳）。
+        found_in_value = False
+        for seg in _SIGNATURE_SEGMENT_RE.split(text):
+            seg = seg.strip()
+            if not seg or _segment_negative(seg):
+                continue
+            for candidate_role in _signature_roles_in_segment(seg):
+                found_in_value = True
+                if candidate_role in seen:
+                    continue
+                seen.add(candidate_role)
+                out.append((candidate_role, seg))
+        if found_in_value:
+            continue
+        role = _signature_role(name)
+        if role and role not in seen and not _segment_negative(text):
+            seen.add(role)
+            out.append((role, text))
+    return out
+
+
+_ROLE_SUFFIX_WORDS = ("签字", "签名", "签署", "审批", "审核", "盖章", "用印")
+# 角色词特征：出现在片段首词的职务/身份后缀
+_ROLE_WORD_HINTS = (
+    "负责人", "经理", "主管", "总监", "主任", "董事", "专员", "会计", "出纳",
+    "部长", "科长", "处长", "总裁", "法人", "代表", "经办人", "审批人", "审核人",
+    "申请人", "签收人", "领款人", "经办", "验收",
+)
+
+
+def _signature_roles_in_segment(segment: str) -> list[str]:
+    """片段形如"部门负责人 李强" → ["部门负责人"]；纯姓名片段（"王芳"）不算角色。
+
+    判据：片段至少两段（角色 姓名），或首词本身带职务特征词。
+    "审批签字=王芳" 这种值里没写角色的，由调用方回退到"从字段名推角色"。
+    """
+    tokens = [t for t in re.split(r"[\s　:：]+", segment.strip()) if t]
+    if not tokens:
+        return []
+    head = tokens[0].strip()
+    for word in _ROLE_SUFFIX_WORDS:
+        if head.endswith(word) and len(head) > len(word):
+            head = head[: -len(word)]
+            break
+    if not head or len(head) < 2:
+        return []
+    looks_like_role = len(tokens) >= 2 or any(
+        hint in head or head.endswith(hint) for hint in _ROLE_WORD_HINTS
+    )
+    return [head] if looks_like_role else []
+
+
+def _resolve_role_signature(doc: Document, field: str) -> Optional[str]:
+    """签字类字段的语义解析（P1）：单据把角色写在签字栏的值里时按角色取到签字。
+
+    背景（验收 BX-2026-0312）：报销单只有「审批签字=部门负责人 李强」一个签字栏，
+    规则要求的是「部门负责人签字」。字面字段名不同 → 确定性引擎记 field_missing，
+    规则停在「无法核验」。但"谁签了字"这一事实在单据里是确凿的：签字栏的值里
+    写明了角色。此处只在**签字/用印类语义**内做角色匹配，不做通用模糊匹配：
+    - 字段名含角色词（如「部门负责人」= 李强）→ 直接取值；
+    - 字段名是签字/审批类且值里含角色词（如「审批签字」=「部门负责人 李强」）→ 取值。
+    否定表述（「财务负责人 未签字」）不视为已签字——否则比"判不了"更糟（假通过）。
+    取到的是原文片段，证据链可回溯。
+    """
+    s = normalize_field_name(field)
+    if not _is_signature_field(s):
+        return None
+    role = _signature_role(s)
+    if not role:
+        return None
+    fields = doc.extracted_fields or {}
+    # P2：先用"学到的签字栏映射"直接取值（同一个新场景第二次出现即命中）
+    learned_key = _learned_roles_for(doc.doc_type).get(role)
+    if learned_key and learned_key in fields:
+        text = str(fields.get(learned_key) or "").strip()
+        if text:
+            seg = _role_segment(text, role) or text
+            if not _segment_negative(seg):
+                return seg
+    for other_key, other_val in fields.items():
+        ok = normalize_field_name(other_key)
+        if not ok or ok == s or ok.startswith("__"):
+            continue
+        if role in ok:  # 字段名本身就是角色（如「部门负责人」= 李强）
+            text = str(other_val or "").strip()
+            if not text:
+                continue
+            seg = _role_segment(text, role) or text
+            if not _segment_negative(seg):
+                return seg
+    for found_role, signer in iter_signature_roles(fields):
+        if found_role == role:
+            return signer
+    return None
+
+
 def _get_field(doc: Document, key: str, aliases: list[str] | None = None):
-    """从文档的 extracted_fields 取字段值，支持别名与复合算术表达式。"""
+    """从文档的 extracted_fields 取字段值，支持别名、单位限定后缀与复合算术表达式。
+
+    取值顺序：精确键 → 显式别名 → 单位限定后缀（报销金额（元）→ 报销金额，
+    存量文档/未登记字段的读取侧兜底）→ 角色签字解析 → 复合表达式求值。
+    """
     fields = doc.extracted_fields or {}
     if key in fields and fields[key] is not None and str(fields[key]).strip():
         return fields[key]
     for alias in (aliases or []):
         if alias in fields and fields[alias] is not None and str(fields[alias]).strip():
             return fields[alias]
+    # 单位限定后缀（批次 13）：规则写「报销金额」，单据抽到「报销金额（元）」
+    key_base = strip_unit_qualifier(key)
+    if key_base and key_base != normalize_field_name(key):
+        if key_base in fields and fields[key_base] is not None and str(fields[key_base]).strip():
+            return fields[key_base]
+    for field_key, value in fields.items():
+        if value is None or not str(value).strip():
+            continue
+        if key_base and strip_unit_qualifier(field_key) == key_base:
+            return value
+    # 签字类字段：按角色词在其它签字栏里找回签字事实（P1）
+    signature = _resolve_role_signature(doc, key)
+    if signature is not None:
+        return signature
     # 复合字段表达式（如 "件数*数量"）：OCR 字段里不存在该字面名，
     # 按同一份文档的原子字段求值。取不到值时保持 None（由调用方记缺失）。
     value, _ = _eval_field_expression(doc, key)
@@ -231,8 +411,12 @@ def _make_result_from_graph(
     批次 9：结果带问题状态（C1）、严重度/偏离度（C2）、图谱实体关联（C1）。
     """
     status = result_meta.default_status(result)
+    detail = dict(detail or {})
+    # rule_id 落进证据（统一判定的意图/初判按 (rule_id, 节点对) 对齐，不能只藏在 evidence 里）
+    if rel_props.get("rule_id") and not detail.get("rule_id"):
+        detail["rule_id"] = rel_props.get("rule_id")
     severity, deviation = result_meta.compute_severity(
-        result, rel_props.get("check_category"), detail or {}
+        result, rel_props.get("check_category"), detail
     )
     return ReviewResult(
         rule_id=None,  # 图谱不再回写 rule_id（规则文本只是元数据）
@@ -257,7 +441,7 @@ def _make_result_from_graph(
         # 批次 10 Phase C：双引擎结果来源标记
         source="graph",
         issue_desc=issue_desc or None,
-        detail=detail or {},
+        detail=detail,
         suggestion=suggestion or None,
     )
 
@@ -328,6 +512,13 @@ def run_graph_review(
     except Exception as e:
         logger.error("齐套性图谱查询失败: %s", e, exc_info=True)
 
+    # 2.5 MUST_EXIST 关系 → 存在性/齐备要求（P3：签字、盖章、必备材料）
+    try:
+        exist_rels = neo4j.get_exist_requirements(graph_id, tenant_id)
+        results.extend(_check_exist_requirements(exist_rels, docs))
+    except Exception as e:
+        logger.error("存在性要求图谱查询失败: %s", e, exc_info=True)
+
     # 3. MUST_STAMP 关系 → 印章检查
     try:
         stamp_rels = neo4j.get_stamp_requirements(graph_id, tenant_id)
@@ -388,8 +579,107 @@ def _check_required_docs(
     return results
 
 
-# ============ 检查2：印章（MUST_STAMP 关系） ============
+# ============ 检查1.5：存在性/齐备要求（MUST_EXIST 关系，P3） ============
 
+def _check_exist_requirements(
+    rels: list[dict],
+    docs: list[Document],
+) -> list[ReviewResult]:
+    """存在性要求检查：规则形如"…应同时具备 A 与 B 签字/盖章/材料"。
+
+    rels 形如:
+      [{"source": "存在性检查", "target": "报销单.部门负责人签字",
+        "rel_props": {"rule_id": "R0016", "doc_type": "报销单", "must": "signed",
+                      "condition": {...}, "rule_text": "..."}}]
+
+    判定顺序（与 COMPARE_TO 的意图链一致）：
+    1. 触发条件预检：not_met → pass + skip（规则不适用）；unknown → unverifiable；
+    2. 存在性判定：任一该类型单据具备该事实 → pass；全部缺失 → fail（要求未满足）；
+       该类型单据本身不存在 → 跳过（齐套性负责）。
+    """
+    results: list[ReviewResult] = []
+    for rec in rels:
+        rel_props = _props_dict(rec.get("rel_props") or {})
+        target_node = str(rec.get("target") or "")
+        doc_type, field, _aggregate = _parse_field_node(target_node)
+        doc_type = doc_type or str(rel_props.get("doc_type") or "")
+        if not doc_type or not field:
+            continue
+        typed = _docs_by_type(docs, doc_type)
+        if not typed:
+            continue  # 缺单据由齐套性规则负责，这里不重复报
+
+        detail: dict = {
+            "reason": "field_data_missing",
+            "required": {"doc_type": doc_type, "field": field, "must": rel_props.get("must") or "present"},
+            "intent_chain": ["existence_check"],
+        }
+
+        # 1) 触发条件预检
+        condition = _props_dict(rel_props.get("condition") or {}) or None
+        if condition:
+            cond_status, cond_detail = _evaluate_condition(condition, docs, doc_type)
+            detail["condition"] = cond_detail
+            if cond_status == "not_met":
+                results.append(_make_result_from_graph(
+                    rel_props, typed[0], "pass",
+                    issue_desc=f"条件未满足，跳过存在性要求：{cond_detail.get('text') or ''}",
+                    detail={
+                        **detail,
+                        "condition_met": False,
+                        "skipped_reason": "condition_not_met",
+                        "intent_chain": ["condition_precheck", "skip"],
+                    },
+                    source_node=rec.get("source"), target_node=target_node,
+                ))
+                continue
+            if cond_status == "unknown":
+                results.append(_make_result_from_graph(
+                    rel_props, typed[0], "unverifiable",
+                    issue_desc="条件字段缺失，无法判断规则是否适用",
+                    detail={
+                        **detail,
+                        "condition_met": None,
+                        "missing_fields": cond_detail.get("missing_fields", []),
+                        "intent_chain": ["condition_precheck", "blocked"],
+                    },
+                    source_node=rec.get("source"), target_node=target_node,
+                ))
+                continue
+            detail["condition_met"] = True
+
+        # 2) 存在性判定（_get_field 内建单位后缀等价 + 签字角色解析 + 学到的角色映射）
+        present: list[dict] = []
+        for doc in typed:
+            value = _get_field(doc, field)
+            if value is not None and str(value).strip():
+                present.append({"doc_id": str(doc.id), "doc_name": doc.file_name, "value": value})
+        detail["evidence"] = {
+            "requirement": detail["required"],
+            "docs": present,
+            "missing_fields": (
+                []
+                if present
+                else [{"doc_type": doc_type, "field": field, "reason": "field_missing",
+                       "doc_files": [d.file_name for d in typed]}]
+            ),
+        }
+        if present:
+            results.append(_make_result_from_graph(
+                rel_props, typed[0], "pass", detail=detail,
+                source_node=rec.get("source"), target_node=target_node,
+            ))
+        else:
+            results.append(_make_result_from_graph(
+                rel_props, typed[0], "fail",
+                issue_desc=f"{doc_type} 缺少要求的事实：{field}",
+                detail=detail,
+                source_node=rec.get("source"), target_node=target_node,
+            ))
+    return results
+
+
+# ============ 检查2：印章（MUST_STAMP 关系） ============
 def _check_stamp_requirements(
     rels: list[dict],
     docs: list[Document],
@@ -649,6 +939,13 @@ def _run_intent_chain(
     chain = detail.setdefault("intent_chain", [])
     if "assertion_compare" not in chain:
         chain.insert(0, "assertion_compare")
+    # 断言算子/字段落进证据：LLM 兜底裁决需要据此识别"算子与字段语义不匹配"的
+    # 建模缺陷（如「不小于」比较报销金额与部门负责人签字），并按规则文本重解。
+    detail.setdefault("operator", operator)
+    detail.setdefault("source_field", src_field)
+    detail.setdefault("target_field", tgt_field)
+    detail.setdefault("source_doc_type", src_doc_type)
+    detail.setdefault("target_doc_type", tgt_doc_type)
     if cond_evidence is not None:
         detail["condition_met"] = True
         detail["condition"] = cond_evidence
@@ -853,6 +1150,14 @@ def _dispatch_compare(
 ) -> tuple[str, str, dict]:
     """根据 operator 派发到对应的比对逻辑。返回 (result, issue_desc, detail)。"""
     op = operator.strip()
+    # 日期间隔容差（天）：规则形如"…的间隔不得超过30日"时由规则解析写入
+    # tolerance_params.time_days。此前该参数只落库不生效（批次 13 修复）。
+    time_days = 0
+    if isinstance(tolerance_params, dict):
+        try:
+            time_days = max(0, int(float(tolerance_params.get("time_days") or 0)))
+        except (TypeError, ValueError):
+            time_days = 0
 
     if op == "等于":
         return _cmp_eq(src_doc_type, src_field, tgt_doc_type, tgt_field, docs, aggregate)
@@ -861,18 +1166,18 @@ def _dispatch_compare(
     if op == "不小于":
         return _cmp_numeric(src_doc_type, src_field, tgt_doc_type, tgt_field, docs, "ge", tolerance, tolerance_params, aggregate)
     if op == "时间早于":
-        return _cmp_date(src_doc_type, src_field, tgt_doc_type, tgt_field, docs, allow_same_day=False, aggregate=aggregate)
+        return _cmp_date(src_doc_type, src_field, tgt_doc_type, tgt_field, docs, allow_same_day=False, aggregate=aggregate, tolerance_days=time_days)
     if op == "时间晚于":
         return _cmp_date_reversed(
             src_doc_type, src_field, tgt_doc_type, tgt_field, docs,
-            allow_same_day=False, aggregate=aggregate,
+            allow_same_day=False, aggregate=aggregate, tolerance_days=time_days,
         )
     if op == "时间不晚于":
-        return _cmp_date(src_doc_type, src_field, tgt_doc_type, tgt_field, docs, allow_same_day=True, aggregate=aggregate)
+        return _cmp_date(src_doc_type, src_field, tgt_doc_type, tgt_field, docs, allow_same_day=True, aggregate=aggregate, tolerance_days=time_days)
     if op == "时间不早于":
         return _cmp_date_reversed(
             src_doc_type, src_field, tgt_doc_type, tgt_field, docs,
-            allow_same_day=True, aggregate=aggregate,
+            allow_same_day=True, aggregate=aggregate, tolerance_days=time_days,
         )
     if op == "总额等于":
         return _cmp_total_eq(
@@ -1113,12 +1418,16 @@ def _cmp_date(
     docs: list[Document],
     allow_same_day: bool,
     aggregate: Optional[str] = None,
+    tolerance_days: int = 0,
 ) -> tuple[str, str, dict]:
     """日期比较（多单汇总语义）：src 应早于（或不晚于）tgt。
 
     1-3：多张水单分批付款时，取 src 集合的最晚日期与 tgt 集合的最早日期比较，
     即所有 src 日期都应在所有 tgt 日期之前（或同日允许）。
     批次 7-2：aggregate=ANY 时取 src 最早 vs tgt 最晚（任一满足即可）。
+    批次 13：tolerance_days>0 时按"间隔容差"判定——src 最晚日期允许比 tgt 最早日期
+    晚至多 N 天（规则如"提交日期与费用发生日期的间隔不得超过30日"）。
+    该参数此前只落库不生效，导致合规数据被判 fail（验收 BX-2026-0312 R0014）。
     """
     src_pairs, src_missing = _collect_field_evidence(docs, src_doc_type, src_field)
     tgt_pairs, tgt_missing = _collect_field_evidence(docs, tgt_doc_type, tgt_field)
@@ -1166,6 +1475,20 @@ def _cmp_date(
         "latest_src": latest_src.isoformat(), "earliest_tgt": earliest_tgt.isoformat(),
         "allow_same_day": allow_same_day,
     }
+    if tolerance_days > 0:
+        # 间隔容差：src 最晚日期 - tgt 最早日期 <= N 天（含同日/提前）
+        gap_days = (latest_src - earliest_tgt).days
+        detail["tolerance_days"] = tolerance_days
+        detail["gap_days"] = gap_days
+        if gap_days <= tolerance_days:
+            return "pass", "", detail
+        return (
+            "fail",
+            f"{src_doc_type}.{src_field} 最晚日期={latest_src.isoformat()} 比 "
+            f"{tgt_doc_type}.{tgt_field} 最早日期={earliest_tgt.isoformat()} 晚 {gap_days} 天，"
+            f"超过容差 {tolerance_days} 天",
+            detail,
+        )
     if latest_src < earliest_tgt:
         return "pass", "", detail
     if latest_src == earliest_tgt:
@@ -1190,6 +1513,7 @@ def _cmp_date_reversed(
     *,
     allow_same_day: bool,
     aggregate: Optional[str] = None,
+    tolerance_days: int = 0,
 ) -> tuple[str, str, dict]:
     """校验 source 不早于（或晚于）target。
 
@@ -1204,6 +1528,7 @@ def _cmp_date_reversed(
         docs,
         allow_same_day=allow_same_day,
         aggregate=aggregate,
+        tolerance_days=tolerance_days,
     )
     detail = dict(detail or {})
     detail["direction"] = "src_not_before_target"
@@ -1336,11 +1661,27 @@ def _cmp_contains(
 _current_contract_var: contextvars.ContextVar[Optional[Contract]] = contextvars.ContextVar(
     "_current_contract_var", default=None
 )
+# 学到的签字角色映射（判定架构 P2）：{doc_type: {角色: 单据字段名}}，由 field_bindings 沉淀。
+# 命中时优先按"已知签字栏"取值——新场景第二次出现就不必再靠启发式猜。
+_learned_roles_var: contextvars.ContextVar[dict] = contextvars.ContextVar(
+    "_learned_roles_var", default={}
+)
 
 
 def _current_contract_opt() -> Optional[Contract]:
     """获取当前执行上下文的合同对象；无上下文时返回 None（容错，不抛异常）。"""
     return _current_contract_var.get()
+
+
+def set_learned_role_fields(mapping: dict) -> None:
+    """注入学到的签字角色映射（审查入口调用，线程/任务内隔离）。"""
+    _learned_roles_var.set(mapping or {})
+
+
+def _learned_roles_for(doc_type: str) -> dict:
+    mapping = _learned_roles_var.get() or {}
+    roles = mapping.get(doc_type)
+    return roles if isinstance(roles, dict) else {}
 
 
 def _collect_fields(docs: list[Document], doc_type: str, field: str) -> list:
@@ -1567,6 +1908,7 @@ def run_graph_review_with_contract(
 ) -> list[ReviewResult]:
     """与 run_graph_review 相同，但设置当前合同上下文供 _cmp_contains 使用。"""
     token = _current_contract_var.set(contract)
+    role_token = _learned_roles_var.set(_load_learned_roles(db, tenant_id, docs))
     try:
         return run_graph_review(
             db,
@@ -1578,3 +1920,20 @@ def run_graph_review_with_contract(
         )
     finally:
         _current_contract_var.reset(token)
+        _learned_roles_var.reset(role_token)
+
+
+def _load_learned_roles(db, tenant_id: uuid.UUID, docs: list[Document]) -> dict:
+    """加载本案涉及文档类型已沉淀的签字角色映射（P2 学习闭环，失败不影响审查）。"""
+    try:
+        from .field_binding_service import learned_role_fields
+
+        out: dict[str, dict] = {}
+        for doc_type in {d.doc_type for d in docs if d.doc_type}:
+            roles = learned_role_fields(db, tenant_id, doc_type)
+            if roles:
+                out[doc_type] = roles
+        return out
+    except Exception as e:  # pragma: no cover - 学习数据不可用时退化为启发式
+        logger.info("签字角色映射加载失败（退化为启发式解析）: %s", e)
+        return {}
