@@ -162,7 +162,7 @@ def test_import_prompt_carries_corrections(db, default_tenant_id) -> None:
         "系统提示词", db, default_tenant_id, uuid.uuid4()
     )
     assert prompt.startswith("系统提示词")
-    assert "本租户历史人工修正" in prompt
+    assert "本租户人工裁定" in prompt
     assert "采购协议" in prompt
 
 

@@ -228,8 +228,13 @@ def corrections_digest(
         prefix = f"[{row.doc_type}] " if row.doc_type else ""
         line = (
             f"- {prefix}{label}：把「{_short(row.before)}」改为「{_short(row.after)}」"
-            f"（人工修正 {row.hit_count} 次）"
+            f"（人工修正 {row.hit_count} 次"
         )
+        # 带上适用范围（规则原文摘要）：只说"把 A 改成 B"模型无法判断这条口径适用于哪类规则
+        context = _short(row.context or "", 50)
+        if context:
+            line += f"；适用示例：{context}"
+        line += "）"
         if used + len(line) > max_chars:
             break
         lines.append(line)
