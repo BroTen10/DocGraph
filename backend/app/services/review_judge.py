@@ -22,7 +22,7 @@ import json
 import logging
 import uuid
 from datetime import datetime
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 from sqlalchemy.orm import Session
 
@@ -362,8 +362,14 @@ def run_unified_judgement(
     prelim_results: list[ReviewResult],
     *,
     graph_data: Optional[dict] = None,
+    progress_callback: Optional[Callable[[int, int], None]] = None,
 ) -> JudgeReport:
-    """统一判定入口。就地改写 prelim_results / 追加新结果并返回报告。"""
+    """统一判定入口。就地改写 prelim_results / 追加新结果并返回报告。
+
+    progress_callback(batches_done, batches_total)：每处理完一批意图回调一次。
+    大规则集（数百条规则 = 数十批 LLM 调用）单批耗时数秒，逐批回报让调用方
+    能把"长时间停在某个百分比"拆成细粒度进度；回调异常不影响判定本身。
+    """
     report = JudgeReport()
     if not docs or not rules:
         report.enabled = False
@@ -405,8 +411,22 @@ def run_unified_judgement(
     if not send:
         return report
 
+    # 批次进度记账：首轮批次数先按送审项估算，重试会追加批次（total 随之上调，
+    # 调用方按"只增不减"的方式换算百分比，避免出现进度回退）。
+    total_batches = (len(send) + JUDGE_BATCH_SIZE - 1) // JUDGE_BATCH_SIZE
+    batches_done = 0
+
+    def _report_progress() -> None:
+        if progress_callback is None:
+            return
+        try:
+            progress_callback(batches_done, max(total_batches, batches_done))
+        except Exception:  # pragma: no cover - 进度回报失败不影响判定
+            logger.debug("统一判定进度回调失败", exc_info=True)
+
     payload_bundle = bundle_payload(bundle)
     system_prompt = get_prompt(db, tenant_id, "review.judge_system")
+    _report_progress()
 
     pending = list(send)
     last_failures: dict[str, list[str]] = {}
@@ -446,14 +466,19 @@ def run_unified_judgement(
                 )
                 if dropped_bindings:
                     report.bindings_dropped += len(dropped_bindings)
+                    # 只按"能取到 doc_key 的 dict 绑定"剔除；模型偶尔会把 bindings 写成
+                    # 字符串数组（非致命，已在验证门记为 binding_not_object），这里不能
+                    # 假定它一定是 dict——否则整个判定阶段会抛 AttributeError 中断。
+                    dropped_keys = {
+                        str(d["binding"].get("doc_key") or "")
+                        for d in dropped_bindings
+                        if isinstance(d.get("binding"), dict)
+                    }
                     item = {**item, "bindings": [
                         b
                         for b in (item.get("bindings") or [])
                         if isinstance(b, dict)
-                        and str(b.get("doc_key") or "").strip() not in {
-                            str(d.get("binding", {}).get("doc_key") or "")
-                            for d in dropped_bindings
-                        }
+                        and str(b.get("doc_key") or "").strip() not in dropped_keys
                     ]}
                 if not ok:
                     for err in errors:
@@ -485,6 +510,8 @@ def run_unified_judgement(
                 if intent.get("intent_id") in handled:
                     continue
                 failures.setdefault(intent["intent_id"], ["judge_returned_no_verdict"])
+            batches_done += 1
+            _report_progress()
 
         # 只有"确实没结案"的条目才进入重试/交人工——已落库的不再重复处理
         unresolved = [x for x in pending if x.get("intent_id") in failures]
@@ -492,6 +519,8 @@ def run_unified_judgement(
         if unresolved and attempt < JUDGE_MAX_RETRIES:
             report.retried += len(unresolved)
             pending = unresolved
+            total_batches = batches_done + (len(unresolved) + JUDGE_BATCH_SIZE - 1) // JUDGE_BATCH_SIZE
+            _report_progress()
             logger.info("统一判定：%d 项未通过验证门，带失败原因重试一次", len(unresolved))
             continue
         for intent in unresolved:

@@ -323,7 +323,7 @@ def _run_review_pipeline(
         db.commit()
 
     # ============ 阶段2：规则比对（图谱优先 + 旧逻辑 fallback） ============
-    task.stage = "规则比对中"
+    task.stage = "规则比对中（图谱审查）"
     task.progress = 60
     db.commit()
 
@@ -383,6 +383,19 @@ def _run_review_pipeline(
 
         enabled_rules = _load_enabled_rules(db, contract.rule_set_id)
         graph_data = _load_graph_data(db, tenant_id, contract, snapshot_id)
+
+        def _judge_progress(done_batches: int, total_batches: int) -> None:
+            """统一判定逐批上报进度：60% → 88%。
+
+            判定是整条管线里最耗时的一段（数百条规则 = 数十批串行 LLM 调用），
+            原先这里一直停在 60% 直到阶段三，前端看起来像卡死；把批次数写进
+            stage 并线性推进百分比，轮询即可看到细粒度反馈。
+            """
+            task.stage = f"规则比对中（统一判定 {done_batches}/{total_batches} 批）"
+            pct = 60 + int(done_batches / max(total_batches, 1) * 28)
+            task.progress = min(88, max(task.progress, pct))
+            db.commit()
+
         report = run_unified_judgement(
             db,
             tenant_id,
@@ -390,6 +403,7 @@ def _run_review_pipeline(
             enabled_rules,
             results,
             graph_data=graph_data,
+            progress_callback=_judge_progress,
         )
         judge_metrics = report.as_dict()
         if report.enabled:
@@ -404,11 +418,15 @@ def _run_review_pipeline(
         logger.warning("审查任务 %s: 统一判定失败（不影响确定性结果）: %s", task.id, e, exc_info=True)
 
     # ============ 阶段3：生成建议 + 持久化 ============
-    task.stage = "生成报告中"
+    task.stage = "生成报告中（结果落库）"
     task.progress = 90
     db.commit()
 
-    for r in results:
+    total_results = len(results)
+    # 失败项要逐条调用 LLM 生成整改建议，这一段同样可能跑很久；按约 20 次提交流水
+    # 推进 90% → 98%，避免又出现"停在 90% 不动然后直接 100%"。
+    progress_step = max(1, total_results // 20)
+    for idx, r in enumerate(results):
         r.task_id = task.id
         if r.result == "fail" and not r.suggestion:
             r.suggestion = build_suggestion_llm(
@@ -421,6 +439,10 @@ def _run_review_pipeline(
                 tenant_id=tenant_id,
             )
         db.add(r)
+        if total_results and ((idx + 1) % progress_step == 0 or idx + 1 == total_results):
+            task.stage = f"生成报告中（{idx + 1}/{total_results} 条结果）"
+            task.progress = min(98, max(task.progress, 90 + int((idx + 1) / total_results * 8)))
+            db.commit()
 
     # 汇总
     summary = {
