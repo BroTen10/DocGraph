@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import logging
 import uuid
 from typing import Optional
 
@@ -15,12 +16,14 @@ from sqlalchemy.orm import Session
 from ..models import Rule, RuleSet, RuleSnapshot
 from ..schemas.rule import RuleCreate, RuleOut, RuleUpdate
 from ..tenant_scope import tenant_get
-from . import rule_defects
+from . import correction_ledger, rule_defects
 from .doc_normalizer import (
     normalize_doc_type,
     normalize_scope,
     normalize_structure,
 )
+
+logger = logging.getLogger(__name__)
 
 
 def format_rule_code(rule_no: int) -> str:
@@ -187,6 +190,8 @@ def update_rule(
     tenant_id: uuid.UUID,
     rule_id: uuid.UUID,
     payload: RuleUpdate,
+    *,
+    by_user_id: Optional[uuid.UUID] = None,
 ) -> Optional[RuleOut]:
     from datetime import datetime
 
@@ -209,8 +214,26 @@ def update_rule(
             data.get("doc_type") or rule.doc_type,
             tenant_id=tenant_id,
         )
+    before_values = {k: getattr(rule, k, None) for k in data}
     for k, v in data.items():
         setattr(rule, k, v)
+    # 人工修正账本：把"人把 LLM 的产出改成了什么"记成数据，供解析/判定提示词回灌
+    # （见 services/correction_ledger.py）。无实际变化不记账；记账失败不影响规则更新。
+    try:
+        correction_ledger.record_field_changes(
+            db,
+            tenant_id,
+            scope="rule_edit",
+            changes={k: (before_values[k], getattr(rule, k, None)) for k in data},
+            rule_set_id=rule.rule_set_id,
+            target_type="rule",
+            target_id=rule.id,
+            doc_type=rule.doc_type,
+            context=rule.rule_text,
+            by_user_id=by_user_id,
+        )
+    except Exception:
+        logger.warning("人工修正记账失败（不影响规则更新）", exc_info=True)
     # 方案 A：把规则置为"已确认"或显式启用（用户认可）时，未处理缺陷标记为已处理，
     # 规则随即进入「正常规则」。仅改文本/标签不会自动消解缺陷，需用户显式确认。
     accepts = data.get("status") == "confirmed" or data.get("enabled") is True

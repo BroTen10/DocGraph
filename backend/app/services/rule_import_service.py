@@ -743,6 +743,34 @@ def _compute_source_coverage(
     return coverage, warnings
 
 
+def _with_correction_digest(
+    system_content: str,
+    db: Session,
+    tenant_id: uuid.UUID,
+    rule_set_id: uuid.UUID,
+) -> str:
+    """把本租户的历史人工修正追加到解析提示词（数据化回灌）。
+
+    人工只处理 LLM 判不了的部分；同一条修正被重复确认时（hit_count 高），
+    说明模型上次没学会——这里把它作为**数据**再喂一次，而不是在代码里为它加分支。
+    账本读取失败不影响导入。
+    """
+    try:
+        from .correction_ledger import corrections_digest
+
+        digest = corrections_digest(db, tenant_id, rule_set_id)
+    except Exception:  # pragma: no cover - 账本异常不应阻断规则导入
+        logger.warning("读取人工修正账本失败（不影响规则解析）", exc_info=True)
+        return system_content
+    if not digest:
+        return system_content
+    return (
+        system_content
+        + "\n\n### 本租户历史人工修正（同一类问题请直接沿用修正后的结果，不要重复犯）\n"
+        + digest
+    )
+
+
 def import_rules_from_text(
     db: Session,
     tenant_id: uuid.UUID,
@@ -854,6 +882,10 @@ def import_rules_from_text(
                 if parts:
                     system_content += "\n\n" + "\n\n".join(parts)
 
+        # 人工修正回灌：把本租户"人改过什么"作为数据带进解析提示词
+        system_content = _with_correction_digest(
+            system_content, db, tenant_id, rule_set_id
+        )
         try:
             resp = llm.chat_json(
                 messages=[

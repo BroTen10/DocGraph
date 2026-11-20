@@ -108,7 +108,9 @@ def update_rule(
     db: Session = Depends(get_db),
     ctx: AuthContext = Depends(require_permission("rules.manage")),
 ) -> RuleOut:
-    rule = rule_service.update_rule(db, ctx.tenant.id, rule_id, payload)
+    rule = rule_service.update_rule(
+        db, ctx.tenant.id, rule_id, payload, by_user_id=ctx.user.id
+    )
     if rule is None:
         raise HTTPException(status_code=404, detail="规则不存在")
 

@@ -14,6 +14,7 @@ from .rule_set import RuleSet
 from .rule_snapshot import RuleSnapshot
 from .document_type import DocumentType
 from .field_binding import FieldBinding
+from .llm_correction import LlmCorrection
 from .identity import (
     Tenant,
     TenantInvitation,
@@ -32,6 +33,7 @@ __all__ = [
     "Document",
     "DocumentType",
     "FieldBinding",
+    "LlmCorrection",
     "OcrTask",
     "ReviewResult",
     "ReviewTask",

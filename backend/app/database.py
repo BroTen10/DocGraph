@@ -69,6 +69,7 @@ def init_db() -> None:
         document,       # noqa: F401
         document_type,  # noqa: F401
         identity,       # noqa: F401
+        llm_correction,  # noqa: F401
         ocr_task,       # noqa: F401
         review_result,  # noqa: F401
         review_task,    # noqa: F401
