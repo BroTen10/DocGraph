@@ -26,6 +26,7 @@ _TEST_DIR = os.path.dirname(os.path.abspath(__file__))
 _BACKEND_DIR = os.path.normpath(os.path.join(_TEST_DIR, "..", "backend"))
 sys.path.insert(0, _BACKEND_DIR)
 
+from conftest import authenticate  # noqa: E402
 from app.models import Contract, LlmCorrection, ReviewResult, ReviewTask  # noqa: E402
 from app.services import correction_ledger as ledger  # noqa: E402
 from app.services import review_service  # noqa: E402
@@ -168,3 +169,35 @@ def test_judge_prompt_carries_human_corrections(db, default_tenant_id) -> None:
 def test_judge_prompt_unchanged_without_corrections(db, default_tenant_id) -> None:
     prompt = review_judge.judge_system_prompt(db, default_tenant_id, "基础判定提示词")
     assert prompt == "基础判定提示词"
+
+
+def test_patch_route_accepts_verdict_correction(client, admin_auth, db) -> None:
+    """路由层：PATCH 能接受人工改判并返回留痕后的结果。"""
+    row = _make_result(db, admin_auth.tenant_id)
+    headers = authenticate(client, admin_auth)
+
+    resp = client.patch(
+        f"/api/reviews/results/{row.id}/status",
+        json={"result": "pass", "note": "两值在容差内"},
+        headers=headers,
+    )
+
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["result"] == "pass"
+    assert body["source"] == "human"
+    assert body["detail"]["human_override"]["to"] == "pass"
+
+
+def test_patch_route_rejects_empty_payload(client, admin_auth, db) -> None:
+    """路由层：status 与 result 都不给 → 400（避免空请求悄悄通过）。"""
+    row = _make_result(db, admin_auth.tenant_id)
+    headers = authenticate(client, admin_auth)
+
+    resp = client.patch(
+        f"/api/reviews/results/{row.id}/status",
+        json={"note": "只写备注"},
+        headers=headers,
+    )
+
+    assert resp.status_code == 400

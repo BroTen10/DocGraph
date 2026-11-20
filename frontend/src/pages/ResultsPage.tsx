@@ -2,8 +2,8 @@ import { useState, useEffect, useCallback, useRef, useMemo } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import {
   Card, Row, Col, Tabs, Table, Tag, Button, message, Typography,
-  Empty, Statistic, Space, Tooltip, Collapse, Select,
-  Drawer, Spin, Descriptions, Divider,
+  Empty, Statistic, Space, Tooltip, Collapse, Select, Alert,
+  Drawer, Spin, Descriptions, Divider, Modal, Input,
 } from 'antd'
 import type { ColumnsType } from 'antd/es/table'
 import {
@@ -71,6 +71,15 @@ export default function ResultsPage() {
   // 问题详情抽屉
   const [detailItem, setDetailItem] = useState<ReviewResultItem | null>(null)
   const [detailVisible, setDetailVisible] = useState(false)
+
+  // 人工改判（修正闭环）：模型判错时人工改结论，改判会回灌判定提示词
+  const [verdictModal, setVerdictModal] = useState<{
+    open: boolean
+    record?: ReviewResultItem
+    result: 'pass' | 'fail' | 'unverifiable'
+    note: string
+  }>({ open: false, result: 'pass', note: '' })
+  const [verdictSaving, setVerdictSaving] = useState(false)
 
   // 原件/OCR 对照抽屉
   const [ocrDocId, setOcrDocId] = useState<string | null>(null)
@@ -225,6 +234,33 @@ export default function ResultsPage() {
     <Tag color={RESULT_COLOR[r]}>{RESULT_LABEL[r] || r}</Tag>
   )
 
+  /** 是否已人工改判（detail.human_override 由后端写入） */
+  const isHumanOverridden = (record: ReviewResultItem) =>
+    Boolean((record.detail as Record<string, unknown> | undefined)?.human_override)
+
+  const openVerdictModal = useCallback((record: ReviewResultItem) => {
+    setVerdictModal({ open: true, record, result: record.result, note: '' })
+  }, [])
+
+  const submitVerdict = async () => {
+    const record = verdictModal.record
+    if (!record) return
+    setVerdictSaving(true)
+    try {
+      await reviewsApi.updateResultStatus(record.id, {
+        result: verdictModal.result,
+        note: verdictModal.note.trim() || undefined,
+      })
+      message.success('已改判：该修正会回灌给模型，同类问题不再判错')
+      setVerdictModal((s) => ({ ...s, open: false }))
+      if (selectedId) await loadResult(selectedId)
+    } catch (e) {
+      message.error('改判失败: ' + getErrorMessage(e))
+    } finally {
+      setVerdictSaving(false)
+    }
+  }
+
   // 批次 9：严重度标签（high/medium/low）
   const severityTag = (s?: string | null) =>
     s && SEVERITY_COLOR[s] ? <Tag color={SEVERITY_COLOR[s]}>{SEVERITY_LABEL[s]}</Tag> : null
@@ -232,8 +268,8 @@ export default function ResultsPage() {
   // 批次 10 Phase C：结果来源标签（图谱确定性引擎 / LLM 语义审查 / 旧逻辑）
   const sourceTag = (s?: string | null, confidence?: number | null) => {
     if (!s) return null
-    const label: Record<string, string> = { graph: '图谱', llm: 'LLM', legacy: '旧逻辑' }
-    const color: Record<string, string> = { graph: 'blue', llm: 'purple', legacy: 'default' }
+    const label: Record<string, string> = { graph: '图谱', llm: 'LLM', legacy: '旧逻辑', human: '人工' }
+    const color: Record<string, string> = { graph: 'blue', llm: 'purple', legacy: 'default', human: 'gold' }
     const tip = confidence != null ? `置信度 ${Math.round(confidence * 100)}%` : label[s] || s
     return (
       <Tooltip title={tip}>
@@ -330,6 +366,11 @@ export default function ResultsPage() {
       render: (_: unknown, record: ReviewResultItem) => (
         <Space size={4} wrap>
           {resultTag(record.result)}
+          {isHumanOverridden(record) && (
+            <Tooltip title="人工改判过：该修正已回灌给模型，同类问题不再判错">
+              <Tag color="gold" style={{ fontSize: 10 }}>已改判</Tag>
+            </Tooltip>
+          )}
           {severityTag(record.severity)}
           {sourceTag(record.source, record.confidence)}
         </Space>
@@ -421,11 +462,21 @@ export default function ResultsPage() {
           >
             详情
           </Button>
+          {canEditResults && (
+            <Button
+              type="link"
+              size="small"
+              style={{ padding: 0, fontSize: 12 }}
+              onClick={() => openVerdictModal(record)}
+            >
+              改判
+            </Button>
+          )}
           {renderDocButtons(record)}
         </Space>
       ),
     },
-  ], [openDetailDrawer, renderDocButtons])
+  ], [canEditResults, openDetailDrawer, openVerdictModal, renderDocButtons])
 
   // 批次 5-12：按文档维度表格列定义 memo（避免 render 内重建）
   const docColumns = useMemo<ColumnsType<ReviewResultItem>>(
@@ -435,6 +486,11 @@ export default function ResultsPage() {
         render: (v: string, record: ReviewResultItem) => (
           <Space size={4} wrap>
             {resultTag(v)}
+            {isHumanOverridden(record) && (
+              <Tooltip title="人工改判过：该修正已回灌给模型，同类问题不再判错">
+                <Tag color="gold" style={{ fontSize: 10 }}>已改判</Tag>
+              </Tooltip>
+            )}
             {sourceTag(record.source, record.confidence)}
           </Space>
         ),
@@ -481,12 +537,22 @@ export default function ResultsPage() {
             >
               详情
             </Button>
+            {canEditResults && (
+              <Button
+                type="link"
+                size="small"
+                style={{ padding: 0, fontSize: 12 }}
+                onClick={() => openVerdictModal(record)}
+              >
+                改判
+              </Button>
+            )}
             {renderDocButtons(record)}
           </Space>
         ),
       },
     ],
-    [openDetailDrawer, renderDocButtons],
+    [canEditResults, openDetailDrawer, openVerdictModal, renderDocButtons],
   )
 
   // ============ 问题详情抽屉 ============
@@ -929,6 +995,57 @@ export default function ResultsPage() {
       {/* Drawers */}
       {renderDetailDrawer()}
       {renderOcrDrawer()}
+
+      {/* 人工改判：模型判错时人工给结论，修正回灌判定提示词 */}
+      <Modal
+        title="人工改判"
+        open={verdictModal.open}
+        onCancel={() => setVerdictModal((s) => ({ ...s, open: false }))}
+        onOk={submitVerdict}
+        okText="确认改判"
+        confirmLoading={verdictSaving}
+        destroyOnHidden
+      >
+        <Space direction="vertical" size={12} style={{ width: '100%' }}>
+          <Alert
+            type="info"
+            showIcon
+            message="改判会作为本租户的人工裁定回灌给模型"
+            description="同一类判定下次由模型直接按人工结论给出，不需要再改一次；请填写改判依据，便于复核与回灌。"
+          />
+          {verdictModal.record && (
+            <Text type="secondary" style={{ fontSize: 12 }}>
+              规则：{verdictModal.record.rule_text || '-'}
+              {verdictModal.record.issue_desc ? `；模型原判：${verdictModal.record.issue_desc}` : ''}
+            </Text>
+          )}
+          <div>
+            <Text strong>判定结论</Text>
+            <Select
+              style={{ width: '100%', marginTop: 4 }}
+              value={verdictModal.result}
+              onChange={(v) => setVerdictModal((s) => ({ ...s, result: v }))}
+              options={[
+                { value: 'pass', label: '通过' },
+                { value: 'fail', label: '不通过' },
+                { value: 'unverifiable', label: '无法核验' },
+              ]}
+            />
+          </div>
+          <div>
+            <Text strong>改判依据（建议填写）</Text>
+            <Input.TextArea
+              rows={3}
+              style={{ marginTop: 4 }}
+              maxLength={500}
+              showCount
+              value={verdictModal.note}
+              onChange={(e) => setVerdictModal((s) => ({ ...s, note: e.target.value }))}
+              placeholder="例如：两值差异在合同约定容差内，应为通过；或签字栏已由部门负责人签署。"
+            />
+          </div>
+        </Space>
+      </Modal>
     </div>
   )
 }

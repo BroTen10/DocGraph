@@ -7,6 +7,7 @@ import {
   clearCsrfToken,
   getApiErrorCode,
   graphApi,
+  reviewsApi,
   setCsrfToken,
 } from './client'
 
@@ -155,5 +156,30 @@ describe('API authentication plumbing', () => {
       auto_confirm_all: true,
       rule_set_id: 'ruleset-1',
     })
+  })
+
+  it('PATCHes a human verdict correction to the result status endpoint', async () => {
+    let captured: { url?: string; method?: string; body?: unknown } = {}
+    apiHttp.defaults.adapter = async (config) => {
+      const raw = config.data
+      captured = {
+        url: config.url,
+        method: config.method,
+        body: typeof raw === 'string' ? JSON.parse(raw) : raw,
+      }
+      return {
+        data: { id: 'result-1', result: 'pass' },
+        status: 200,
+        statusText: 'OK',
+        headers: new AxiosHeaders(),
+        config,
+      }
+    }
+
+    await reviewsApi.updateResultStatus('result-1', { result: 'pass', note: '两值在容差内' })
+
+    expect(captured.method).toBe('patch')
+    expect(captured.url).toBe('/reviews/results/result-1/status')
+    expect(captured.body).toEqual({ result: 'pass', note: '两值在容差内' })
   })
 })

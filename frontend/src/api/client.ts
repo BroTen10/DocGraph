@@ -44,6 +44,7 @@ import type {
   ReviewActionResponse,
   ReviewResultByDoc,
   ReviewResultByRule,
+  ReviewResultItem,
   RuleParseSkill,
   RuleParseSkillCreate,
   RuleParseSkillUpdate,
@@ -470,6 +471,14 @@ export const reviewsApi = {
   getStatus: (taskId: string) => http.get<ReviewTaskSummary>(`/reviews/${taskId}`).then((r) => r.data),
   byRule: (taskId: string) => http.get<ReviewResultByRule>(`/reviews/${taskId}/by-rule`).then((r) => r.data),
   byDoc: (taskId: string) => http.get<ReviewResultByDoc>(`/reviews/${taskId}/by-doc`).then((r) => r.data),
+  /**
+   * 问题状态流转与**人工纠正判定结论**（批次 9 + 修正闭环）。
+   * 传 result 表示人工改判：改判会进人工修正账本并回灌判定提示词，同类问题不再判错。
+   */
+  updateResultStatus: (
+    resultId: string,
+    payload: { status?: string; result?: 'pass' | 'fail' | 'unverifiable'; note?: string },
+  ) => http.patch<ReviewResultItem>(`/reviews/results/${resultId}/status`, payload).then((r) => r.data),
 }
 
 // ============ OCR ============
