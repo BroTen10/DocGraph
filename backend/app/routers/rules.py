@@ -18,10 +18,16 @@ from ..schemas.rule import (
     RuleCreate,
     RuleImportRequest,
     RuleImportResponse,
+    RuleImportRunOut,
     RuleOut,
     RuleUpdate,
 )
-from ..services import rule_conflict_detector, rule_import_service, rule_service
+from ..services import (
+    rule_conflict_detector,
+    rule_import_run_service,
+    rule_import_service,
+    rule_service,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -99,6 +105,28 @@ def import_rules_batch(
         return RuleImportResponse(**result)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.get("/import-runs", response_model=list[RuleImportRunOut])
+def list_import_runs(
+    rule_set_id: uuid.UUID = Query(..., description="规则集 ID"),
+    limit: int = Query(default=20, ge=1, le=100),
+    db: Session = Depends(get_db),
+    ctx: AuthContext = Depends(require_permission("rules.view")),
+) -> list[RuleImportRunOut]:
+    """规则导入记录（持久留档）：状态、计数，以及 **LLM 没解析出来的部分**。
+
+    导入实时进度仍走 GET /api/rules/import-tasks/{task_id}（内存任务表）；
+    这里回答的是"上次导入到底哪些没成、为什么"，重启后依然可查。
+
+    注意：必须注册在 /{rule_id} 之前，否则会被路径参数路由截获。
+    """
+    if rule_service.get_rule_set(db, ctx.tenant.id, rule_set_id) is None:
+        raise HTTPException(status_code=404, detail="规则集不存在")
+    rows = rule_import_run_service.list_runs(
+        db, ctx.tenant.id, rule_set_id, limit=limit
+    )
+    return [RuleImportRunOut.model_validate(row) for row in rows]
 
 
 @router.put("/{rule_id}", response_model=RuleOut)

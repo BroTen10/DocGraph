@@ -105,15 +105,35 @@ def create_task(
     )
     with _TASKS_LOCK:
         _TASKS[task.task_id] = task
+    _persist(task)
     return task
 
 
 def update_task(task: ImportProgress, **kwargs: Any) -> None:
-    """线程安全地更新任务字段并刷新 updated_at。"""
+    """线程安全地更新任务字段并刷新 updated_at。
+
+    状态变化与终态时把快照落进 rule_import_runs（持久留档）：
+    解析进度这类高频更新只改内存，避免把 DB 写爆；落档失败不影响导入。
+    """
+    status_before = task.status
     for k, v in kwargs.items():
         if hasattr(task, k):
             setattr(task, k, v)
     task.updated_at = datetime.now(timezone.utc).isoformat()
+    if task.status != status_before or task.status in _PERSIST_STATUSES:
+        _persist(task)
+
+
+def _persist(task: ImportProgress) -> None:
+    from .rule_import_run_service import persist_task
+
+    try:
+        persist_task(task)
+    except Exception:  # pragma: no cover - 留档失败不影响导入
+        logger.warning("导入运行记录落档失败: task=%s", task.task_id, exc_info=True)
+
+
+_PERSIST_STATUSES = frozenset({"done", "error"})
 
 
 def run_import_task(

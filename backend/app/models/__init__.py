@@ -9,6 +9,7 @@ from .ocr_task import OcrTask
 from .review_result import ReviewResult
 from .review_task import ReviewTask
 from .rule import Rule
+from .rule_import_run import RuleImportRun
 from .rule_parse_skill import RuleParseSkill
 from .rule_set import RuleSet
 from .rule_snapshot import RuleSnapshot
@@ -38,6 +39,7 @@ __all__ = [
     "ReviewResult",
     "ReviewTask",
     "Rule",
+    "RuleImportRun",
     "RuleParseSkill",
     "RuleSet",
     "RuleSnapshot",

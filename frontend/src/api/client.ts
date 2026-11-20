@@ -52,6 +52,7 @@ import type {
   ReviewTaskSummary,
   Rule,
   RuleImportResponse,
+  RuleImportRun,
   RuleScenarioOption,
   RuleSet,
   RuleSetCreate,
@@ -402,6 +403,13 @@ export const rulesApi = {
   /** 轮询导入任务进度与结果 */
   getImportTask: (taskId: string) =>
     http.get<ImportTask>(`/rules/import-tasks/${taskId}`).then((r) => r.data),
+  /** 规则导入记录（持久留档）：回答"上次哪些规则 LLM 没解析出来、为什么" */
+  importRuns: (ruleSetId: string, limit = 20) =>
+    http
+      .get<RuleImportRun[]>('/rules/import-runs', {
+        params: { rule_set_id: ruleSetId, limit },
+      })
+      .then((r) => r.data),
   update: (id: string, data: Partial<Rule>) => http.put<Rule>(`/rules/${id}`, data).then((r) => r.data),
   delete: (id: string) => http.delete(`/rules/${id}`).then((r) => r.data),
   /** 批量删除规则：传 ids 仅删指定；不传则清空该规则集全部规则 */

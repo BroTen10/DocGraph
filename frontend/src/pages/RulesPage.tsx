@@ -9,7 +9,7 @@ import { PlusOutlined, EditOutlined, DeleteOutlined, HistoryOutlined, ImportOutl
 import { rulesApi, constantsApi, getErrorMessage, isFormValidationError, ruleSetsApi, skillsApi, checkIntentsApi } from '../api/client'
 import type {
   Rule, RuleSet, RuleSnapshot, DocTypeMeta, ConstantsResponse, RuleImportResponse, ImportTask, DefectItem,
-  RuleScenarioOption, ConflictDetectionResponse, CheckIntentItem,
+  RuleScenarioOption, ConflictDetectionResponse, CheckIntentItem, RuleImportRun,
 } from '../types'
 import {
   classifyDefects, hasOpenDefect, isConflictDefect, isResolvedDefect, needsUserAction, openDefects,
@@ -188,6 +188,10 @@ export default function RulesPage() {
   const [importError, setImportError] = useState<string | null>(null)
   // 异步导入任务进度（轮询用）
   const [importTask, setImportTask] = useState<ImportTask | null>(null)
+  // 导入记录（持久留档）：回答"上次哪些规则 LLM 没解析出来、为什么"
+  const [importRunsOpen, setImportRunsOpen] = useState(false)
+  const [importRuns, setImportRuns] = useState<RuleImportRun[]>([])
+  const [importRunsLoading, setImportRunsLoading] = useState(false)
   // 导入轮询取消标志 + 计数:组件卸载或重新触发导入时置 true 终止递归;count 超上限自动退出
   const importPollRef = useRef<{ cancelled: boolean; count: number }>({ cancelled: false, count: 0 })
   useEffect(() => {
@@ -779,6 +783,18 @@ export default function RulesPage() {
     }
   }
 
+  const loadImportRuns = async () => {
+    if (!currentId) return
+    setImportRunsLoading(true)
+    try {
+      setImportRuns(await rulesApi.importRuns(currentId))
+    } catch (e) {
+      message.error('加载导入记录失败: ' + getErrorMessage(e))
+    } finally {
+      setImportRunsLoading(false)
+    }
+  }
+
   /** 文件导入：支持 PDF/Excel/Word/MD/TXT，后端解析为文本后调用 LLM 转规则 */
   const handleImportFile = async () => {
     if (!importFile) {
@@ -1279,6 +1295,14 @@ export default function RulesPage() {
               <>
                 <Button icon={<PlusOutlined />} onClick={openCreate}>新增规则</Button>
                 <Button icon={<ImportOutlined />} onClick={openImport}>批量导入</Button>
+                <Tooltip title="查看历次导入记录：LLM 没解析出来的规则与原因（重启后依然可查）">
+                  <Button
+                    icon={<HistoryOutlined />}
+                    onClick={() => { setImportRunsOpen(true); void loadImportRuns() }}
+                  >
+                    导入记录
+                  </Button>
+                </Tooltip>
               </>
             )}
             <Button icon={<ArrowRightOutlined />} onClick={() => navigate('/graph')}>
@@ -1576,6 +1600,83 @@ export default function RulesPage() {
             </Col>
           </Row>
         </Form>
+      </Modal>
+
+      {/* 导入记录：LLM 判不了的部分要看得见，人工才知道去修什么 */}
+      <Modal
+        title="导入记录"
+        open={importRunsOpen}
+        onCancel={() => setImportRunsOpen(false)}
+        footer={<Button onClick={() => setImportRunsOpen(false)}>关闭</Button>}
+        width={860}
+      >
+        <Alert
+          type="info"
+          showIcon
+          style={{ marginBottom: 12 }}
+          message="这里保留历次规则导入的结果与「大模型没解析出来的部分」"
+          description="解析失败/跳过的条目会列在展开行里，据此修正规则文档；同一类问题反复出现时，可在「规则解析 Skill」页用「AI 归并经验」把修正固化成解析指令。"
+        />
+        <Table<RuleImportRun>
+          rowKey="id"
+          size="small"
+          loading={importRunsLoading}
+          dataSource={importRuns}
+          pagination={{ pageSize: 8, hideOnSinglePage: true }}
+          locale={{ emptyText: '暂无导入记录' }}
+          expandable={{
+            rowExpandable: (row) => Boolean(row.error || row.errors?.length || row.warnings?.length),
+            expandedRowRender: (row) => (
+              <Space direction="vertical" size={6} style={{ width: '100%' }}>
+                {row.error && <Alert type="error" showIcon message={row.error} />}
+                {row.errors?.length ? (
+                  <div>
+                    <Text strong>大模型没解析出来的部分（{row.errors.length}）</Text>
+                    <ul style={{ margin: '4px 0 0 16px', padding: 0 }}>
+                      {row.errors.map((e) => (
+                        <li key={e.index} style={{ fontSize: 12 }}>{e.reason}</li>
+                      ))}
+                    </ul>
+                  </div>
+                ) : null}
+                {row.warnings?.length ? (
+                  <div>
+                    <Text strong>警告（{row.warnings.length}）</Text>
+                    <ul style={{ margin: '4px 0 0 16px', padding: 0 }}>
+                      {row.warnings.map((w) => (
+                        <li key={w} style={{ fontSize: 12 }}>{w}</li>
+                      ))}
+                    </ul>
+                  </div>
+                ) : null}
+              </Space>
+            ),
+          }}
+          columns={[
+            {
+              title: '时间', dataIndex: 'created_at', width: 130,
+              render: (v: string) => (v ? dayjs(v).format('MM-DD HH:mm') : '-'),
+            },
+            { title: '文件', dataIndex: 'file_name', ellipsis: true },
+            {
+              title: '状态', dataIndex: 'status', width: 90,
+              render: (v: RuleImportRun['status']) => (
+                <Tag color={v === 'done' ? 'green' : v === 'error' ? 'red' : 'blue'}>
+                  {statusLabel(v)}
+                </Tag>
+              ),
+            },
+            {
+              title: '导入', key: 'imported', width: 90,
+              render: (_: unknown, row: RuleImportRun) => `${row.imported_rules}/${row.total_rules}`,
+            },
+            {
+              title: '未解析', dataIndex: 'import_errors', width: 90,
+              render: (v: number) => (v > 0 ? <Tag color="orange">{v}</Tag> : <Text type="secondary">0</Text>),
+            },
+            { title: '说明', dataIndex: 'message', ellipsis: true },
+          ]}
+        />
       </Modal>
 
       <Modal

@@ -8,6 +8,7 @@ import {
   getApiErrorCode,
   graphApi,
   reviewsApi,
+  rulesApi,
   skillsApi,
   setCsrfToken,
 } from './client'
@@ -207,5 +208,25 @@ describe('API authentication plumbing', () => {
     expect(captured.method).toBe('post')
     expect(captured.url).toBe('/rule-sets/ruleset-1/skills/consolidate')
     expect(captured.body).toEqual({ max_instructions: 10 })
+  })
+
+  it('GETs the durable import-run records for a rule set', async () => {
+    let captured: { url?: string; params?: unknown } = {}
+    apiHttp.defaults.adapter = async (config) => {
+      captured = { url: config.url, params: config.params }
+      return {
+        data: [{ id: 'run-1', status: 'done', import_errors: 2 }],
+        status: 200,
+        statusText: 'OK',
+        headers: new AxiosHeaders(),
+        config,
+      }
+    }
+
+    const runs = await rulesApi.importRuns('ruleset-1', 5)
+
+    expect(captured.url).toBe('/rules/import-runs')
+    expect(captured.params).toEqual({ rule_set_id: 'ruleset-1', limit: 5 })
+    expect(runs[0].import_errors).toBe(2)
   })
 })

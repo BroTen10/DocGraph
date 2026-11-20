@@ -167,3 +167,33 @@ class ConflictDetectionResponse(BaseModel):
     detection_incomplete: bool = False
     cleared_rules: int = 0
     warnings: list[str] = Field(default_factory=list)
+
+
+class RuleImportRunError(BaseModel):
+    """一条 LLM 没能解析/入库的规则记录。"""
+
+    index: int
+    reason: str
+
+
+class RuleImportRunOut(BaseModel):
+    """一次规则导入的持久记录（供"导入记录"面板复盘 LLM 判不了的部分）。"""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: UUID
+    rule_set_id: UUID
+    file_name: str = ""
+    status: str
+    message: str = ""
+    total_chunks: int = 0
+    parsed_chunks: int = 0
+    total_rules: int = 0
+    imported_rules: int = 0
+    import_errors: int = 0
+    conflict_found: int = 0
+    errors: list[RuleImportRunError] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
+    error: str | None = None
+    created_at: datetime
+    finished_at: datetime | None = None

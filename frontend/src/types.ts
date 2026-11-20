@@ -499,6 +499,26 @@ export interface ImportTask {
   updated_at: string
 }
 
+/** 一次规则导入的持久记录（含 LLM 没解析出来的部分） */
+export interface RuleImportRun {
+  id: string
+  rule_set_id: string
+  file_name: string
+  status: 'pending' | 'extracting' | 'parsing' | 'importing' | 'conflict' | 'done' | 'error'
+  message: string
+  total_chunks: number
+  parsed_chunks: number
+  total_rules: number
+  imported_rules: number
+  import_errors: number
+  conflict_found: number
+  errors: Array<{ index: number; reason: string }>
+  warnings: string[]
+  error: string | null
+  created_at: string
+  finished_at: string | null
+}
+
 export interface ReviewTaskSummary {
   id: string
   contract_id: string

@@ -74,6 +74,7 @@ def init_db() -> None:
         review_result,  # noqa: F401
         review_task,    # noqa: F401
         rule,           # noqa: F401
+        rule_import_run,  # noqa: F401
         rule_parse_skill,  # noqa: F401
         rule_set,       # noqa: F401
         rule_snapshot,  # noqa: F401
