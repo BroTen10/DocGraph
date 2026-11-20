@@ -442,7 +442,6 @@ function DocxViewer({
   return (
     <ZoomableStage height={height} apiRef={apiRef} onViewportWidth={setViewportWidth}>
       <div
-        ref={contentRef}
         style={{
           width: viewportWidth,
           minHeight: 500,
@@ -468,6 +467,13 @@ function DocxViewer({
             </div>
           </div>
         )}
+        {/*
+          mammoth 转换结果用 innerHTML 直接写入该节点，因此它必须是独立的空节点：
+          只有 React 不托管它的子节点，setLoading(false) 时 React 才不会去删除
+          已被 innerHTML 覆盖的「加载中」节点。否则会抛
+          removeChild NotFoundError，整棵组件树卸载 → 页面白屏。
+        */}
+        <div ref={contentRef} />
       </div>
     </ZoomableStage>
   )
@@ -807,7 +813,7 @@ export default function DocumentCompare({
           size="small"
           title={
             <span>
-              <FileTextOutlined /> 原始文档：{doc.file_name}
+              <FileTextOutlined /> 原始文档
             </span>
           }
           styles={{ body: { padding: 0 } }}

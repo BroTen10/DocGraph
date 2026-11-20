@@ -5,6 +5,7 @@ import GraphPage from './pages/GraphPage'
 import ReviewPage from './pages/ReviewPage'
 import ResultsPage from './pages/ResultsPage'
 import DocTypesPage from './pages/DocTypesPage'
+import CheckIntentsPage from './pages/CheckIntentsPage'
 import SettingsPage from './pages/SettingsPage'
 import ForbiddenPage from './pages/ForbiddenPage'
 import LoginPage from './pages/auth/LoginPage'
@@ -61,6 +62,7 @@ export function AppRoutes() {
             />
             <Route path="/rules" element={<RulesPage />} />
             <Route path="/doc-types" element={<DocTypesPage />} />
+            <Route path="/check-intents" element={<CheckIntentsPage />} />
             <Route path="/graph" element={<GraphPage />} />
             <Route path="/review" element={<ReviewPage />} />
             <Route path="/results" element={<ResultsPage />} />

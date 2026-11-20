@@ -12,7 +12,7 @@ import type { ReactNode } from 'react'
 import { message } from 'antd'
 import { ruleSetsApi } from '../api/client'
 import { useAuth } from '../auth/AuthContext'
-import type { RuleSet, RuleSetCreate } from '../types'
+import type { RuleSet, RuleSetCreate, RuleSetUpdate } from '../types'
 
 const LEGACY_STORAGE_KEY = 'current_rule_set_id'
 const storageKeyFor = (tenantId: string | null | undefined) =>
@@ -33,6 +33,8 @@ interface RuleSetContextValue {
   switchTo: (id: string) => void
   /** 创建新规则集并自动切换到新集 */
   create: (data: RuleSetCreate) => Promise<RuleSet>
+  /** 更新规则集（名称/描述/适用类型/默认场景/内置 Skill 开关） */
+  update: (id: string, data: RuleSetUpdate) => Promise<RuleSet>
   /** 删除规则集（后端会级联清空其全部数据），删除后自动切换/刷新 */
   remove: (id: string) => Promise<void>
   /** 刷新规则集列表(外部修改后调用) */
@@ -116,6 +118,16 @@ export function RuleSetProvider({ children }: { children: ReactNode }) {
     [refresh, storageKey],
   )
 
+  const update = useCallback(
+    async (id: string, data: RuleSetUpdate) => {
+      const updated = await ruleSetsApi.update(id, data)
+      await refresh()
+      message.success(`规则集「${updated.name}」已更新`)
+      return updated
+    },
+    [refresh],
+  )
+
   const remove = useCallback(
     async (id: string) => {
       await ruleSetsApi.delete(id)
@@ -143,10 +155,11 @@ export function RuleSetProvider({ children }: { children: ReactNode }) {
       error,
       switchTo,
       create,
+      update,
       remove,
       refresh,
     }),
-    [ruleSets, current, currentId, loading, error, switchTo, create, remove, refresh],
+    [ruleSets, current, currentId, loading, error, switchTo, create, update, remove, refresh],
   )
 
   return <RuleSetContext.Provider value={value}>{children}</RuleSetContext.Provider>

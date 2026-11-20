@@ -15,6 +15,9 @@ import type { ReviewResultItem, ReviewResultByRule, ReviewResultByDoc, ReviewTas
 import { RESULT_COLOR, RESULT_LABEL, SEVERITY_COLOR, SEVERITY_LABEL } from '../types'
 import PageHeader from '../components/PageHeader'
 import DocumentCompare from '../components/DocumentCompare'
+import DocNavButtons from '../components/DocNavButtons'
+import type { CompareNavDoc } from '../components/DocNavButtons'
+import ErrorBoundary from '../components/ErrorBoundary'
 import { useRuleSet } from '../context/RuleSetContext'
 import { useAuth } from '../auth/AuthContext'
 import dayjs from 'dayjs'
@@ -75,8 +78,17 @@ export default function ResultsPage() {
   const [ocrDoc, setOcrDoc] = useState<DocumentBrief | null>(null)
   const [ocrVisible, setOcrVisible] = useState(false)
   const [ocrLoading, setOcrLoading] = useState(false)
+  /**
+   * 本次对照可切换的文档清单（上一张 / 下一张的范围）。
+   * 边界＝打开对照时那条判定涉及的原件，绝不把其它判定的文档也塞进来。
+   */
+  const [ocrScope, setOcrScope] = useState<CompareNavDoc[]>([])
+  /** 范围说明（tooltip 文案），随入口不同而不同 */
+  const [ocrScopeLabel, setOcrScopeLabel] = useState<string | undefined>(undefined)
 
   const ocrRequestRef = useRef(0)
+  /** 抽屉当前是否已打开（用于区分首次打开与组内切换，避免切换时内容闪烁） */
+  const ocrVisibleRef = useRef(false)
 
   // ============ 抽屉控制 ============
 
@@ -90,13 +102,25 @@ export default function ResultsPage() {
     setDetailVisible(false)
   }, [])
 
-  const openOcrDrawer = useCallback(async (docId: string, fileName?: string | null) => {
+  const openOcrDrawer = useCallback(async (
+    docId: string,
+    fileName?: string | null,
+    scopeDocs?: CompareNavDoc[],
+    scopeLabel?: string,
+  ) => {
     const requestId = ++ocrRequestRef.current
+    const firstOpen = !ocrVisibleRef.current
+    ocrVisibleRef.current = true
     setOcrDocId(docId)
     setOcrDocName(fileName || null)
+    if (scopeDocs) {
+      setOcrScope(scopeDocs)
+      setOcrScopeLabel(scopeLabel)
+    }
     setOcrVisible(true)
     setOcrLoading(true)
-    setOcrDoc(null)
+    // 首次打开清空旧内容；组内「上一张/下一张」保留旧内容＋加载遮罩，避免整块闪白
+    if (firstOpen) setOcrDoc(null)
     try {
       const doc = await contractsApi.getOcr(docId)
       // 不用 mountedRef：StrictMode 假 unmount 会误置为 false，导致内容永不渲染
@@ -115,8 +139,15 @@ export default function ResultsPage() {
     }
   }, [])
 
+  /** 组内切换（上一张 / 下一张）：沿用打开对照时确定的范围，不改变边界 */
+  const navigateOcrDoc = useCallback((docId: string) => {
+    const target = ocrScope.find((d) => d.id === docId)
+    void openOcrDrawer(docId, target?.file_name ?? null)
+  }, [ocrScope, openOcrDrawer])
+
   const closeOcrDrawer = useCallback(() => {
     ++ocrRequestRef.current
+    ocrVisibleRef.current = false
     setOcrVisible(false)
   }, [])
 
@@ -233,8 +264,28 @@ export default function ResultsPage() {
     return []
   }, [])
 
+  /**
+   * 判定涉及的原件 → 对照抽屉里的可切换清单。
+   * 边界严格等于「这一条判定涉及的文件」，不会把同任务里的其它文档带进来。
+   */
+  const toNavDocs = useCallback(
+    (docs: Array<{ doc_id: string; file_name: string }>): CompareNavDoc[] =>
+      docs.filter((d) => d.doc_id).map((d) => ({ id: d.doc_id, file_name: d.file_name })),
+    [],
+  )
+
+  /** 按文档视图里展示的文档分组 → 从分组入口打开时的可切换清单（范围＝当前视图列表） */
+  const taskNavDocs = useMemo<CompareNavDoc[]>(
+    () =>
+      (byDoc?.docs || [])
+        .filter((d) => d.doc_id)
+        .map((d) => ({ id: d.doc_id as string, file_name: d.file_name || '（未命名文件）' })),
+    [byDoc],
+  )
+
   const renderDocButtons = useCallback((record: ReviewResultItem) => {
     const docs = getRelatedDocs(record)
+    const navDocs = toNavDocs(docs)
     if (docs.length === 0) {
       return (
         <Tooltip title="当前检查项未绑定具体文件，无法查看原件">
@@ -250,7 +301,7 @@ export default function ResultsPage() {
             type="link"
             size="small"
             title={d.file_name}
-            onClick={() => openOcrDrawer(d.doc_id, d.file_name)}
+            onClick={() => openOcrDrawer(d.doc_id, d.file_name, navDocs, '本检查项涉及文件')}
             style={{
               padding: 0,
               fontSize: 12,
@@ -267,7 +318,7 @@ export default function ResultsPage() {
         ))}
       </Space>
     )
-  }, [getRelatedDocs, openOcrDrawer])
+  }, [getRelatedDocs, toNavDocs, openOcrDrawer])
 
   // ============ 按规则视图列 ============
   // 列宽设计目标:1280px 视口下左 5/24 + 右 19/24,表格不需横向滚动即可看全主要列
@@ -476,7 +527,7 @@ export default function ResultsPage() {
                   icon={<FileTextOutlined />}
                   onClick={() => {
                     closeDetailDrawer()
-                    openOcrDrawer(d.doc_id, d.file_name)
+                    openOcrDrawer(d.doc_id, d.file_name, toNavDocs(relatedDocs), '本检查项涉及文件')
                   }}
                 >
                   {d.file_name}
@@ -502,7 +553,7 @@ export default function ResultsPage() {
                     key={d.doc_id}
                     type="link"
                     size="small"
-                    onClick={() => { closeDetailDrawer(); openOcrDrawer(d.doc_id, d.file_name) }}
+                    onClick={() => { closeDetailDrawer(); openOcrDrawer(d.doc_id, d.file_name, toNavDocs(relatedDocs), '本检查项涉及文件') }}
                   >
                     {d.file_name}
                   </Button>
@@ -579,12 +630,21 @@ export default function ResultsPage() {
         <Space>
           <FileSearchOutlined />
           <span>原件 / OCR 对照</span>
-          {(ocrDoc?.file_name || ocrDocName || ocrDocId) && (
+          {(ocrDocName || ocrDoc?.file_name || ocrDocId) && (
             <Text strong style={{ fontSize: 13, maxWidth: 360 }} ellipsis>
-              {ocrDoc?.file_name || ocrDocName || `文档 ${ocrDocId?.slice(0, 8)}`}
+              {ocrDocName || ocrDoc?.file_name || `文档 ${ocrDocId?.slice(0, 8)}`}
             </Text>
           )}
+          {ocrLoading && <Spin size="small" />}
         </Space>
+      }
+      extra={
+        <DocNavButtons
+          docs={ocrScope}
+          currentId={ocrDocId}
+          onNavigate={navigateOcrDoc}
+          scopeLabel={ocrScopeLabel}
+        />
       }
       placement="right"
       width="88%"
@@ -592,35 +652,62 @@ export default function ResultsPage() {
       onClose={closeOcrDrawer}
       afterOpenChange={(open) => {
         // 批次 5-2：关闭动画结束后再清空内容，避免关闭动画期间内容闪烁
-        if (!open) {
+        // 若动画期间又打开了新文档（ocrVisibleRef 已置回 true），则不要清空
+        if (!open && !ocrVisibleRef.current) {
           setOcrDocId(null)
           setOcrDocName(null)
           setOcrDoc(null)
           setOcrLoading(false)
+          setOcrScope([])
+          setOcrScopeLabel(undefined)
         }
       }}
       destroyOnClose
       styles={{ body: { padding: 16 } }}
     >
-      {ocrLoading ? (
+      {ocrDoc ? (
+        <div style={{ position: 'relative' }}>
+          {/* 组内切换时保留旧内容，仅加一层加载遮罩，避免整块闪白 */}
+          {ocrLoading && (
+            <div
+              style={{
+                position: 'absolute',
+                inset: 0,
+                zIndex: 10,
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                background: 'rgba(255, 255, 255, 0.65)',
+              }}
+            >
+              <Spin size="large" tip="加载 OCR 识别结果中..."><div style={{ padding: 40 }} /></Spin>
+            </div>
+          )}
+          <ErrorBoundary
+            title="文档对照视图加载失败"
+            description="原始文档预览或 OCR 结果渲染时出错，可点「重试」；若始终失败，请先关闭抽屉再重新打开该文档。"
+            resetKey={ocrDoc.id}
+          >
+            <DocumentCompare
+              doc={ocrDoc}
+              fileUrl={contractsApi.fileUrl(ocrDoc.id)}
+              height="calc(100vh - 160px)"
+              editable={canEditResults}
+              onSaved={async () => {
+                try {
+                  const fresh = await contractsApi.getOcr(ocrDoc.id)
+                  setOcrDoc(fresh)
+                } catch (e) {
+                  message.error('刷新 OCR 详情失败: ' + getErrorMessage(e))
+                }
+              }}
+            />
+          </ErrorBoundary>
+        </div>
+      ) : ocrLoading ? (
         <div style={{ textAlign: 'center', padding: 80 }}>
           <Spin size="large" tip="加载 OCR 识别结果中..."><div style={{ padding: 40 }} /></Spin>
         </div>
-      ) : ocrDoc ? (
-        <DocumentCompare
-          doc={ocrDoc}
-          fileUrl={contractsApi.fileUrl(ocrDoc.id)}
-          height="calc(100vh - 160px)"
-          editable={canEditResults}
-          onSaved={async () => {
-            try {
-              const fresh = await contractsApi.getOcr(ocrDoc.id)
-              setOcrDoc(fresh)
-            } catch (e) {
-              message.error('刷新 OCR 详情失败: ' + getErrorMessage(e))
-            }
-          }}
-        />
       ) : (
         <Empty description="无法加载文档信息" />
       )}
@@ -673,7 +760,7 @@ export default function ResultsPage() {
                     type="link"
                     size="small"
                     icon={<FileTextOutlined />}
-                    onClick={(e) => { e.stopPropagation(); openOcrDrawer(d.doc_id!, d.file_name) }}
+                    onClick={(e) => { e.stopPropagation(); openOcrDrawer(d.doc_id!, d.file_name, taskNavDocs, '本次审查的文档') }}
                   >
                     原件对照
                   </Button>

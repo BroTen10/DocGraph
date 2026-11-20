@@ -20,6 +20,7 @@ import type { MenuProps } from 'antd'
 import {
   ApartmentOutlined,
   CheckCircleOutlined,
+  CheckSquareOutlined,
   FileSearchOutlined,
   FileTextOutlined,
   LogoutOutlined,
@@ -46,6 +47,7 @@ export const ALL_MENU_ITEMS = [
   { key: '/upload', icon: <UploadOutlined />, label: '文档上传' },
   { key: '/rules', icon: <SettingOutlined />, label: '规则管理' },
   { key: '/doc-types', icon: <FileTextOutlined />, label: '文档类型' },
+  { key: '/check-intents', icon: <CheckSquareOutlined />, label: '检查项' },
   { key: '/graph', icon: <ApartmentOutlined />, label: '图谱确认' },
   { key: '/review', icon: <FileSearchOutlined />, label: '审查执行' },
   { key: '/results', icon: <CheckCircleOutlined />, label: '结果展示' },

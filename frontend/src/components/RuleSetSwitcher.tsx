@@ -1,48 +1,89 @@
-/** 规则集切换器:Header 右上角下拉切换 + 创建/删除规则集按钮。 */
+/** 规则集切换器:Header 右上角下拉切换 + 创建/编辑/删除规则集按钮。 */
 
 import { useEffect, useMemo, useState } from 'react'
 import { Alert, Button, Dropdown, Modal, Form, Input, Select, Switch, Space, Tag, Tooltip, Typography, message } from 'antd'
 import type { MenuProps } from 'antd'
-import { PlusOutlined, DownOutlined, AppstoreOutlined, MinusOutlined } from '@ant-design/icons'
+import { PlusOutlined, DownOutlined, AppstoreOutlined, MinusOutlined, EditOutlined } from '@ant-design/icons'
 import { useRuleSet } from '../context/RuleSetContext'
-import { constantsApi, getErrorMessage } from '../api/client'
-import type { DocTypeMeta } from '../types'
+import { constantsApi, getErrorMessage, ruleSetsApi } from '../api/client'
+import type { DocTypeMeta, RuleScenarioOption } from '../types'
 import { useAuth } from '../auth/AuthContext'
 
 const { Text } = Typography
 
 export function RuleSetSwitcher() {
-  const { ruleSets, current, currentId, loading, switchTo, create, remove } = useRuleSet()
+  const { ruleSets, current, currentId, loading, switchTo, create, update, remove } = useRuleSet()
   const { hasPermission } = useAuth()
   const canManageRules = hasPermission('rules.manage')
-  const [modalOpen, setModalOpen] = useState(false)
+  const [modalMode, setModalMode] = useState<'create' | 'edit' | null>(null)
   const [deleteOpen, setDeleteOpen] = useState(false)
   const [deleteConfirmText, setDeleteConfirmText] = useState('')
   const [deleting, setDeleting] = useState(false)
   const [docTypes, setDocTypes] = useState<DocTypeMeta[]>([])
+  const [scenarios, setScenarios] = useState<RuleScenarioOption[]>([])
   const [submitting, setSubmitting] = useState(false)
   const [form] = Form.useForm()
 
-  // 加载文件类型清单(供"适用文件类型"多选)
+  // 加载文件类型清单(供"适用文件类型"多选)与可选业务场景(内置场景知识包)
   useEffect(() => {
     constantsApi.docTypes().then((res) => setDocTypes(res.doc_types)).catch((e) => console.warn('加载文件类型清单失败:', e))
+    ruleSetsApi.scenarios().then(setScenarios).catch((e) => console.warn('加载业务场景清单失败:', e))
   }, [])
 
-  const handleCreate = async () => {
+  const scenarioLabel = (key: string | null | undefined) =>
+    scenarios.find((s) => s.key === key)?.name || key || ''
+
+  const scenarioOptions = [
+    { value: '', label: '未声明（按兼容默认场景解析）' },
+    ...scenarios.map((s) => ({ value: s.key, label: `${s.name}（${s.key}）` })),
+  ]
+
+  const openCreate = () => {
+    setModalMode('create')
+    form.setFieldsValue({
+      name: '',
+      description: '',
+      doc_types: [],
+      scenario: '',
+      use_default_skill: true,
+      is_default: false,
+    })
+  }
+
+  const openEdit = () => {
+    if (!current) return
+    setModalMode('edit')
+    form.setFieldsValue({
+      name: current.name,
+      description: current.description || '',
+      doc_types: current.doc_types || [],
+      scenario: current.scenario || '',
+      use_default_skill: current.use_default_skill !== false,
+      is_default: current.is_default,
+    })
+  }
+
+  const handleSubmit = async () => {
     try {
       const values = await form.validateFields()
       setSubmitting(true)
-      await create({
+      const payload = {
         name: values.name,
         description: values.description,
         doc_types: values.doc_types || [],
+        scenario: values.scenario ? values.scenario : null,
         use_default_skill: values.use_default_skill !== false,
         is_default: values.is_default || false,
-      })
-      setModalOpen(false)
+      }
+      if (modalMode === 'edit' && currentId) {
+        await update(currentId, payload)
+      } else {
+        await create(payload)
+      }
+      setModalMode(null)
       form.resetFields()
     } catch (e) {
-      // 校验失败或创建失败,message 已由 context/form 处理
+      // 校验失败或提交失败,message 已由 context/form 处理
     } finally {
       setSubmitting(false)
     }
@@ -77,7 +118,12 @@ export function RuleSetSwitcher() {
               </div>
             )}
           </div>
-          {r.is_default && <Tag color="purple" style={{ margin: 0 }}>默认</Tag>}
+          <Space size={4}>
+            {r.scenario && (
+              <Tag color="blue" style={{ margin: 0 }}>{scenarioLabel(r.scenario)}</Tag>
+            )}
+            {r.is_default && <Tag color="purple" style={{ margin: 0 }}>默认</Tag>}
+          </Space>
         </div>
       ),
       onClick: () => switchTo(r.id),
@@ -93,11 +139,12 @@ export function RuleSetSwitcher() {
             <PlusOutlined /> 新建规则集
           </div>
         ),
-        onClick: () => setModalOpen(true),
+        onClick: openCreate,
       })
     }
     return items
-  }, [ruleSets, currentId, switchTo, canManageRules])
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [ruleSets, currentId, switchTo, canManageRules, scenarios])
 
   return (
     <>
@@ -138,7 +185,7 @@ export function RuleSetSwitcher() {
                 aria-label="新建规则集"
                 type="primary"
                 icon={<PlusOutlined />}
-                onClick={() => setModalOpen(true)}
+                onClick={openCreate}
                 style={{
                   borderRadius: 8,
                   height: 36,
@@ -150,6 +197,25 @@ export function RuleSetSwitcher() {
                   background: 'linear-gradient(135deg, #6366f1 0%, #8b5cf6 100%)',
                   border: 'none',
                   boxShadow: '0 2px 8px rgba(99, 102, 241, 0.35)',
+                }}
+              />
+            </Tooltip>
+
+            {/* 独立的"编辑当前规则集"按钮:修改名称/描述/适用类型/默认业务场景 */}
+            <Tooltip title={current ? '编辑当前规则集' : '暂无规则集可编辑'} placement="bottom">
+              <Button
+                aria-label="编辑当前规则集"
+                icon={<EditOutlined />}
+                disabled={!current}
+                onClick={openEdit}
+                style={{
+                  borderRadius: 8,
+                  height: 36,
+                  width: 36,
+                  padding: 0,
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
                 }}
               />
             </Tooltip>
@@ -181,15 +247,15 @@ export function RuleSetSwitcher() {
       </Space>
 
       <Modal
-        title="新建规则集"
-        open={modalOpen}
+        title={modalMode === 'edit' ? `编辑规则集：${current?.name || ''}` : '新建规则集'}
+        open={modalMode !== null}
         onCancel={() => {
-          setModalOpen(false)
+          setModalMode(null)
           form.resetFields()
         }}
-        onOk={handleCreate}
+        onOk={handleSubmit}
         confirmLoading={submitting}
-        okText="创建并切换"
+        okText={modalMode === 'edit' ? '保存' : '创建并切换'}
         cancelText="取消"
         destroyOnHidden
       >
@@ -215,11 +281,18 @@ export function RuleSetSwitcher() {
             />
           </Form.Item>
           <Form.Item
+            name="scenario"
+            label="默认业务场景"
+            tooltip="决定解析规则时加载哪套场景知识包。导入文件内声明了场景时以文件为准；此处留空表示按兼容默认场景处理"
+          >
+            <Select options={scenarioOptions} optionFilterProp="label" showSearch />
+          </Form.Item>
+          <Form.Item
             name="use_default_skill"
-            label="使用内置默认解析 Skill"
+            label="使用内置通用解析契约与场景知识包"
             valuePropName="checked"
             initialValue={true}
-            tooltip="关闭后该规则集仅保留系统解析契约，不使用内置通用贸易领域知识，适合业务差异较大的规则集"
+            tooltip="关闭后该规则集仅保留系统基础解析契约，不加载通用契约包与场景知识包，适合业务差异极大的规则集"
           >
             <Switch />
           </Form.Item>

@@ -334,9 +334,16 @@ export default function SkillTab({ ruleSetId, readOnly = false }: Props) {
       ),
     },
     {
-      title: '来源', key: 'type', width: 80,
+      title: '来源', key: 'type', width: 150,
       render: (_: unknown, row: RuleParseSkill) => (
-        row.is_builtin ? <Tag color="blue">内置</Tag> : <Tag>自定义</Tag>
+        <Space size={4} wrap>
+          {row.is_builtin ? <Tag color="blue">内置</Tag> : <Tag>自定义</Tag>}
+          {row.scenario
+            ? <Tooltip title={`仅当规则集/导入文件声明场景为 ${row.scenario} 时生效`}><Tag color="geekblue" style={{ fontSize: 11 }}>场景：{row.scenario}</Tag></Tooltip>
+            : (row.is_builtin
+                ? <Tooltip title="通用解析契约：所有业务场景都生效"><Tag style={{ fontSize: 11 }}>通用</Tag></Tooltip>
+                : null)}
+        </Space>
       ),
     },
     {

@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react'
+import { useState, useEffect, useRef, useMemo } from 'react'
 import {
   Card, Row, Col, Upload, Button, Table, Tag, message, Modal, Input,
   Space, Typography, Popconfirm, Drawer, Spin, Progress, Tooltip, Select,
@@ -8,6 +8,9 @@ import type { UploadProps } from 'antd'
 import { contractsApi, getErrorMessage, ocrApi } from '../api/client'
 import type { ContractBrief, ContractDetail, ContractUploadResponse, DocumentBrief, OcrTask } from '../types'
 import DocumentCompare from '../components/DocumentCompare'
+import DocNavButtons from '../components/DocNavButtons'
+import type { CompareNavDoc } from '../components/DocNavButtons'
+import ErrorBoundary from '../components/ErrorBoundary'
 import PageHeader from '../components/PageHeader'
 import EmptyState from '../components/EmptyState'
 import { useRuleSet } from '../context/RuleSetContext'
@@ -33,6 +36,9 @@ export default function UploadPage() {
   const [compareOpen, setCompareOpen] = useState(false)
   const [compareDoc, setCompareDoc] = useState<DocumentBrief | null>(null)
   const [compareLoading, setCompareLoading] = useState(false)
+  /** 可切换浏览的文档清单：当前合同（这批上传业务）下的全部文件 */
+  const [compareScope, setCompareScope] = useState<CompareNavDoc[]>([])
+  const compareRequestRef = useRef(0)
   // OCR 任务状态:当前正在运行的 OCR 任务(选中合同时显示进度)
   const [ocrTask, setOcrTask] = useState<OcrTask | null>(null)
   const [ocrTriggering, setOcrTriggering] = useState(false) // 批量触发按钮 loading
@@ -44,6 +50,12 @@ export default function UploadPage() {
   // 当前展示的合同 id,供 OCR 轮询回调对比:仅当用户仍停留在启动轮询的那个合同时才刷新详情,
   // 避免切到新合同后被旧合同轮询的 setDetail 覆盖(张冠李戴)
   const currentDetailIdRef = useRef<string | null>(null)
+
+  /** OCR 对照抽屉的可切换清单＝当前合同（本次上传批次）下的全部文件 */
+  const compareNavDocs = useMemo<CompareNavDoc[]>(
+    () => (detail?.documents || []).map((d) => ({ id: d.id, file_name: d.file_name })),
+    [detail],
+  )
 
   const load = async () => {
     if (!currentId) return
@@ -264,28 +276,53 @@ export default function UploadPage() {
     }
   }
 
-  /** 打开 OCR 对照查看抽屉 */
-  const openCompare = async (doc: DocumentBrief) => {
+  /**
+   * 打开 OCR 对照查看抽屉。
+   * scopeDocs 为该业务范围内可切换的文档（合同详情里的文件列表），
+   * 「上一张 / 下一张」只在这个清单内切换，不会跨到其它合同。
+   */
+  const openCompare = async (doc: DocumentBrief, scopeDocs?: CompareNavDoc[]) => {
+    const requestId = ++compareRequestRef.current
     setCompareDoc(doc)
     setCompareOpen(true)
+    if (scopeDocs) setCompareScope(scopeDocs)
     // 坐标数据可能是在列表加载后才生成；缺失时始终拉取最新 OCR 详情。
-    if (doc.ocr_status === 'done' && (!doc.ocr_text || !doc.ocr_layout?.pages?.length)) {
-      setCompareLoading(true)
-      try {
-        const fresh = await contractsApi.getOcr(doc.id)
-        setCompareDoc(fresh)
+    const needsFetch = doc.ocr_status === 'done' && (!doc.ocr_text || !doc.ocr_layout?.pages?.length)
+    // 切到不需要补拉数据的文档时要把上一次的加载态收掉，否则遮罩会一直停着
+    setCompareLoading(needsFetch)
+    if (!needsFetch) return
+    try {
+      const fresh = await contractsApi.getOcr(doc.id)
+      if (requestId === compareRequestRef.current) setCompareDoc(fresh)
     } catch (e) {
-      message.error('加载 OCR 详情失败: ' + getErrorMessage(e))
-      } finally {
-        setCompareLoading(false)
+      if (requestId === compareRequestRef.current) {
+        message.error('加载 OCR 详情失败: ' + getErrorMessage(e))
       }
+    } finally {
+      if (requestId === compareRequestRef.current) setCompareLoading(false)
     }
   }
 
+  /** 组内切换：从当前合同的文件清单里取目标文档 */
+  const navigateCompare = (docId: string) => {
+    const target = (detail?.documents || []).find((d) => d.id === docId)
+    if (!target) {
+      message.warning('该文件不在当前合同的文件列表中')
+      return
+    }
+    void openCompare(target)
+  }
+
   const closeCompare = () => {
+    const closedAt = ++compareRequestRef.current
     setCompareOpen(false)
-    // 延迟清空避免动画期间空白
-    setTimeout(() => setCompareDoc(null), 300)
+    // 延迟清空避免动画期间空白；若期间又打开了新文档（requestId 已变）则不要清
+    setTimeout(() => {
+      if (compareRequestRef.current !== closedAt) return
+      setCompareDoc(null)
+      setCompareScope([])
+      setCompareLoading(false)
+    }, 300)
   }
 
   const columns = [
@@ -373,7 +410,7 @@ export default function UploadPage() {
                 size="small"
                 type="link"
                 icon={<FileSearchOutlined />}
-                onClick={() => openCompare(row)}
+                onClick={() => openCompare(row, compareNavDocs)}
               >
                 OCR对照
               </Button>
@@ -720,7 +757,16 @@ export default function UploadPage() {
                 {compareDoc.file_name}
               </Tag>
             )}
+            {compareLoading && <Spin size="small" />}
           </Space>
+        }
+        extra={
+          <DocNavButtons
+            docs={compareScope}
+            currentId={compareDoc?.id}
+            onNavigate={navigateCompare}
+            scopeLabel="本合同的全部文件"
+          />
         }
         placement="right"
         open={compareOpen}
@@ -729,26 +775,50 @@ export default function UploadPage() {
         destroyOnClose
         styles={{ body: { padding: 12, background: '#f5f5f5' } }}
       >
-        {compareLoading ? (
+        {compareDoc ? (
+          <div style={{ position: 'relative' }}>
+            {/* 组内切换时保留旧内容，仅加一层加载遮罩，避免整块闪白 */}
+            {compareLoading && (
+              <div
+                style={{
+                  position: 'absolute',
+                  inset: 0,
+                  zIndex: 10,
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  background: 'rgba(255, 255, 255, 0.65)',
+                }}
+              >
+                <Spin size="large" tip="加载 OCR 识别结果中..."><div style={{ padding: 40 }} /></Spin>
+              </div>
+            )}
+            <ErrorBoundary
+              title="文档对照视图加载失败"
+              description="原始文档预览或 OCR 结果渲染时出错，可点「重试」；若始终失败，请先关闭抽屉再重新打开该文档。"
+              resetKey={compareDoc.id}
+            >
+              <DocumentCompare
+                doc={compareDoc}
+                fileUrl={contractsApi.fileUrl(compareDoc.id)}
+                height="calc(100vh - 120px)"
+                editable={canExecute}
+                onSaved={async () => {
+                  try {
+                    const fresh = await contractsApi.getOcr(compareDoc.id)
+                    setCompareDoc(fresh)
+                    if (detail) await viewDetail(detail.id)
+                  } catch (e) {
+                    message.error('刷新文档详情失败: ' + getErrorMessage(e))
+                  }
+                }}
+              />
+            </ErrorBoundary>
+          </div>
+        ) : compareLoading ? (
           <div style={{ textAlign: 'center', padding: 80 }}>
             <Spin size="large" tip="加载 OCR 识别结果中..."><div style={{ padding: 40 }} /></Spin>
           </div>
-        ) : compareDoc ? (
-          <DocumentCompare
-            doc={compareDoc}
-            fileUrl={contractsApi.fileUrl(compareDoc.id)}
-            height="calc(100vh - 120px)"
-            editable={canExecute}
-            onSaved={async () => {
-              try {
-                const fresh = await contractsApi.getOcr(compareDoc.id)
-                setCompareDoc(fresh)
-                if (detail) await viewDetail(detail.id)
-              } catch (e) {
-                message.error('刷新文档详情失败: ' + getErrorMessage(e))
-              }
-            }}
-          />
         ) : (
           <EmptyState description="未选择文档" padding={48} />
         )}

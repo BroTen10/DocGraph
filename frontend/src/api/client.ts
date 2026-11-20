@@ -6,6 +6,9 @@ import type {
   AnalyzeSampleResult,
   AuthSessionResponse,
   BuildInfo,
+  CheckIntentCreate,
+  CheckIntentItem,
+  CheckIntentUpdate,
   ConflictDetectionResponse,
   ConstantsResponse,
   ContractBrief,
@@ -48,6 +51,7 @@ import type {
   ReviewTaskSummary,
   Rule,
   RuleImportResponse,
+  RuleScenarioOption,
   RuleSet,
   RuleSetCreate,
   RuleSetUpdate,
@@ -318,6 +322,8 @@ export const ruleSetsApi = {
   list: () => http.get<RuleSet[]>('/rule-sets').then((r) => r.data),
   get: (id: string) => http.get<RuleSet>(`/rule-sets/${id}`).then((r) => r.data),
   create: (data: RuleSetCreate) => http.post<RuleSet>('/rule-sets', data).then((r) => r.data),
+  /** 可选业务场景清单（内置场景知识包） */
+  scenarios: () => http.get<RuleScenarioOption[]>('/rule-sets/scenarios').then((r) => r.data),
   update: (id: string, data: RuleSetUpdate) =>
     http.put<RuleSet>(`/rule-sets/${id}`, data).then((r) => r.data),
   delete: (id: string) => http.delete(`/rule-sets/${id}`).then((r) => r.data),
@@ -363,17 +369,24 @@ export const rulesApi = {
     http.get<Rule[]>('/rules', { params: { rule_set_id: ruleSetId, ...params } }).then((r) => r.data),
   create: (ruleSetId: string, data: Partial<Rule>) =>
     http.post<Rule>('/rules', data, { params: { rule_set_id: ruleSetId } }).then((r) => r.data),
-  importBatch: (ruleSetId: string, raw_text: string, skill_ids?: string[]) =>
+  importBatch: (ruleSetId: string, raw_text: string, skill_ids?: string[], scenario?: string) =>
     http
-      .post<RuleImportResponse>('/rules/import-batch', { raw_text, skill_ids: skill_ids || [] }, { params: { rule_set_id: ruleSetId } })
+      .post<RuleImportResponse>(
+        '/rules/import-batch',
+        { raw_text, skill_ids: skill_ids || [], scenario: scenario || null },
+        { params: { rule_set_id: ruleSetId } },
+      )
       .then((r) => r.data),
   /** 从上传的规则描述文档（PDF/EXCEL/WORD/MD）导入规则（异步任务模式，返回 task_id） */
-  importDocument: (ruleSetId: string, file: File, skill_ids?: string[], signal?: AbortSignal) => {
+  importDocument: (ruleSetId: string, file: File, skill_ids?: string[], scenario?: string, signal?: AbortSignal) => {
     const form = new FormData()
     form.append('file', file)
     const params: Record<string, string> = { rule_set_id: ruleSetId }
     if (skill_ids && skill_ids.length) {
       params.skill_ids = skill_ids.join(',')
+    }
+    if (scenario) {
+      params.scenario = scenario
     }
     return http
       .post<ImportTask>('/rules/import-document', form, {
@@ -501,6 +514,26 @@ export const constantsApi = {
 export const versionApi = {
   /** 后端版本信息；对比本机开发环境与服务器正式环境时直接看这个接口 */
   get: () => http.get<BuildInfo>('/version').then((r) => r.data),
+}
+
+export const checkIntentsApi = {
+  /** 检查项注册表列表（可按状态过滤） */
+  list: (params?: { status?: string }) =>
+    http.get<CheckIntentItem[]>('/check-intents', { params }).then((r) => r.data),
+  /** 新建检查项 */
+  create: (data: CheckIntentCreate) =>
+    http.post<CheckIntentItem>('/check-intents', data).then((r) => r.data),
+  /** 更新（改名会同步改写存量规则的引用；别名用于后续导入写时归一） */
+  update: (id: string, data: CheckIntentUpdate) =>
+    http.put<CheckIntentItem>(`/check-intents/${id}`, data).then((r) => r.data),
+  /** 合并进目标检查项 */
+  merge: (id: string, targetId: string) =>
+    http
+      .post<CheckIntentItem>(`/check-intents/${id}/merge`, { target_id: targetId })
+      .then((r) => r.data),
+  /** 删除（仍被规则引用时会拒绝） */
+  delete: (id: string) =>
+    http.delete(`/check-intents/${id}`).then((r) => r.data),
 }
 
 export const docTypesApi = {

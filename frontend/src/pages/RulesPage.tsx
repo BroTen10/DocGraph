@@ -6,12 +6,20 @@ import {
   Upload, Drawer, Progress,
 } from 'antd'
 import { PlusOutlined, EditOutlined, DeleteOutlined, HistoryOutlined, ImportOutlined, InboxOutlined, FileTextOutlined, SettingOutlined, CheckOutlined, WarningOutlined, ArrowRightOutlined } from '@ant-design/icons'
-import { rulesApi, constantsApi, getErrorMessage, isFormValidationError, ruleSetsApi, skillsApi } from '../api/client'
-import type { Rule, RuleSet, RuleSnapshot, DocTypeMeta, ConstantsResponse, RuleImportResponse, ImportTask, DefectItem } from '../types'
+import { rulesApi, constantsApi, getErrorMessage, isFormValidationError, ruleSetsApi, skillsApi, checkIntentsApi } from '../api/client'
+import type {
+  Rule, RuleSet, RuleSnapshot, DocTypeMeta, ConstantsResponse, RuleImportResponse, ImportTask, DefectItem,
+  RuleScenarioOption, ConflictDetectionResponse, CheckIntentItem,
+} from '../types'
 import {
   classifyDefects, hasOpenDefect, isConflictDefect, isResolvedDefect, needsUserAction, openDefects,
   openSeverityCounts, DEFECT_BUCKET_LABEL, type RuleFilterKey,
 } from '../utils/defects'
+import {
+  computeImportSkillComposition,
+  isPresetSkill,
+  type CompositionSkill,
+} from '../utils/importSkillComposition'
 import PageHeader from '../components/PageHeader'
 import { useRuleSet } from '../context/RuleSetContext'
 import { useAuth } from '../auth/AuthContext'
@@ -149,7 +157,7 @@ function describeImportProgress(task: ImportTask): string {
 }
 
 export default function RulesPage() {
-  const { currentId } = useRuleSet()
+  const { currentId, current: currentRuleSet } = useRuleSet()
   const { hasPermission } = useAuth()
   const canManageRules = hasPermission('rules.manage')
   const [rules, setRules] = useState<Rule[]>([])
@@ -191,7 +199,14 @@ export default function RulesPage() {
   // 批量确认
   const [confirming, setConfirming] = useState(false)
   // Skill 选择
-  const [allSkills, setAllSkills] = useState<Array<{ id: string; name: string; is_builtin: boolean; enabled: boolean }>>([])
+  const [allSkills, setAllSkills] = useState<Array<{ id: string; name: string; is_builtin: boolean; enabled: boolean; scenario: string | null }>>([])
+  /** 本次导入显式声明的业务场景（空 = 由导入文件声明，否则用规则集默认） */
+  const [importScenario, setImportScenario] = useState<string | undefined>(undefined)
+  const [scenarios, setScenarios] = useState<RuleScenarioOption[]>([])
+  /** 检查项注册表（已确认的检查项才单独成列，未确认的归入「未分类」） */
+  const [checkIntents, setCheckIntents] = useState<CheckIntentItem[]>([])
+  /** 冲突检测未完整完成时的信息（用于提示"未清除历史冲突"） */
+  const [conflictIncomplete, setConflictIncomplete] = useState<ConflictDetectionResponse | null>(null)
   const [importSkillIds, setImportSkillIds] = useState<string[]>([])
   // 冲突检测
   const [conflictDetecting, setConflictDetecting] = useState(false)
@@ -224,12 +239,14 @@ export default function RulesPage() {
       else if (fk === 'warning') apiParams.defect_severity = 'warning'
       else if (fk === 'info') apiParams.defect_severity = 'info'
 
-      const [r, s, c, rs, ds] = await Promise.all([
+      const [r, s, c, rs, ds, intents] = await Promise.all([
         rulesApi.list(currentId, apiParams),
         rulesApi.listSnapshots(currentId),
         constantsApi.docTypes(),
         ruleSetsApi.get(currentId),
         rulesApi.getDefectSummary(currentId).catch(() => null),
+        // 检查项注册表：决定矩阵列与"未分类"归属；失败不阻塞规则列表
+        checkIntentsApi.list().catch(() => [] as CheckIntentItem[]),
       ])
       setRules(r)
       setSnapshots(s)
@@ -237,6 +254,7 @@ export default function RulesPage() {
       setCheckCategories(c.check_categories)
       setCompletenessCategory(c.completeness_category || '齐套性')
       setRuleSet(rs)
+      setCheckIntents(intents)
       if (ds) setDefectSummaryRemote(ds)
     } catch (e) {
       message.error('加载失败: ' + getErrorMessage(e))
@@ -253,12 +271,38 @@ export default function RulesPage() {
     load(key)
   }
 
+  // 检查项分列以**已确认的检查项注册表**为准：
+  // 规则导入时大模型新发现的检查项默认待确认，未确认前不单独成列，
+  // 相关规则统一归入「未分类」，避免"列表里凭空长出一列"且无人能治理。
+  const confirmedCheckCategories = useMemo(() => {
+    const fromRegistry = checkIntents
+      .filter((x) => x.status === 'active')
+      .sort((a, b) => a.sort_order - b.sort_order || a.name.localeCompare(b.name))
+      .map((x) => x.name)
+    if (fromRegistry.length > 0) return fromRegistry
+    // 注册表尚未加载（或接口失败）时回退到常量清单
+    return [...(checkCategories.length > 0 ? checkCategories : FALLBACK_CHECK_CATEGORIES)]
+  }, [checkIntents, checkCategories])
+
+  /** 规则实际落位的检查项：未确认的检查项值统一归入「未分类」 */
+  const ruleCheckCategory = (rule: Pick<Rule, 'check_category'>) => {
+    const name = rule.check_category
+    if (!name) return UNCATEGORIZED
+    return confirmedCheckCategories.includes(name) ? name : UNCATEGORIZED
+  }
+
+  const effectiveCheckCategories = useMemo(() => {
+    const hasUncategorized = rules.some((r) => ruleCheckCategory(r) === UNCATEGORIZED)
+    return [...confirmedCheckCategories, ...(hasUncategorized ? [UNCATEGORIZED] : [])]
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [confirmedCheckCategories, rules])
+
   // 二维表格：行=文件类型，列=检查项
   const matrix = useMemo(() => {
     const m: Record<string, Record<string, Rule[]>> = {}
     rules.forEach((r) => {
       const dt = r.doc_type || GLOBAL_DOC_TYPE
-      const cc = r.check_category || UNCATEGORIZED
+      const cc = ruleCheckCategory(r)
       if (!m[dt]) m[dt] = {}
       if (!m[dt][cc]) m[dt][cc] = []
       m[dt][cc].push(r)
@@ -282,14 +326,6 @@ export default function RulesPage() {
       return ia - ib
     })
   }, [docTypes, ruleSet, rules])
-
-  // 动态检查项列表（种子 + 规则集声明 + 实际规则，去重）
-  const effectiveCheckCategories = useMemo(() => {
-    const seed: string[] = [...(checkCategories.length > 0 ? checkCategories : FALLBACK_CHECK_CATEGORIES)]
-    const fromSet: string[] = ruleSet?.check_categories || []
-    const fromRules: string[] = [...new Set(rules.map((r) => r.check_category || UNCATEGORIZED))]
-    return [...new Set([...seed, ...fromSet, ...fromRules])]
-  }, [ruleSet, rules])
 
   // 计算缺陷统计（与后端同口径：按"最严重的未处理缺陷"归桶，各页签都是规则条数）。
   // 后端 defect-summary 为权威来源，此处仅作兜底与无网络时的降级展示。
@@ -503,8 +539,15 @@ export default function RulesPage() {
     setConflictDetecting(true)
     try {
       const resp = await rulesApi.detectConflicts(currentId)
+      setConflictIncomplete(resp.detection_incomplete ? resp : null)
+      if (resp.detection_incomplete) {
+        message.warning(
+          `冲突检测未完整完成（${resp.failed_groups}/${resp.total_groups} 组失败），` +
+          '未清除历史冲突与规则状态，请稍后重试',
+        )
+      }
       if (resp.total_conflicts === 0) {
-        message.success('未检测到语义冲突')
+        if (!resp.detection_incomplete) message.success('未检测到语义冲突')
         await load()
         return
       }
@@ -535,6 +578,133 @@ export default function RulesPage() {
     setDefectDrawerOpen(true)
   }
 
+  /** 场景键 → 中文名（未登记时回退显示原键）
+   *
+   * 场景包在库里的名字带「场景包：」前缀（Skill 列表里需要这个前缀来区分内置包），
+   * 但作为"业务场景"选项展示时要剥掉，否则会出现"业务场景：场景包：xxx"的重复读法。
+   */
+  const scenarioLabel = (key?: string | null) => {
+    if (!key) return ''
+    const raw = scenarios.find((sc) => sc.key === key)?.name || key
+    return raw.replace(/^场景包：/, '')
+  }
+
+  /** 导入弹窗：本次真正生效的装配（出厂场景 / 自定义场景两条互斥通道）。
+   *
+   * 与后端 import_rules_with_skills 一一对应：
+   * - 未勾选 Skill → 出厂场景：系统预设（通用解析契约）+ 本次场景的场景包 + 自定义 Skill；
+   * - 勾选 Skill   → 自定义场景：系统预设 + 勾选的 Skill，**不加载场景包**。
+   * 这里把结果摊开，避免两个下拉"选项看起来重复"造成的误判。
+   */
+  const importComposition = computeImportSkillComposition({
+    skills: allSkills,
+    importScenario,
+    ruleSetScenario: currentRuleSet?.scenario,
+    useDefaultSkill: currentRuleSet?.use_default_skill,
+    selectedSkillIds: importSkillIds,
+    knownScenarios: scenarios.map((sc) => sc.key),
+  })
+
+  const renderImportComposition = () => {
+    const c = importComposition
+    const chain = c.chain.map((s) => s.name).join(' → ')
+    const customMode = c.mode === 'custom'
+    return (
+      <Alert
+        type={!customMode && !c.scenarioRegistered ? 'warning' : 'info'}
+        showIcon
+        style={{ marginBottom: 12 }}
+        message={
+          <span style={{ fontSize: 12 }}>
+            本次生效装配（
+            {customMode ? '自定义场景' : `出厂场景：${scenarioLabel(c.effectiveScenario)}`}）：
+            {chain || '（无）'}
+            {customMode && c.extras.length === 0 && '（未勾选任何自定义 Skill）'}
+          </span>
+        }
+        description={
+          <span style={{ fontSize: 12 }}>
+            {customMode
+              ? '已切换到自定义场景：不再加载出厂场景知识包，生效配置完全由勾选的 Skill 决定；清空 Skill 选择即回到出厂场景。'
+              : '未勾选 Skill：使用出厂场景装配。勾选下面的 Skill 会切换到「自定义场景」，届时场景下拉将被禁用。'}
+            {!customMode && !c.scenarioRegistered &&
+              ` 场景「${c.effectiveScenario}」未登记场景知识包，本次仅通用解析契约生效。`}
+            {c.redundant.length > 0 &&
+              ` 已选中的 ${c.redundant.map((s) => s.name).join('、')} 属于系统预设，不会重复合并。`}
+          </span>
+        }
+      />
+    )
+  }
+
+  /** Skill 下拉项：讲清每个选项什么时候生效（系统预设 vs 勾选后生效） */
+  const skillOptionLabel = (s: CompositionSkill) =>
+    `${s.name}${s.is_builtin ? ' (内置)' : ''}${
+      isPresetSkill(s) ? ' · 系统预设，始终生效' : ' · 勾选后生效'
+    }`
+  /** 业务场景下拉：出厂场景知识包（勾了 Skill 即进入自定义场景通道，本下拉被禁用） */
+  const renderScenarioSelect = () => {
+    const customMode = importComposition.mode === 'custom'
+    return (
+      <div style={{ marginBottom: 12 }}>
+        <Space style={{ width: '100%' }} align="start" wrap>
+          <Select
+            style={{ minWidth: 280 }}
+            placeholder="业务场景：由导入文件声明（推荐）"
+            value={importScenario}
+            onChange={setImportScenario}
+            options={[
+              { value: '', label: '业务场景：由导入文件声明，否则用规则集默认' },
+              ...scenarios.map((sc) => ({
+                value: sc.key,
+                label: `业务场景：${scenarioLabel(sc.key) || sc.name}（${sc.key}）`,
+              })),
+            ]}
+            optionFilterProp="label"
+            showSearch
+            disabled={importing || customMode}
+          />
+          <Text type="secondary" style={{ fontSize: 12, lineHeight: '32px' }}>
+            {customMode
+              ? '已选择自定义 Skill：本次不加载出厂场景包'
+              : currentRuleSet?.scenario
+                ? `规则集默认场景：${scenarioLabel(currentRuleSet.scenario)}`
+                : '规则集未声明默认场景（将兜底 trade）'}
+          </Text>
+        </Space>
+      </div>
+    )
+  }
+
+  /** 自定义场景下拉：只列自定义 Skill + 系统预设，不含出厂场景包 */
+  const renderSkillSelect = () => (
+    <div style={{ marginBottom: 12 }}>
+      <Space style={{ width: '100%' }} align="start">
+        <Select
+          mode="multiple"
+          style={{ minWidth: 360 }}
+          placeholder="自定义场景 Skill（留空 = 使用上面的出厂场景）"
+          value={importSkillIds}
+          onChange={setImportSkillIds}
+          options={importComposition.selectable.map((s) => ({
+            value: s.id,
+            label: skillOptionLabel(s),
+          }))}
+          allowClear
+          disabled={importing}
+        />
+        {allSkills.length > 0 && (
+          <Text type="secondary" style={{ fontSize: 12, lineHeight: '32px' }}>
+            已选 {importSkillIds.length} 个
+            {allSkills.some((s) => !s.enabled)
+              ? `（${allSkills.filter((s) => !s.enabled).length} 个已停用，不参与导入）`
+              : ''}
+          </Text>
+        )}
+      </Space>
+    </div>
+  )
+
   const openImport = async () => {
     if (!canManageRules) return
     setImportText('')
@@ -545,12 +715,14 @@ export default function RulesPage() {
     setImportError(null)
     setImportMode('text')
     setImportSkillIds([])
-    // 加载可用 Skill
+    setImportScenario(undefined)
+    // 加载可用 Skill 与业务场景清单
+    ruleSetsApi.scenarios().then(setScenarios).catch(() => setScenarios([]))
     if (currentId) {
       try {
         const { skillsApi } = await import('../api/client')
         const skills = await skillsApi.list(currentId)
-        setAllSkills(skills.map((s) => ({ id: s.id, name: s.name, is_builtin: s.is_builtin, enabled: s.enabled })))
+        setAllSkills(skills.map((s) => ({ id: s.id, name: s.name, is_builtin: s.is_builtin, enabled: s.enabled, scenario: s.scenario ?? null })))
       } catch {
         // 加载 Skill 失败不阻塞导入
       }
@@ -568,12 +740,25 @@ export default function RulesPage() {
     setImportStage('llm')
     setImportError(null)
     try {
-      const resp = await rulesApi.importBatch(currentId!, importText, importSkillIds.length ? importSkillIds : undefined)
+      const resp = await rulesApi.importBatch(
+        currentId!,
+        importText,
+        importSkillIds.length ? importSkillIds : undefined,
+        importScenario,
+      )
       setImportResult(resp)
       if (resp.imported > 0) {
         message.success(`导入完成：成功 ${resp.imported} 条，跳过 ${resp.skipped} 条`)
         await load()
         // 检测新的文档类型
+        const newCats = resp.new_check_categories
+        if (newCats && newCats.length > 0) {
+          message.warning(
+            `发现 ${newCats.length} 个新检查项（${newCats.join('、')}），已登记为待确认；` +
+            '在「检查项」页确认后才会独立成列，若只是已有检查项的别名请用「合并」',
+            8,
+          )
+        }
         const newTypes = resp.new_doc_types
         if (newTypes && newTypes.length > 0) {
           message.info(
@@ -612,6 +797,7 @@ export default function RulesPage() {
         currentId!,
         importFile,
         importSkillIds.length ? importSkillIds : undefined,
+        importScenario,
       )
       taskId = task.task_id
       setImportStage('llm')
@@ -648,8 +834,17 @@ export default function RulesPage() {
         if (task.result && task.result.imported > 0) {
           message.success(`导入完成：成功 ${task.result.imported} 条，跳过 ${task.result.skipped} 条`)
           await load()
+          // 新检查项：默认待确认，需在「检查项」页处理
+          const newCats = task.result?.new_check_categories
+          if (newCats && newCats.length > 0) {
+            message.warning(
+              `发现 ${newCats.length} 个新检查项（${newCats.join('、')}），已登记为待确认；` +
+              '在「检查项」页确认后才会独立成列，若只是已有检查项的别名请用「合并」',
+              8,
+            )
+          }
           // 检测新的文档类型
-    const newTypes = task.result?.new_doc_types
+          const newTypes = task.result?.new_doc_types
           if (newTypes && newTypes.length > 0) {
             message.info(
               `发现 ${newTypes.length} 个新的文档类型，可在「文档类型」页面查看并补充样例`,
@@ -911,8 +1106,31 @@ export default function RulesPage() {
       render: (v: string | null) => v || <Text type="secondary">整批/全部</Text>,
     },
     {
-      title: '检查项', dataIndex: 'check_category', key: 'check_category', width: 120,
-      render: (v: string | null) => v || <Text type="secondary">未分类</Text>,
+      title: '检查项', dataIndex: 'check_category', key: 'check_category', width: 140,
+      render: (v: string | null, row: Rule) => {
+        if (!v) return <Text type="secondary">未分类</Text>
+        if (confirmedCheckCategories.includes(v)) return <span>{v}</span>
+        // 未确认的检查项：不单独成列，这里明确提示它还没被确认
+        return (
+          <Tooltip title={`检查项「${v}」尚未确认（在「检查项」页确认后才会独立成列）`}>
+            <span>
+              <Text type="secondary">未分类</Text>{' '}
+              <Tag color="orange" style={{ fontSize: 11 }}>待确认：{v}</Tag>
+            </span>
+          </Tooltip>
+        )
+      },
+    },
+    {
+      title: '场景', dataIndex: 'scenario', key: 'scenario', width: 110,
+      render: (v: string | null | undefined) =>
+        v ? (
+          <Tooltip title="导入时使用的场景知识包；可按场景筛选规则与重建图谱">
+            <Tag color="geekblue">{scenarioLabel(v)}</Tag>
+          </Tooltip>
+        ) : (
+          <Text type="secondary">未声明</Text>
+        ),
     },
     { title: '规则文本', dataIndex: 'rule_text', key: 'rule_text', ellipsis: true },
     {
@@ -1404,32 +1622,9 @@ export default function RulesPage() {
                       </span>
                     }
                   />
-                  <div style={{ marginBottom: 12 }}>
-                    <Space style={{ width: '100%' }} align="start">
-                      <Select
-                        mode="multiple"
-                        style={{ minWidth: 360 }}
-                        placeholder="选择应用的 Skill（不选则使用默认配置）"
-                        value={importSkillIds}
-                        onChange={setImportSkillIds}
-                        options={allSkills
-                          .filter((s) => s.enabled)
-                          .map((s) => ({
-                            value: s.id,
-                            label: `${s.name}${s.is_builtin ? ' (内置)' : ''}`,
-                          }))}
-                        allowClear
-                      />
-                      {allSkills.length > 0 && (
-                        <Text type="secondary" style={{ fontSize: 12, lineHeight: '32px' }}>
-                          已选 {importSkillIds.length} 个
-                          {allSkills.some((s) => !s.enabled)
-                            ? `（${allSkills.filter((s) => !s.enabled).length} 个已停用，不参与导入）`
-                            : ''}
-                        </Text>
-                      )}
-                    </Space>
-                  </div>
+                  {renderScenarioSelect()}
+                  {renderSkillSelect()}
+                  {renderImportComposition()}
                   <Input.TextArea
                     rows={10}
                     value={importText}
@@ -1449,6 +1644,13 @@ export default function RulesPage() {
                     <div style={{ marginTop: 12 }}>
                       <Space>
                         <Tag color="blue">解析 {importResult.total} 条</Tag>
+                        {importResult.scenario ? (
+                          <Tag color="geekblue">场景：{scenarioLabel(importResult.scenario)}</Tag>
+                        ) : (importResult.applied_skills?.length ?? 0) > 0 ? (
+                          <Tooltip title={importResult.applied_skills!.join(' → ')}>
+                            <Tag color="geekblue">自定义场景装配：{importResult.applied_skills!.length} 个 Skill</Tag>
+                          </Tooltip>
+                        ) : null}
                         <Tag color="green">成功 {importResult.imported} 条</Tag>
                         {importResult.skipped > 0 && <Tag color="orange">跳过 {importResult.skipped} 条</Tag>}
                       </Space>
@@ -1519,28 +1721,9 @@ export default function RulesPage() {
                       </span>
                     }
                   />
-                  <div style={{ marginBottom: 12 }}>
-                    <Space style={{ width: '100%' }} align="start">
-                      <Select
-                        mode="multiple"
-                        style={{ minWidth: 360 }}
-                        placeholder="选择应用的 Skill（不选则使用默认配置）"
-                        value={importSkillIds}
-                        onChange={setImportSkillIds}
-                        options={allSkills.map((s) => ({
-                          value: s.id,
-                          label: `${s.name}${s.is_builtin ? ' (内置)' : ''}`,
-                        }))}
-                        allowClear
-                        disabled={importing}
-                      />
-                      {allSkills.length > 0 && (
-                        <Text type="secondary" style={{ fontSize: 12, lineHeight: '32px' }}>
-                          已选 {importSkillIds.length} 个
-                        </Text>
-                      )}
-                </Space>
-              </div>
+                  {renderScenarioSelect()}
+                  {renderSkillSelect()}
+                  {renderImportComposition()}
               {importTask && importTask.status !== 'done' && importTask.status !== 'error' && (
                 <Card size="small" style={{ marginTop: 12 }} title={<Text strong>{importTask.message || '正在处理…'}</Text>}>
                   <Progress
@@ -1570,6 +1753,13 @@ export default function RulesPage() {
                     <div style={{ marginTop: 12 }}>
                       <Space wrap>
                         <Tag color="blue">解析 {fileImportResult.total} 条</Tag>
+                        {fileImportResult.scenario ? (
+                          <Tag color="geekblue">场景：{scenarioLabel(fileImportResult.scenario)}</Tag>
+                        ) : (fileImportResult.applied_skills?.length ?? 0) > 0 ? (
+                          <Tooltip title={fileImportResult.applied_skills!.join(' → ')}>
+                            <Tag color="geekblue">自定义场景装配：{fileImportResult.applied_skills!.length} 个 Skill</Tag>
+                          </Tooltip>
+                        ) : null}
                         <Tag color="green">成功 {fileImportResult.imported} 条</Tag>
                         {fileImportResult.skipped > 0 && <Tag color="orange">跳过 {fileImportResult.skipped} 条</Tag>}
                         {typeof fileImportResult.conflict_detected === 'number' && fileImportResult.conflict_detected > 0 && (
@@ -1639,6 +1829,24 @@ export default function RulesPage() {
         footer={<Button onClick={() => setConflictModalOpen(false)}>关闭</Button>}
         width={800}
       >
+        {conflictIncomplete && (
+          <Alert
+            type="warning"
+            showIcon
+            style={{ marginBottom: 12 }}
+            message={`冲突检测未完整完成：${conflictIncomplete.failed_groups}/${conflictIncomplete.total_groups} 组失败`}
+            description={
+              <div style={{ fontSize: 12 }}>
+                未完成分组的既有冲突与规则状态保持不变（不会因为"本次没检出"而被清除或自动启用），请稍后重试检测。
+                {(conflictIncomplete.warnings?.length ?? 0) > 0 && (
+                  <ul style={{ margin: '6px 0 0', paddingLeft: 20 }}>
+                    {conflictIncomplete.warnings.map((w, i) => <li key={i}>{w}</li>)}
+                  </ul>
+                )}
+              </div>
+            }
+          />
+        )}
         {conflictData.map((group, gi) => {
           // 查找冲突规则在表格里的行 key
           const ruleRows = group.rules.map((r) => r.id)
@@ -1722,6 +1930,24 @@ export default function RulesPage() {
                   label: `冲突（${openDefectCounts.conflict}）`,
                   children: (
                     <div>
+                      {conflictIncomplete && (
+                        <Alert
+                          type="warning"
+                          showIcon
+                          style={{ marginBottom: 12 }}
+                          message={`冲突检测未完整完成：${conflictIncomplete.failed_groups}/${conflictIncomplete.total_groups} 组失败`}
+                          description={
+                            <div style={{ fontSize: 12 }}>
+                              未完成分组的既有冲突与规则状态保持不变（不会因为"本次没检出"而被清除或自动启用），请稍后重试检测。
+                              {(conflictIncomplete.warnings?.length ?? 0) > 0 && (
+                                <ul style={{ margin: '6px 0 0', paddingLeft: 20 }}>
+                                  {conflictIncomplete.warnings.map((w, i) => <li key={i}>{w}</li>)}
+                                </ul>
+                              )}
+                            </div>
+                          }
+                        />
+                      )}
                       {conflictDetecting ? (
                         <div style={{ textAlign: 'center', padding: 40 }}>
                           <Spin tip="正在检测语义冲突..."><div style={{ padding: 20 }} /></Spin>

@@ -204,6 +204,8 @@ export interface RuleSet {
   doc_types: string[]
   check_categories: string[]
   use_default_skill: boolean
+  /** 默认业务场景键（对应内置场景知识包）；null = 未声明 */
+  scenario: string | null
   is_default: boolean
   created_at: string
   updated_at: string
@@ -214,6 +216,7 @@ export interface RuleSetCreate {
   description?: string
   doc_types?: string[]
   use_default_skill?: boolean
+  scenario?: string | null
   is_default?: boolean
 }
 
@@ -222,7 +225,16 @@ export interface RuleSetUpdate {
   description?: string
   doc_types?: string[]
   use_default_skill?: boolean
+  scenario?: string | null
   is_default?: boolean
+}
+
+/** 可选业务场景（内置场景知识包，新增 YAML 包后自动出现） */
+export interface RuleScenarioOption {
+  key: string
+  name: string
+  description: string
+  priority: number
 }
 
 export interface ContractBrief {
@@ -324,6 +336,12 @@ export interface ConflictDetectionResponse {
   total_conflicts: number
   affected_rules: number
   conflicts: ConflictItem[]
+  /** 检测完成度：任一分组失败时为 true，此时不会清除历史冲突 */
+  total_groups: number
+  failed_groups: number
+  detection_incomplete: boolean
+  cleared_rules: number
+  warnings: string[]
 }
 
 export interface Rule {
@@ -332,6 +350,8 @@ export interface Rule {
   rule_code: string
   doc_type: string | null
   check_category: string | null
+  /** 业务场景标签：导入时写入的场景知识包键；null = 未声明场景 */
+  scenario?: string | null
   rule_text: string
   tolerance: Record<string, unknown>
   enabled: boolean
@@ -371,7 +391,13 @@ export interface RuleImportResponse {
   conflict_report: ConflictReport | null
   conflict_detected?: number
   new_doc_types?: string[]
+  /** 本次导入新登记的检查项（默认待确认，需在「检查项」页处理） */
+  new_check_categories?: string[]
   import_warnings?: string[]
+  /** 本次解析实际使用的业务场景键；自定义场景通道（勾了 Skill）下为 null */
+  scenario?: string | null
+  /** 本次实际参与解析的 Skill 名称（按合并顺序，含系统预设） */
+  applied_skills?: string[] | null
   source_coverage?: {
     expected_rows: number
     covered_rows: number
@@ -666,6 +692,8 @@ export interface RuleParseSkill {
   name: string
   description: string | null
   is_builtin: boolean
+  /** 场景键：null = 通用解析契约（所有场景生效）；非 null = 仅该场景生效 */
+  scenario?: string | null
   enabled: boolean
   priority: number
   content: RuleParseSkillContent
@@ -842,4 +870,37 @@ export interface BuildInfo {
   built_at: string | null
   /** 版本信息来源：build-args | runtime-git | version-file | unknown */
   source: string
+}
+
+/** 检查项（检查意图）注册表条目 */
+export interface CheckIntentItem {
+  id: string
+  name: string
+  description: string | null
+  aliases: string[]
+  sort_order: number
+  /** seed=内置 / rule_import=规则导入发现 / manual=人工创建 */
+  source: string
+  /** active=已确认 / pending_review=待确认 / rejected=已合并或弃用 */
+  status: string
+  /** 被多少条规则使用 */
+  rule_count: number
+  created_at?: string | null
+  updated_at?: string | null
+}
+
+export interface CheckIntentCreate {
+  name: string
+  description?: string | null
+  aliases?: string[]
+  sort_order?: number
+  status?: string
+}
+
+export interface CheckIntentUpdate {
+  name?: string
+  description?: string | null
+  aliases?: string[]
+  sort_order?: number
+  status?: string
 }

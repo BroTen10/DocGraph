@@ -4,6 +4,7 @@ const TENANT_MENU_KEYS = [
   '/upload',
   '/rules',
   '/doc-types',
+  '/check-intents',
   '/graph',
   '/review',
   '/results',
