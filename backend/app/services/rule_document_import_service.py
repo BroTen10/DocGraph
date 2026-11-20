@@ -81,6 +81,15 @@ _PRIMARY_RULE_HEADER_HINTS = (
     "内容",
     "要求",
 )
+# 规则列词表：判断表头是否“像规则表”，用于兜底解析被表名误判的工作表
+_RULE_COLUMN_HINTS = tuple(dict.fromkeys(_PRIMARY_RULE_HEADER_HINTS + (
+    "规则",
+    "检查",
+    "校验",
+    "审查",
+)))
+# 表头前最多向后看多少个非空行（标题/说明段落不会太长）
+_HEADER_PREAMBLE_LOOKAHEAD = 10
 
 
 @dataclass
@@ -352,18 +361,52 @@ def _expand_sheet_merged_cells(sheet) -> tuple[list[list[Any]], dict[tuple[int, 
     return grid, merged_from
 
 
+def _count_non_empty_cells(row: list[Any]) -> int:
+    return sum(1 for cell in row if _cell_text(cell))
+
+
+def _skip_preamble_rows(grid: list[list[Any]], non_empty_rows: list[int]) -> int:
+    """跳过表头之前的标题/说明行，返回表头行下标（0-based）。
+
+    规则表常见「大标题 + 若干行说明文字 + 真正的表头」的排版（客户常把规则矩阵
+    直接贴在名为「说明」的工作表里）。表头至少要有两列，因此首个非空行只有
+    一个非空单元格时不可能是表头，需要向后找首个多列非空行。
+    """
+    first_row = non_empty_rows[0]
+    if _count_non_empty_cells(grid[first_row]) >= 2:
+        return first_row
+
+    for row_idx in non_empty_rows[1:_HEADER_PREAMBLE_LOOKAHEAD]:
+        if _count_non_empty_cells(grid[row_idx]) >= 2:
+            return row_idx
+    return first_row
+
+
+def _looks_like_rule_table(grid: list[list[Any]], header_rows: list[int]) -> bool:
+    """判断表头是否像规则表：至少两列，且存在命中规则列词表的列名。"""
+    for row_idx in header_rows:
+        filled = [_cell_text(cell) for cell in grid[row_idx]]
+        filled = [cell for cell in filled if cell]
+        if len(filled) < 2:
+            continue
+        if any(any(hint in cell for hint in _RULE_COLUMN_HINTS) for cell in filled):
+            return True
+    return False
+
+
 def _detect_header_rows(sheet, grid: list[list[Any]]) -> list[int]:
     """识别表头行（0-based）。
 
-    首行非空行视为表头；若首行存在横向合并且下一行非空，则把下一行视为
-    多级表头的子表头。规则表绝大多数是单行表头，这里是保守启发式。
+    首个多列非空行视为表头（允许前面有标题/说明段落）；若该行存在横向合并且
+    下一行非空，则把下一行视为多级表头的子表头。规则表绝大多数是单行表头，
+    这里是保守启发式。
     """
     non_empty_rows = [idx for idx, row in enumerate(grid) if _row_has_content(row)]
     if not non_empty_rows:
         return []
 
-    header_rows = [non_empty_rows[0]]
-    first_row = non_empty_rows[0]
+    first_row = _skip_preamble_rows(grid, non_empty_rows)
+    header_rows = [first_row]
     for merged_range in sheet.merged_cells.ranges:
         if (
             merged_range.min_row - 1 == first_row
@@ -423,10 +466,90 @@ def _is_rule_candidate_row(headers: list[str], values: dict[str, str]) -> bool:
     return any(_cell_text(value) for value in values.values())
 
 
+def _collect_sheet_rules(
+    sheet,
+    parts: list[str],
+    source_rows: list[dict[str, Any]],
+    sheets_meta: list[dict[str, Any]],
+    *,
+    require_rule_like_table: bool = False,
+) -> int:
+    """解析单个工作表，把识别到的规则行追加到 parts / source_rows。
+
+    Args:
+        require_rule_like_table: 兜底解析说明类工作表时置 True，只有表头确实
+            像规则表（多列 + 命中规则列词表）才解析，避免把「填写说明」这类
+            单列文字当成规则数据。
+
+    Returns:
+        本表识别到的规则数据行数。
+    """
+    grid, merged_from = _expand_sheet_merged_cells(sheet)
+    if not grid:
+        return 0
+
+    header_rows = _detect_header_rows(sheet, grid)
+    if not header_rows:
+        return 0
+    if require_rule_like_table and not _looks_like_rule_table(grid, header_rows):
+        return 0
+
+    headers = _build_headers(grid, header_rows)
+    data_start = max(header_rows) + 1
+    lines: list[str] = []
+    sheet_rows: list[dict[str, Any]] = []
+
+    for row_idx in range(data_start, len(grid)):
+        row = grid[row_idx]
+        if not _row_has_content(row):
+            continue
+
+        values: dict[str, str] = {}
+        row_merged_from: dict[str, str] = {}
+        for col_idx, header in enumerate(headers):
+            value = _cell_text(row[col_idx]) if col_idx < len(row) else ""
+            values[header] = value
+            anchor = merged_from.get((row_idx + 1, col_idx + 1))
+            if anchor:
+                row_merged_from[header] = anchor
+
+        if not _is_rule_candidate_row(headers, values):
+            continue
+
+        source_ref = f"{sheet.title}!{row_idx + 1}"
+        sheet_rows.append({
+            "source_ref": source_ref,
+            "sheet": sheet.title,
+            "row": row_idx + 1,
+            "values": values,
+            "merged_from": row_merged_from,
+        })
+        lines.append(
+            f"[SOURCE_ROW={source_ref}] "
+            + json.dumps(values, ensure_ascii=False, separators=(",", ":"))
+        )
+
+    if not sheet_rows:
+        return 0
+
+    parts.append(f"=== Sheet: {sheet.title} ===")
+    parts.extend(lines)
+    source_rows.extend(sheet_rows)
+    sheets_meta.append({
+        "sheet": sheet.title,
+        "header_rows": [row + 1 for row in header_rows],
+        "headers": headers,
+        "source_row_count": len(sheet_rows),
+    })
+    return len(sheet_rows)
+
+
 def _extract_excel_document(file_path: str) -> ExtractedRuleDocument:
     """从 Excel 提取结构化规则行，并展开合并单元格。
 
-    - 说明类工作表（填写说明/README/# 开头）不参与解析；
+    - 说明类工作表（填写说明/README/# 开头）默认不参与解析；但若整份文件在
+      规则表里找不到任何规则行，会把这些表按规则表兜底再解析一次（工作表名
+      叫「说明」但内容其实是规则矩阵的情况很常见）；
     - 元数据工作表（场景与术语）解析为文档级声明；
     - 其余工作表按规则表处理，逐行输出 [SOURCE_ROW=...]。
     """
@@ -440,12 +563,15 @@ def _extract_excel_document(file_path: str) -> ExtractedRuleDocument:
     sheets_meta: list[dict[str, Any]] = []
     declaration = _empty_declaration()
     skipped_sheets: list[str] = []
+    fallback_sheets: list[str] = []
 
     try:
+        skipped_candidates = []
         for sheet in wb.worksheets:
             kind = _sheet_kind(sheet.title)
             if kind == "skip":
                 skipped_sheets.append(sheet.title)
+                skipped_candidates.append(sheet)
                 continue
             if kind == "metadata":
                 rows = [
@@ -455,55 +581,30 @@ def _extract_excel_document(file_path: str) -> ExtractedRuleDocument:
                 _parse_declaration_rows(rows, declaration)
                 continue
 
-            grid, merged_from = _expand_sheet_merged_cells(sheet)
-            if not grid:
-                continue
+            _collect_sheet_rules(sheet, parts, source_rows, sheets_meta)
 
-            header_rows = _detect_header_rows(sheet, grid)
-            if not header_rows:
-                continue
-            headers = _build_headers(grid, header_rows)
-            data_start = max(header_rows) + 1
-            data_count = 0
-
-            parts.append(f"=== Sheet: {sheet.title} ===")
-            for row_idx in range(data_start, len(grid)):
-                row = grid[row_idx]
-                if not _row_has_content(row):
-                    continue
-
-                values: dict[str, str] = {}
-                row_merged_from: dict[str, str] = {}
-                for col_idx, header in enumerate(headers):
-                    value = _cell_text(row[col_idx]) if col_idx < len(row) else ""
-                    values[header] = value
-                    anchor = merged_from.get((row_idx + 1, col_idx + 1))
-                    if anchor:
-                        row_merged_from[header] = anchor
-
-                if not _is_rule_candidate_row(headers, values):
-                    continue
-
-                source_ref = f"{sheet.title}!{row_idx + 1}"
-                source_rows.append({
-                    "source_ref": source_ref,
-                    "sheet": sheet.title,
-                    "row": row_idx + 1,
-                    "values": values,
-                    "merged_from": row_merged_from,
-                })
-                parts.append(
-                    f"[SOURCE_ROW={source_ref}] "
-                    + json.dumps(values, ensure_ascii=False, separators=(",", ":"))
+        # 兜底：正规规则表一行都没提取到时，说明类工作表可能只是表名像说明
+        # （例如唯一的工作表就叫「说明」，内容却是规则矩阵）。按规则表再解析
+        # 一次，避免整份文件被误判成「文件内容为空」。
+        if not source_rows:
+            for sheet in skipped_candidates:
+                count = _collect_sheet_rules(
+                    sheet,
+                    parts,
+                    source_rows,
+                    sheets_meta,
+                    require_rule_like_table=True,
                 )
-                data_count += 1
-
-            sheets_meta.append({
-                "sheet": sheet.title,
-                "header_rows": [row + 1 for row in header_rows],
-                "headers": headers,
-                "source_row_count": data_count,
-            })
+                if not count:
+                    continue
+                if sheet.title in skipped_sheets:
+                    skipped_sheets.remove(sheet.title)
+                fallback_sheets.append(sheet.title)
+                logger.info(
+                    "工作表「%s」没有其它规则表可解析，已按规则表兜底解析 %d 行",
+                    sheet.title,
+                    count,
+                )
     finally:
         wb.close()
 
@@ -512,6 +613,12 @@ def _extract_excel_document(file_path: str) -> ExtractedRuleDocument:
             "Excel 未识别到规则数据行；请确认「规则清单」表头完整，且至少有一行的"
             "“规则正文/规则描述”列已填写"
         )
+        if skipped_sheets:
+            warnings.append(
+                "已跳过非规则工作表："
+                + "、".join(skipped_sheets)
+                + "（这些表没有可识别的规则表头；若规则数据在其中，请补全表头行）"
+            )
     if skipped_sheets:
         logger.info("已跳过非规则工作表: %s", "、".join(skipped_sheets))
 
@@ -523,6 +630,7 @@ def _extract_excel_document(file_path: str) -> ExtractedRuleDocument:
             "file_type": "excel",
             "sheets": sheets_meta,
             "skipped_sheets": skipped_sheets,
+            "fallback_sheets": fallback_sheets,
             "scenario": declaration.get("scenario"),
             "scene_label": declaration.get("scene_label") or "",
             "glossary": declaration.get("glossary") or [],

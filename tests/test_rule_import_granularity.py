@@ -227,6 +227,96 @@ class ExcelMergedCellTests(unittest.TestCase):
         self.assertEqual(values["业务条件/业务模式"], "代理")
 
 
+class ExcelPreambleAndFallbackSheetTests(unittest.TestCase):
+    """回归：规则矩阵贴在「说明」表 / 表头前有标题说明段落时不得判定为空文件。"""
+
+    def _write_workbook(self, sheets) -> str:
+        """sheets: list of (title, rows)。"""
+        fd, path = tempfile.mkstemp(suffix=".xlsx")
+        os.close(fd)
+        wb = Workbook()
+        wb.remove(wb.active)
+        for title, rows in sheets:
+            ws = wb.create_sheet(title=title)
+            for row in rows:
+                ws.append(row)
+        wb.save(path)
+        wb.close()
+        return path
+
+    # 标题/说明段落（单列）+ 真正的表头行，是客户文件最常见的排版
+    _PREAMBLE_ROWS = [
+        ["抽检合同（合同号）清单以附件形式入系统，已知需要校验的合同是哪些"],
+        ["校验合同资料文件先用清单里的合同号匹配，确保抽取合同有提供资料"],
+        ["贸易类型", "过程文件", "强控是否必备", "不看单据内容，单据本身基础判断"],
+        ["出口", "代理协议", "是", "需为双方回签用印版本"],
+        ["出口", "出口报关单", "是", "需有报关行用印"],
+    ]
+
+    def test_only_sheet_named_instructions_is_parsed_as_rules(self) -> None:
+        """唯一的工作表名叫「说明」但内容是规则矩阵时，必须兜底解析出来。"""
+        path = self._write_workbook([("说明", self._PREAMBLE_ROWS)])
+        try:
+            document = extract_document_from_file(path, "贸易合同过程文件校验说明.xlsx")
+        finally:
+            os.unlink(path)
+
+        # 三行说明段落不是规则行，只有两行规则数据被提取
+        self.assertEqual(len(document.source_rows), 2)
+        self.assertEqual([row["row"] for row in document.source_rows], [4, 5])
+        self.assertEqual(document.metadata["sheets"][0]["header_rows"], [3])
+        self.assertEqual(document.metadata["skipped_sheets"], [])
+        self.assertEqual(document.metadata["fallback_sheets"], ["说明"])
+        self.assertEqual(document.warnings, [])
+        self.assertIn("[SOURCE_ROW=说明!4]", document.text)
+        values = document.source_rows[1]["values"]
+        self.assertEqual(values["过程文件"], "出口报关单")
+        self.assertEqual(values["不看单据内容，单据本身基础判断"], "需有报关行用印")
+
+    def test_preamble_rows_are_skipped_when_rules_sheet_has_title(self) -> None:
+        """规则表里有标题行时，表头要落在真正的表头行上。"""
+        path = self._write_workbook([("规则清单", self._PREAMBLE_ROWS)])
+        try:
+            document = extract_document_from_file(path, "rules.xlsx")
+        finally:
+            os.unlink(path)
+
+        self.assertEqual(len(document.source_rows), 2)
+        headers = list(document.source_rows[0]["values"].keys())
+        self.assertEqual(headers[0], "贸易类型")
+        self.assertNotIn("列2", headers)
+
+    def test_single_column_instruction_sheet_is_not_parsed_as_rules(self) -> None:
+        """单列「填写说明」没有可识别表头，仍应报空文件而不是产出垃圾规则。"""
+        path = self._write_workbook([
+            ("说明", [["规则描述文档模板 · 填写说明"], ["一、先看这里"], ["每条规则一行"]]),
+        ])
+        try:
+            document = extract_document_from_file(path, "rules.xlsx")
+        finally:
+            os.unlink(path)
+
+        self.assertEqual(document.source_rows, [])
+        self.assertEqual(document.text, "")
+        self.assertEqual(document.metadata["skipped_sheets"], ["说明"])
+        self.assertEqual(document.metadata["fallback_sheets"], [])
+
+    def test_instruction_sheet_is_skipped_when_rules_sheet_exists(self) -> None:
+        """存在真正的规则表时，说明表仍按原逻辑跳过。"""
+        path = self._write_workbook([
+            ("填写说明", [["填写要求"], ["每条规则一行"]]),
+            ("规则清单", [["规则编号", "规则正文"], ["R-001", "发票金额应等于报销单金额"]]),
+        ])
+        try:
+            document = extract_document_from_file(path, "rules.xlsx")
+        finally:
+            os.unlink(path)
+
+        self.assertEqual(len(document.source_rows), 1)
+        self.assertEqual(document.metadata["skipped_sheets"], ["填写说明"])
+        self.assertEqual(document.metadata["fallback_sheets"], [])
+
+
 class DedupSemanticBoundaryTests(unittest.TestCase):
     @staticmethod
     def _rule(text: str, scope: dict | None = None, structure: dict | None = None):
