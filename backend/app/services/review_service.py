@@ -59,10 +59,13 @@ from .ocr_service import (
 from .doc_normalizer import normalize_document_fields, normalize_party_name
 from .settings_service import get_setting
 from .suggestion_service import build_suggestion_llm
-from . import result_meta
+from . import correction_ledger, result_meta
 from ..tenant_scope import tenant_get
 
 logger = logging.getLogger(__name__)
+
+# 判定结论取值（与 review_judge 一致）：人工纠正只能落到这三态
+_VERDICTS = ("pass", "fail", "unverifiable")
 
 
 # ============ 中断任务回收（审查任务同样跑在进程内后台线程） ============
@@ -1324,33 +1327,98 @@ def update_result_status(
     db: Session,
     tenant_id: uuid.UUID,
     result_id: uuid.UUID,
-    status: str,
+    status: Optional[str] = None,
     note: Optional[str] = None,
+    *,
+    verdict: Optional[str] = None,
     by_user_id: uuid.UUID | None = None,
     by_display_name: str | None = None,
 ) -> ReviewResult:
-    """问题状态流转（9-1，C1）：open/confirmed/fixed/closed + 审计历史。
+    """问题状态流转（9-1，C1）+ 人工纠正判定结论。
+
+    - status：open/confirmed/fixed/closed 状态机流转，带审计历史；
+    - verdict：人工纠正模型判错的结论（pass/fail/unverifiable）。纠正会留痕
+      （detail.human_override）、清掉"需人工确认"标记，并写进人工修正账本
+      （scope=review_judge），由判定提示词回灌给模型——同一类判错不再找人第二次。
+
     Raises:
-        ValueError: 结果不存在或状态流转非法。
+        ValueError: 结果不存在、状态流转非法，或未给出任何要改的内容。
     """
     result = tenant_get(db, ReviewResult, result_id, tenant_id)
     if result is None:
         raise LookupError(f"审查结果不存在: {result_id}")
-    if not result_meta.can_transition(result.status, status):
-        raise ValueError(f"非法状态流转: {result.status} → {status}")
-    history = list(result.status_history or [])
-    history.append(
-        {
-            "status": status,
-            "at": datetime.now().isoformat(timespec="seconds"),
-            "by": str(by_user_id) if by_user_id else "system",
-            "by_name": by_display_name,
-            "note": note,
-        }
-    )
-    result.status = status
-    result.status_history = history
+    if status is None and verdict is None:
+        raise ValueError("status 与 result 至少提供一个")
+
+    if status is not None:
+        if not result_meta.can_transition(result.status, status):
+            raise ValueError(f"非法状态流转: {result.status} → {status}")
+        history = list(result.status_history or [])
+        history.append(
+            {
+                "status": status,
+                "at": datetime.now().isoformat(timespec="seconds"),
+                "by": str(by_user_id) if by_user_id else "system",
+                "by_name": by_display_name,
+                "note": note,
+            }
+        )
+        result.status = status
+        result.status_history = history
+
+    if verdict is not None:
+        verdict = str(verdict).strip()
+        if verdict not in _VERDICTS:
+            raise ValueError(f"非法判定结论: {verdict}（应为 pass/fail/unverifiable）")
+        if verdict != result.result:
+            old_result = result.result
+            detail = dict(result.detail or {})
+            detail["human_override"] = {
+                "from": old_result,
+                "to": verdict,
+                "reason": note or "",
+                "at": datetime.now().isoformat(timespec="seconds"),
+                "by": str(by_user_id) if by_user_id else "system",
+                "by_name": by_display_name,
+            }
+            # 人工已经给出结论，就不必再挂着"需人工确认"
+            detail.pop("manual_review_required", None)
+            detail.pop("manual_review_reason", None)
+            result.detail = detail
+            result.result = verdict
+            result.source = "human"
+            result.severity, result.deviation = result_meta.compute_severity(
+                verdict, result.check_category, detail
+            )
+            try:
+                correction_ledger.record_correction(
+                    db,
+                    tenant_id,
+                    scope="review_judge",
+                    field="result",
+                    before=old_result,
+                    after=verdict,
+                    target_type="review_result",
+                    target_id=result.id,
+                    doc_type=result.doc_type,
+                    context=_judge_correction_context(result),
+                    note=note,
+                    by_user_id=by_user_id,
+                )
+            except Exception:  # pragma: no cover - 记账失败不影响结论落库
+                logger.warning("判定纠正记账失败（不影响结论落库）", exc_info=True)
+
     db.add(result)
     db.commit()
     db.refresh(result)
     return result
+
+
+def _judge_correction_context(result: ReviewResult) -> str:
+    """人工判定纠正的上下文摘要（进修正账本，供判定提示词理解这条纠正）。"""
+    parts = []
+    if result.rule_text:
+        parts.append(f"规则：{result.rule_text}")
+    if result.issue_desc:
+        parts.append(f"模型原判：{result.issue_desc}")
+    return "；".join(parts)

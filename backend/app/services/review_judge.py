@@ -354,6 +354,30 @@ def verify_verdict(
 
 # ============ 主流程 ============
 
+def judge_system_prompt(db: Optional[Session], tenant_id: Optional[uuid.UUID], base_prompt: str) -> str:
+    """判定系统提示词 = 配置的提示词 + 人工纠正回灌。
+
+    人工纠正只作为**数据**注入（"人工把不通过纠正为通过：<规则摘要>"），
+    不在 Python 里为任何情形写死判定分支；账本读取失败时退回原提示词。
+    """
+    if db is None or tenant_id is None:
+        return base_prompt
+    try:
+        from .correction_ledger import judge_corrections_digest
+
+        digest = judge_corrections_digest(db, tenant_id)
+    except Exception:  # pragma: no cover - 账本异常不应阻断判定
+        logger.warning("读取人工判定纠正失败（不影响判定）", exc_info=True)
+        return base_prompt
+    if not digest:
+        return base_prompt
+    return (
+        base_prompt
+        + "\n\n### 人工纠正过的判定（同类情形按人工结论判，不要重复出错）\n"
+        + digest
+    )
+
+
 def run_unified_judgement(
     db: Optional[Session],
     tenant_id: Optional[uuid.UUID],
@@ -425,7 +449,9 @@ def run_unified_judgement(
             logger.debug("统一判定进度回调失败", exc_info=True)
 
     payload_bundle = bundle_payload(bundle)
-    system_prompt = get_prompt(db, tenant_id, "review.judge_system")
+    system_prompt = judge_system_prompt(
+        db, tenant_id, get_prompt(db, tenant_id, "review.judge_system")
+    )
     _report_progress()
 
     pending = list(send)

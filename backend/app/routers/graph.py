@@ -297,6 +297,9 @@ def confirm_graph(
             ctx.tenant.id,
             payload.graph_id,
             payload.edits,
+            db=db,
+            rule_set_id=snapshot.rule_set_id,
+            by_user_id=ctx.user.id,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

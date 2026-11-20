@@ -888,10 +888,22 @@ def apply_graph_edits(
     tenant_id: uuid.UUID,
     graph_id: str,
     edits: list[GraphEditOp],
+    *,
+    db: Optional[Session] = None,
+    rule_set_id: Optional[uuid.UUID] = None,
+    by_user_id: Optional[uuid.UUID] = None,
 ) -> GraphData:
-    """应用人工编辑（确认生效）。"""
+    """应用人工编辑（确认生效）。
+
+    图谱是**规则的派生视图**：只改 Neo4j 的编辑会在下一次重建时被覆盖掉。
+    因此当传入 ``db`` 时，边上的规则属性会**写回 PG 规则数据**，并把这次人工修正
+    记进修正账本（scope=graph_edit），供解析提示词回灌——人工改一次，模型学一次。
+    """
     neo4j = neo4j or get_neo4j_client()
     planned: list[tuple[GraphEditOp, dict]] = []
+    edge_rule_ids: dict[tuple[str, str], str] = {}
+    if db is not None:
+        edge_rule_ids = _edge_rule_ids(neo4j, graph_id, tenant_id)
     for op in edits:
         if op.op not in SUPPORTED_GRAPH_EDIT_OPS:
             raise ValueError(f"不支持的图谱编辑操作: {op.op}")
@@ -940,6 +952,23 @@ def apply_graph_edits(
                 op.target,
                 properties,
             )
+            if db is not None:
+                rule_code = edge_rule_ids.get((str(op.source), str(op.target)))
+                if rule_code:
+                    _write_back_rule_edit(
+                        db,
+                        tenant_id,
+                        rule_set_id,
+                        rule_code,
+                        properties,
+                        by_user_id=by_user_id,
+                    )
+                else:
+                    logger.warning(
+                        "图谱边 %s → %s 上没有 rule_id，编辑无法写回规则数据（重建会丢失）",
+                        op.source,
+                        op.target,
+                    )
         elif op.op == "delete_node" and op.node_name:
             neo4j.delete_node(graph_id, tenant_id, op.node_name)
         elif op.op == "delete_edge" and op.source and op.target:
@@ -949,7 +978,154 @@ def apply_graph_edits(
                 op.source,
                 op.target,
             )
+        if op.op in {"delete_node", "delete_edge"}:
+            logger.warning(
+                "图谱删除操作（%s）目前只作用于图谱，未投影到规则数据；重建后该规则会重新出现",
+                op.op,
+            )
     return get_graph(neo4j, tenant_id, graph_id)
+
+
+# ============ 图谱人工编辑 → 规则数据写回 ============
+# 图谱属性 → 规则字段路径（点号表示 structure 内的嵌套路径）。
+# 说明：`tolerance` 标量是从 structure.assertion.tolerance 派生的，写回会覆盖
+# 完整容差表，因此只写回 tolerance_params → rule.tolerance。
+_EDGE_PROP_TO_RULE_FIELD: dict[str, str] = {
+    "rule_text": "rule_text",
+    "doc_type": "doc_type",
+    "check_category": "check_category",
+    "tolerance_params": "tolerance",
+    "condition": "structure.condition",
+    "exceptions": "structure.exceptions",
+    "operator": "structure.assertion.operator",
+}
+# 明确不支持写回的边属性（派生/本体层属性）：编辑只留在图谱里，写日志告知
+_EDGE_PROPS_NOT_WRITTEN_BACK = frozenset(
+    {"layer", "low_confidence", "confidence", "aggregate", "currency", "unit", "role", "tolerance"}
+)
+
+
+def _edge_rule_ids(
+    neo4j: Neo4jClient, graph_id: str, tenant_id: uuid.UUID
+) -> dict[tuple[str, str], str]:
+    """读图建立 (source, target) → rule_id 索引，供编辑写回定位规则。"""
+    try:
+        data = neo4j.get_graph_data(graph_id, tenant_id)
+    except Exception:  # pragma: no cover - 读图失败不应阻断编辑生效
+        logger.warning("读取图谱失败，本次编辑不写回规则数据", exc_info=True)
+        return {}
+    index: dict[tuple[str, str], str] = {}
+    for edge in data.get("edges") or []:
+        props = edge.get("properties") or {}
+        rule_id = props.get("rule_id")
+        if rule_id:
+            index[(str(edge.get("source")), str(edge.get("target")))] = str(rule_id)
+    return index
+
+
+def _read_rule_field(rule: Rule, path: str) -> Any:
+    if path == "structure.assertion.operator":
+        return ((rule.structure or {}).get("assertion") or {}).get("operator")
+    if path.startswith("structure."):
+        return (rule.structure or {}).get(path.split(".", 1)[1])
+    return getattr(rule, path, None)
+
+
+def _apply_rule_field(rule: Rule, path: str, value: Any) -> None:
+    if path == "structure.assertion.operator":
+        structure = dict(rule.structure or {})
+        assertion = dict(structure.get("assertion") or {})
+        assertion["operator"] = value
+        structure["assertion"] = assertion
+        rule.structure = structure
+    elif path.startswith("structure."):
+        structure = dict(rule.structure or {})
+        structure[path.split(".", 1)[1]] = value
+        rule.structure = structure
+    else:
+        setattr(rule, path, value)
+
+
+def _write_back_rule_edit(
+    db: Session,
+    tenant_id: uuid.UUID,
+    rule_set_id: Optional[uuid.UUID],
+    rule_code: str,
+    properties: dict,
+    *,
+    by_user_id: Optional[uuid.UUID] = None,
+) -> list[str]:
+    """把图谱边上的规则属性写回 PG，并记入人工修正账本。返回写回的字段路径。"""
+    from . import correction_ledger
+    from .doc_normalizer import normalize_doc_type, normalize_structure
+
+    stmt = select(Rule).where(Rule.tenant_id == tenant_id)
+    if rule_set_id is not None:
+        stmt = stmt.where(Rule.rule_set_id == rule_set_id)
+    rule = next(
+        (r for r in db.execute(stmt).scalars().all() if r.rule_code == rule_code),
+        None,
+    )
+    if rule is None:
+        logger.warning(
+            "图谱编辑写回：规则集 %s 内未找到规则 %s，本次编辑仅存在于图谱", rule_set_id, rule_code
+        )
+        return []
+
+    written: list[str] = []
+    changes: dict[str, tuple[Any, Any]] = {}
+    for prop, value in properties.items():
+        field_path = _EDGE_PROP_TO_RULE_FIELD.get(prop)
+        if field_path is None:
+            continue
+        before = _read_rule_field(rule, field_path)
+        _apply_rule_field(rule, field_path, value)
+        after = _read_rule_field(rule, field_path)
+        changes[field_path] = (before, after)
+        written.append(field_path)
+
+    untouched = sorted(set(properties).intersection(_EDGE_PROPS_NOT_WRITTEN_BACK))
+    if untouched:
+        logger.info(
+            "图谱编辑写回：规则 %s 的派生属性 %s 不写回（由规则数据派生）",
+            rule_code,
+            ", ".join(untouched),
+        )
+    if not written:
+        return []
+
+    # 与规则编辑同口径归一：文件类型与结构里的字段名
+    if "doc_type" in changes:
+        rule.doc_type = (
+            normalize_doc_type(db, rule.doc_type, tenant_id=tenant_id) or rule.doc_type
+        )
+    if any(path.startswith("structure.") for path in written):
+        rule.structure = normalize_structure(
+            db, rule.structure, rule.doc_type, tenant_id=tenant_id
+        )
+    for path in written:
+        changes[path] = (changes[path][0], _read_rule_field(rule, path))
+
+    try:
+        correction_ledger.record_field_changes(
+            db,
+            tenant_id,
+            scope="graph_edit",
+            changes=changes,
+            rule_set_id=rule.rule_set_id,
+            target_type="rule",
+            target_id=rule.id,
+            doc_type=rule.doc_type,
+            context=rule.rule_text,
+            by_user_id=by_user_id,
+        )
+    except Exception:  # pragma: no cover - 记账失败不影响写回
+        logger.warning("图谱编辑记账失败（不影响写回）", exc_info=True)
+
+    db.commit()
+    db.refresh(rule)
+    logger.info("图谱编辑已写回规则 %s：%s", rule_code, ", ".join(written))
+    return written
 
 
 def backfill_graph_tenant_ownership(

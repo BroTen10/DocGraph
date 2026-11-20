@@ -85,8 +85,16 @@ class ReviewResultItem(BaseModel):
 
 
 class ReviewResultStatusUpdate(BaseModel):
-    """问题状态流转请求（open/confirmed/fixed/closed）。"""
-    status: str
+    """问题状态流转 / 人工纠正判定结论。
+
+    - ``status``：问题状态机流转（open/confirmed/fixed/closed）；
+    - ``result``：人工纠正判定结论（pass/fail/unverifiable）。纠正会写进人工修正账本，
+      供后续判定提示词回灌——同一类判错不必再找人一次。
+    两者至少提供一个。
+    """
+
+    status: str | None = None
+    result: str | None = None
     note: str | None = None
 
 

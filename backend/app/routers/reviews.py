@@ -160,8 +160,14 @@ def update_result_status(
     db: Session = Depends(get_db),
     ctx: AuthContext = Depends(require_permission("review.execute")),
 ) -> ReviewResultItem:
-    """问题状态流转（批次 9）：open/confirmed/fixed/closed，带审计历史。"""
+    """问题状态流转（批次 9）：open/confirmed/fixed/closed，带审计历史。
+
+    同时支持**人工纠正判定结论**（``result`` 字段）：模型判错时人工改判，
+    纠正会进人工修正账本并回灌判定提示词（详见 services/correction_ledger.py）。
+    """
     assert ctx.tenant is not None
+    if payload.status is None and payload.result is None:
+        raise HTTPException(status_code=400, detail="status 与 result 至少提供一个")
     try:
         result = review_service.update_result_status(
             db,
@@ -169,6 +175,7 @@ def update_result_status(
             result_id,
             payload.status,
             note=payload.note,
+            verdict=payload.result,
             by_user_id=ctx.user.id,
             by_display_name=ctx.user.name,
         )

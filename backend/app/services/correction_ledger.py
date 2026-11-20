@@ -44,6 +44,10 @@ REPLAY_FIELDS: tuple[str, ...] = (
     "scope",
     "intents",
     "rule_text",
+    # 图谱/规则结构里的人工修正（点号 = structure 内的路径）
+    "structure.condition",
+    "structure.exceptions",
+    "structure.assertion.operator",
 )
 
 _FIELD_LABELS = {
@@ -55,6 +59,16 @@ _FIELD_LABELS = {
     "scope": "适用范围",
     "intents": "检查意图",
     "rule_text": "规则文本",
+    "structure.condition": "规则条件",
+    "structure.exceptions": "规则例外",
+    "structure.assertion.operator": "比较算子",
+}
+
+# 判定结论的中文名（人工纠正清单用）
+_VERDICT_LABELS = {
+    "pass": "通过",
+    "fail": "不通过",
+    "unverifiable": "无法核验",
 }
 
 
@@ -186,7 +200,7 @@ def corrections_digest(
     max_chars: int = DEFAULT_DIGEST_MAX_CHARS,
     fields: Iterable[str] = REPLAY_FIELDS,
 ) -> str:
-    """生成给提示词用的紧凑修正清单（空字符串 = 没有可回灌的修正）。
+    """生成给"规则解析"提示词用的紧凑修正清单（空字符串 = 没有可回灌的修正）。
 
     排序：本规则集的修正优先 → 命中次数高 → 最近发生；按字符预算截断。
     """
@@ -216,6 +230,49 @@ def corrections_digest(
             f"- {prefix}{label}：把「{_short(row.before)}」改为「{_short(row.after)}」"
             f"（人工修正 {row.hit_count} 次）"
         )
+        if used + len(line) > max_chars:
+            break
+        lines.append(line)
+        used += len(line)
+    return "\n".join(lines)
+
+
+def judge_corrections_digest(
+    db: Session,
+    tenant_id: uuid.UUID,
+    *,
+    limit: int = 8,
+    max_chars: int = 900,
+    context_chars: int = 60,
+) -> str:
+    """生成给"统一判定"提示词用的人工纠正清单（空字符串 = 没有）。
+
+    一行一条："人工把「不通过」纠正为「通过」：<规则/问题摘要>（人工纠正 N 次）"。
+    模型据此理解本租户的口径，而不是让 Python 为每种情形写一条判定规则。
+    """
+    rows = db.execute(
+        select(LlmCorrection)
+        .where(
+            LlmCorrection.tenant_id == tenant_id,
+            LlmCorrection.scope == "review_judge",
+            LlmCorrection.field == "result",
+        )
+        .order_by(LlmCorrection.hit_count.desc(), LlmCorrection.last_seen.desc())
+        .limit(max(limit * 3, limit))
+    ).scalars().all()
+    if not rows:
+        return ""
+
+    lines: list[str] = []
+    used = 0
+    for row in rows[:limit]:
+        before = _VERDICT_LABELS.get(row.before, row.before)
+        after = _VERDICT_LABELS.get(row.after, row.after)
+        context = _short(row.context, context_chars)
+        line = f"- 人工把「{before}」纠正为「{after}」"
+        if context:
+            line += f"：{context}"
+        line += f"（人工纠正 {row.hit_count} 次）"
         if used + len(line) > max_chars:
             break
         lines.append(line)
