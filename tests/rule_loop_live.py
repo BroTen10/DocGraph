@@ -5,8 +5,9 @@
 做法是同一段规则文本的 A/B 对照（除"账本里有没有人工修正"外，其余输入完全相同）：
 
   1. 第一次解析 → 记录模型自然给出的 check_category（C_model）；
-  2. 模拟人工修正：把该类规则的 check_category 改成另一个类别（C_human，≠ C_model），
-     写进修正账本（真实场景由 PUT /api/rules/{id} 自动记账）；
+  2. **走真实入口**做人工修正：rule_service.update_rule（即 PUT /api/rules/{id} 的服务层）
+     把该类规则的 check_category 改成另一个类别（C_human，≠ C_model）——账本由钩子自动记录，
+     脚本不直接写账本，保证验证的是真实链路；
   3. 第二次解析同一段文本 → 断言模型给出的类别变成 C_human；
   4. 清理临时规则集与账本行。
 
@@ -33,7 +34,8 @@ from sqlalchemy import delete, select  # noqa: E402
 
 from app.database import SessionLocal, bind_tenant  # noqa: E402
 from app.models import LlmCorrection, Rule, RuleSet, Tenant  # noqa: E402
-from app.services import correction_ledger  # noqa: E402
+from app.schemas.rule import RuleUpdate  # noqa: E402
+from app.services import correction_ledger, rule_service  # noqa: E402
 from app.services.rule_import_service import import_rules_from_text  # noqa: E402
 
 RULE_TEXT = "发票价税合计应等于报销单报销金额，金额不一致时视为不通过。"
@@ -92,20 +94,17 @@ def main() -> int:
         c_human = next(
             (c for c in CORRECTION_CANDIDATES if c != c_model), CORRECTION_CANDIDATES[0]
         )
-        print(f"② 模拟人工修正：check_category {c_model!r} → {c_human!r}（写进修正账本）")
-        correction_ledger.record_correction(
+        target_rule = db.execute(
+            select(Rule).where(Rule.rule_set_id == rule_set.id).order_by(Rule.rule_no.desc())
+        ).scalars().first()
+        print(f"② 人工修正（走 rule_service.update_rule，与 PUT /api/rules/{{id}} 同路径）："
+              f"check_category {c_model!r} → {c_human!r}")
+        rule_service.update_rule(
             db,
             tenant_id,
-            scope="rule_edit",
-            field="check_category",
-            before=c_model,
-            after=c_human,
-            rule_set_id=rule_set.id,
-            target_type="rule",
-            context=RULE_TEXT,
-            note="rule_loop_live 模拟人工修正",
+            target_rule.id,
+            RuleUpdate(check_category=c_human),
         )
-        db.commit()
         digest = correction_ledger.corrections_digest(db, tenant_id, rule_set.id)
         print("   回灌清单：" + digest.replace("\n", " | "))
 
